@@ -1,0 +1,72 @@
+{
+  "name": "openclaw-jarvis-gilfoyle",
+  "version": "2.0.0",
+  "description": "Role-configurable product and engineering project coordination for OpenClaw",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "openclaw.plugin.json",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run build && node --check dist/index.js && node --check dist/runtime.js && node --check dist/store.js && node --check dist/rpc-bridge.js && node --check dist/topology.js",
+    "prepare": "npm run build",
+    "pretest": "npm run build",
+    "test": "npm run test:source && npm run test:dist",
+    "test:source": "node --import tsx --test advisory-args.test.mjs card-creation.test.mjs native-operation.test.mjs github-evidence.test.mjs workboard-view.test.mjs workboard-page.test.mjs runtime.test.mjs topology.test.mjs",
+    "test:dist": "node --test dist-smoke.test.mjs",
+    "prepack": "npm run check && npm test"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "project-management",
+    "agent-orchestration"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ag14774/openclaw-jarvis-gilfoyle.git"
+  },
+  "homepage": "https://github.com/ag14774/openclaw-jarvis-gilfoyle#readme",
+  "bugs": {
+    "url": "https://github.com/ag14774/openclaw-jarvis-gilfoyle/issues"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "peerDependencies": {
+    "openclaw": "2026.9.2"
+  },
+  "devDependencies": {
+    "openclaw": "2026.9.2",
+    "tsx": "4.23.13",
+    "typescript": "5.9.2"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.9.2"
+    },
+    "build": {
+      "openclawVersion": "2026.9.2",
+      "pluginSdkVersion": "2026.9.2"
+    },
+    "install": {
+      "minHostVersion": ">=2026.9.2"
+    }
+  }
+}
