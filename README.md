@@ -73,9 +73,9 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
             "agentId": "opencode",
             "runtime": "acp",
             "profiles": [
-              {"id": "routine", "model": "openai/gpt-5.6-sol", "thinking": "medium", "description": "Routine bounded implementation and inspection."},
-              {"id": "deep", "model": "openai/gpt-5.6-sol", "thinking": "high", "description": "Complex implementation, debugging, and independent review."},
-              {"id": "expert", "model": "openai/gpt-6-astra", "thinking": "low", "description": "Unusually difficult architecture, security, or diagnosis."}
+              {"id": "sol-low", "model": "openai/gpt-5.6-sol", "thinking": "low", "description": "Routine bounded implementation, inspection, and straightforward tests."},
+              {"id": "sol-medium", "model": "openai/gpt-5.6-sol", "thinking": "medium", "description": "Complex implementation, debugging, and independent review."},
+              {"id": "astra-low", "model": "openai/gpt-6-astra", "thinking": "low", "description": "Unusually difficult architecture, security, or diagnosis."}
             ]
           }
         }
