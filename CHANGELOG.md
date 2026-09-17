@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.0 - 2026-09-17
+
+- Replaced configured opaque conversation references with native fallback destinations.
+- Added exact address resolution by channel, account, recipient, kind, and optional thread.
+- Refreshes the current conversation reference before every fallback send.
+- Fails closed without sending when a fallback address is missing or ambiguous.
+
 ## 2.1.0 - 2026-09-17
 
 - Replaced separate worker/advisor model settings with 1–5 ordered worker profiles.

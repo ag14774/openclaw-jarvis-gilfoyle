@@ -11,13 +11,18 @@ import {topology,isProjectSessionKey,roleForAgent,agentForRole} from './topology
 const sourcePart=value=>String(value).replace(/[^A-Za-z0-9._:@+-]+/g,s=>encodeURIComponent(s).replace(/[!'()*]/g,c=>`%${c.charCodeAt(0).toString(16).toUpperCase()}`));
 export const sourceString=r=>`channel=${sourcePart(r.channel)};account=${sourcePart(r.accountId)};recipient=${sourcePart(r.target)};thread=${sourcePart(r.threadId??'none')}`;
 export const isProjectSession=isProjectSessionKey;
+const fallbackDestination=value=>{assert(value&&typeof value==='object'&&!Array.isArray(value));const keys=Object.keys(value).sort().join(',');assert(['accountId,channel,kind,to','accountId,channel,kind,threadId,to'].includes(keys),'Invalid fallback destination fields');assert(value.kind==='direct','Fallback destination must be direct');return {channel:text(value.channel,60),accountId:text(value.accountId,100),to:text(value.to,240),kind:'direct',...(value.threadId?{threadId:String(value.threadId)}:{})};};
 const type=c=>/^Type: ([a-z-]+)$/mi.exec(c.notes??'')?.[1];
 const field=(c,n)=>new RegExp(`^${n}: (.+)$`,'m').exec(c.notes??'')?.[1];
 const quiet=new Set(['settled','held','awaiting-product-answer','handoff-waiting-answer','running','queued','children-wait','dependency-wait','parent-wait','capacity-wait','hosted-ci-wait']);
 export const orderReady=requests=>[...requests].sort((a,b)=>Number(b.ownsClaim)-Number(a.ownsClaim)||(b.project.priority??0)-(a.project.priority??0)||b.priority-a.priority||a.created-b.created||a.feature.localeCompare(b.feature));
 export class ProjectRuntime {
-  constructor(store,rpc,{fallback={},now=()=>Date.now(),log=()=>{}}={}){this.store=store;this.rpc=rpc;this.fallback=fallback;this.now=now;this.log=log;this.busy=false;this.running=new Set();this.roleAdmission=new Set();this.stopped=false;this.health={lastScan:null,lastDispatchFailure:null};}
-  async conversations(agentId,query){const r=await this.rpc('conversations.list',{agentId,...(query?{query}:{}),limit:100});assert(Array.isArray(r.conversations)&&r.conversations.length<100,'Conversation discovery incomplete; narrow the query');return r.conversations;}
+  constructor(store,rpc,{fallbackDestinations={},now=()=>Date.now(),log=()=>{}}={}){this.store=store;this.rpc=rpc;this.fallbackDestinations=Object.fromEntries(Object.entries(fallbackDestinations).map(([role,value])=>{assert(['product','engineering'].includes(role),'Invalid fallback role');return [role,fallbackDestination(value)];}));this.now=now;this.log=log;this.busy=false;this.running=new Set();this.roleAdmission=new Set();this.stopped=false;this.health={lastScan:null,lastDispatchFailure:null};}
+  async conversations(agentId,query,channel){const r=await this.rpc('conversations.list',{agentId,...(query?{query}:{}),...(channel?{channel}:{}),limit:100});assert(Array.isArray(r.conversations)&&r.conversations.length<100,'Conversation discovery incomplete; narrow the query');return r.conversations;}
+  async fallbackRoute(managerRole){
+    const destination=this.fallbackDestinations[managerRole];assert(destination,'Fallback destination is not configured');const routes=await this.conversations(agentForRole(managerRole),destination.to,destination.channel);
+    const matches=routes.filter(route=>route.channel===destination.channel&&route.accountId===destination.accountId&&route.target===destination.to&&route.kind===destination.kind&&String(route.threadId??'')===String(destination.threadId??''));assert.equal(matches.length,1,'Fallback destination is unavailable or ambiguous');return conversation(matches[0]);
+  }
   async route(agentId,ref){const routes=await this.conversations(agentId,ref);const found=routes.filter(r=>r.conversationRef===ref);assert.equal(found.length,1,'Conversation not available for this manager');return conversation(found[0]);}
   visibleContext(agentId,ref){
     const managerRole=roleForAgent(agentId);assert(managerRole,'Manager role required');
@@ -128,8 +133,7 @@ export class ProjectRuntime {
       assert(agentId===productAgentId,'Project declaration belongs to the product agent');assert(input.explicit===true,'User must explicitly declare a project');
       const source=ctx.operator&&input.source?input.source:await this.current(ctx);assert(source.messageId,'Actual declaration message identity required');
       const r=input.conversationRef?await this.route(productAgentId,input.conversationRef):source.route;
-      const productFallback=await this.route(productAgentId,this.fallback.product??r.conversationRef);assert(productFallback.kind==='direct','Product fallback must be an owner direct conversation');
-      const engineeringFallback=this.fallback.engineering?await this.route(engineeringAgentId,this.fallback.engineering):null;if(engineeringFallback)assert(engineeringFallback.kind==='direct','Engineering fallback must be an owner direct conversation');
+      const productFallback=await this.fallbackRoute('product'),engineeringFallback=await this.fallbackRoute('engineering');
       const created=this.store.declare({key:hash([source.route,source.messageId]),name:input.name,purpose:input.purpose,route:r,productFallback,engineeringFallback});
       return this.summary(created.id);
     }
@@ -295,9 +299,8 @@ export class ProjectRuntime {
     if(attempts<3)return;
     const p=this.store.project(d.project);
     if(d.kind==='fallback'){this.log('Owner fallback is unavailable; delivery remains durable');return;}
-    let route=d.role==='product'?p.productFallback:p.engineeringFallback;
-    if(!route&&this.fallback[d.role]){route=await this.route(agentForRole(d.role),this.fallback[d.role]);assert(route.kind==='direct','Configured fallback must be an owner direct conversation');const column=d.role==='product'?'product_fallback':'engineering_fallback';this.store.run(`UPDATE projects SET ${column}=? WHERE id=?`,JSON.stringify(route),p.id);}
-    if(!route){this.log('Role fallback is not configured; delivery remains durable');return;}
+    let route;try{route=await this.fallbackRoute(d.role);}catch{this.log('Role fallback is unavailable or ambiguous; delivery remains durable');return;}
+    const column=d.role==='product'?'product_fallback':'engineering_fallback';this.store.run(`UPDATE projects SET ${column}=? WHERE id=?`,JSON.stringify(route),p.id);
     const fallback=this.store.enqueue({project:p.id,event:`fallback:${d.id}`,kind:'fallback',managerRole:d.role,message:`I could not confirm delivery to the preferred conversation for ${p.name} after bounded checks. Its binding has not changed. ${d.kind==='question'?'A project question is waiting.': 'A project update is waiting.'}\n\n${d.text}`,route});
     await this.deliver(fallback);const sent=this.store.get('SELECT status FROM deliveries WHERE id=?',fallback.id);if(sent.status==='sent'){this.store.run("UPDATE deliveries SET status='fallback-sent' WHERE id=?",d.id);await this.processCopies(d).catch(()=>this.log('Additional notification remains pending after fallback'));}
   }

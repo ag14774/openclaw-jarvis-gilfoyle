@@ -40,7 +40,7 @@ Use this to validate the same package boundary used by a registry release:
 ```bash
 npm ci
 npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.1.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.0.tgz --force --accept-capabilities
 ```
 
 The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.
@@ -65,9 +65,9 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
           "engineeringAgentId": "gilfoyle",
           "sessionNamespace": "jarvis-gilfoyle",
           "scanMs": 60000,
-          "fallbackConversations": {
-            "product": "conv_product_owner_dm",
-            "engineering": "conv_engineering_owner_dm"
+          "fallbackDestinations": {
+            "product": {"channel": "telegram", "accountId": "default", "to": "telegram:123456789", "kind": "direct"},
+            "engineering": {"channel": "telegram", "accountId": "gilfoyle", "to": "telegram:123456789", "kind": "direct"}
           },
           "worker": {
             "agentId": "opencode",
@@ -88,6 +88,8 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
 Grant `jarvis_project` and `gilfoyle_engineering` to both configured manager agents. The plugin enforces their different authorities internally.
 
 Worker profiles are ordered from lowest to highest capability and are limited to five. Gilfoyle selects the lowest adequate `profileId` during `prepare`; arbitrary model overrides are rejected. Each attempt retains its concrete profile ID, model, and thinking level, so later configuration changes do not rewrite execution evidence.
+
+Fallback destinations use OpenClaw's native `channel`/`accountId`/`to` address format, with optional `threadId`. The plugin requires direct destinations, rediscovers one exact current conversation reference before every fallback send, and fails closed when the address is unavailable or ambiguous. Opaque `conversationRef` values do not belong in static configuration.
 
 The managed install record locates the package. Do not also add the same checkout to `plugins.load.paths`. For an unmanaged development load instead, omit `plugins install` and set `plugins.load.paths` to the repository path.
 

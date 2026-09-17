@@ -22,7 +22,7 @@ export default {
     const configured=topology();
     let store,runtime,timer;const bridge=new Bridge();
     const get=()=>{
-      if(!runtime){assert(typeof cfg.statePath==='string'&&(cfg.statePath.startsWith('/')||cfg.statePath===':memory:'),'Absolute statePath is required');store=new Store(cfg.statePath);runtime=new ProjectRuntime(store,(method,params)=>bridge.request(method,params),{fallback:cfg.fallbackConversations??{},log:message=>api.logger.warn(message)});runtime.stopped=cfg.enabled===false;}
+      if(!runtime){assert(typeof cfg.statePath==='string'&&(cfg.statePath.startsWith('/')||cfg.statePath===':memory:'),'Absolute statePath is required');store=new Store(cfg.statePath);runtime=new ProjectRuntime(store,(method,params)=>bridge.request(method,params),{fallbackDestinations:cfg.fallbackDestinations??{},log:message=>api.logger.warn(message)});runtime.stopped=cfg.enabled===false;}
       return runtime;
     };
     api.registerTool(ctx=>{

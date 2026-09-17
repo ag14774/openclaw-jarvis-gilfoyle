@@ -4,7 +4,7 @@ import {Store} from '../dist/store.js';
 
 const tools=[],methods=[],services=[];
 plugin.register({
-  pluginConfig:{statePath:':memory:',enabled:false,productAgentId:'product',engineeringAgentId:'engineering',sessionNamespace:'project-flow',fallbackConversations:{product:'conv_product',engineering:'conv_engineering'},worker:{agentId:'worker',runtime:'acp',profiles:[{id:'routine',model:'provider/worker',thinking:'medium',description:'Routine work.'}]}},
+  pluginConfig:{statePath:':memory:',enabled:false,productAgentId:'product',engineeringAgentId:'engineering',sessionNamespace:'project-flow',fallbackDestinations:{product:{channel:'test',accountId:'product',to:'test:product-owner',kind:'direct'},engineering:{channel:'test',accountId:'engineering',to:'test:engineering-owner',kind:'direct'}},worker:{agentId:'worker',runtime:'acp',profiles:[{id:'routine',model:'provider/worker',thinking:'medium',description:'Routine work.'}]}},
   logger:{warn(){}},registerTool(factory,options){tools.push(options.name);},registerGatewayMethod(name){methods.push(name);},registerService(service){services.push(service.id);},on(){},
 });
 assert.deepEqual(tools,['jarvis_project','gilfoyle_engineering']);assert.deepEqual(methods,['jarvis-gilfoyle.projects.call','jarvis-gilfoyle.projects.guard','jarvis-gilfoyle.projects.tick','jarvis-gilfoyle.projects.health']);assert.deepEqual(services,['jarvis-gilfoyle-project-recovery']);
