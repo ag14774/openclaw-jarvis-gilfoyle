@@ -9,7 +9,7 @@ function item(n = 2) {
   return { id: id(n), status: 'todo', updatedAt: 1, agentId: 'gilfoyle', notes: `Type: work item\nFeature: ${parent.id}\nRequires Work items: none`, metadata: { automation: { boardId: 'project', tenant: parent.id } } };
 }
 function delegate(c) {
-  c.notes += `\n<!-- current-attempt -->\nDelegated attempt: ${c.id}-a1\nTask name: wi-example-a1\nTask ID: ${id(10)}\nRun ID: ${id(11)}\nChild session: agent:opencode:acp:${id(12)}\nWrapper task ID: ${id(13)}\nTimeout seconds: 1800\nBackend: acpx\n<!-- /current-attempt -->`;
+  c.notes += `\n<!-- current-attempt -->\nDelegated attempt: ${c.id}-a1\nTask name: wi-example-a1\nProfile ID: deep\nModel: openai/gpt-5.6-sol\nThinking: high\nTask ID: ${id(10)}\nRun ID: ${id(11)}\nChild session: agent:opencode:acp:${id(12)}\nWrapper task ID: ${id(13)}\nTimeout seconds: 1800\nBackend: acpx\n<!-- /current-attempt -->`;
   return c;
 }
 function evidence(status = 'running') {
@@ -155,7 +155,7 @@ test('the 64 current-task reference bound remains separate from the 96-row page 
   assert.deepEqual(calls, ['workboard.cards.list']);
 });
 
-test('two live children including an advisor suppress refill wakes but preserve the queue', () => {
+test('two live children including a manager subagent suppress refill wakes but preserve the queue', () => {
   const c = delegate(item()), next = item(3), ev = evidence();
   ev.tasks.push({ taskId: id(99), runId: id(98), childSessionKey: `agent:main:subagent:${id(97)}`, runtime: 'subagent', status: 'running' });
   const r = response([parent, c, next]);

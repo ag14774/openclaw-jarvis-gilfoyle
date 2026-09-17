@@ -8,18 +8,17 @@ import {operate} from './helpers/native-operation.js';
 import {finishReport} from './helpers/finish-report.js';
 import {handoffCard,handoffError} from './helpers/handoff-card.js';
 import {readView} from './helpers/workboard-page.js';
-import {advisoryArgs} from './helpers/advisory-args.js';
 import {delegationError} from './helpers/record-delegation.js';
-import {configureTopology,topology,isManagerAgent} from './topology.js';
+import {configureTopology,topology,isManagerAgent,workerProfiles} from './topology.js';
 
 const inputSchema={type:'object',properties:{operation:{type:'string',enum:['list','conversations','current','visible-context','summary','inventory','declare','move','context','priority','associate','intake','notify','milestone-decision','delivery','also-notify','question-delivery','answer','schedule','schedule-disable','inactivate','reactivate','recover','conclude']},input:{type:'object',additionalProperties:true}},required:['operation','input'],additionalProperties:false};
-const engineeringOperations=['work-item','review','stop','exceptional-intervention','prepare','record','publish-gate','gate','finish','finish-report','handoff','handoff-product-decision','handoff-apply','handoff-resolve-internal','workboard-query','advisory'];
+const engineeringOperations=['work-item','review','stop','exceptional-intervention','profiles','prepare','record','publish-gate','gate','finish','finish-report','handoff','handoff-product-decision','handoff-apply','handoff-resolve-internal','workboard-query'];
 const engineeringSchema={type:'object',properties:{operation:{type:'string',enum:engineeringOperations},input:{type:'object',additionalProperties:true}},required:['operation'],additionalProperties:false};
 export default {
   id:'jarvis-gilfoyle',name:'Jarvis-Gilfoyle project runtime',
   register(api){
     const cfg=api.pluginConfig??{};
-    configureTopology({productAgentId:cfg.productAgentId,engineeringAgentId:cfg.engineeringAgentId,workerAgentId:cfg.workerAgentId,workerRuntime:cfg.worker?.runtime,sessionNamespace:cfg.sessionNamespace,workerModel:cfg.worker?.model,workerThinking:cfg.worker?.thinking,advisorModel:cfg.advisor?.model,advisorThinking:cfg.advisor?.thinking,advisorTimeoutSeconds:cfg.advisor?.timeoutSeconds});
+    configureTopology({productAgentId:cfg.productAgentId,engineeringAgentId:cfg.engineeringAgentId,workerAgentId:cfg.worker?.agentId,workerRuntime:cfg.worker?.runtime,workerProfiles:cfg.worker?.profiles,sessionNamespace:cfg.sessionNamespace});
     const configured=topology();
     let store,runtime,timer;const bridge=new Bridge();
     const get=()=>{
@@ -33,7 +32,7 @@ export default {
     },{name:'jarvis_project'});
     api.registerTool(ctx=>{
       if(!isManagerAgent(ctx.agentId))return null;
-      return {name:'gilfoyle_engineering',label:'Project engineering records',description:'Validated Workboard record creation, delegation binding, handoffs, evidence queries, publication gates, read-only report closure, and advisory launch arguments. Available only inside a registered project context. It performs bookkeeping and validation; it never spawns workers, sends user messages, pushes, creates pull requests, merges, or deploys.',parameters:engineeringSchema,
+      return {name:'gilfoyle_engineering',label:'Project engineering records',description:'Validated Workboard record creation, configured worker profiles, delegation binding, handoffs, evidence queries, publication gates, and read-only report closure. Available only inside a registered project context. It performs bookkeeping and validation; it never spawns workers, sends user messages, pushes, creates pull requests, merges, or deploys.',parameters:engineeringSchema,
         async execute(_id,args){
           const r=get(),exchange=isProjectSession(ctx.sessionKey)?r.store.get('SELECT * FROM exchanges WHERE session=?',ctx.sessionKey):null;
           const fail=value=>({content:[{type:'text',text:JSON.stringify(value)}],details:value,isError:true});
@@ -48,11 +47,11 @@ export default {
             const rpc=async(method,params)=>{assert(++calls<=64,'Engineering operation call budget exceeded');const value=await bridge.request(method,params);bytes+=Buffer.byteLength(JSON.stringify(value));assert(bytes<=24*1024*1024,'Engineering operation read budget exceeded');return value;};
             let result;
             if(['work-item','review','stop','exceptional-intervention'].includes(operation))result=await createProductCard(operation,input,rpc);
+            else if(operation==='profiles')result={profiles:workerProfiles()};
             else if(['prepare','record','publish-gate','gate','finish'].includes(operation))result=await operate(operation,input,rpc);
             else if(operation==='finish-report')result=await finishReport(input,rpc);
             else if(['handoff','handoff-product-decision','handoff-apply','handoff-resolve-internal'].includes(operation))result=await handoffCard(operation,{...input,actor:ctx.sessionKey},rpc);
             else if(operation==='workboard-query')result=await readView(input,rpc);
-            else if(operation==='advisory')result=advisoryArgs();
             else throw Error('Unsupported engineering operation');
             assert(Buffer.byteLength(JSON.stringify(result))<=12000,'Engineering operation output exceeds bound');
             return {content:[{type:'text',text:JSON.stringify(result)}],details:result};

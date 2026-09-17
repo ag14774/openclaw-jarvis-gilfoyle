@@ -8,7 +8,7 @@ import { assertNoNativeCardLinks, controllerKey, projectIdentity, currentAttempt
 import { githubEvidence, hostedCandidate, hostedSpec } from './github-evidence.js';
 import { handoffCard, settledWorkers, assertCommentCapacity } from './handoff-card.js';
 import { assertCanonicalReviewCard, ensureCreatedCard, sealCreationPayload } from './create-card.js';
-import { topology } from '../topology.js';
+import { topology,workerProfile } from '../topology.js';
 
 const uuid = value => typeof value === 'string' && value.length === 36 && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 const sha = value => typeof value === 'string' && value.length === 40 && /^[0-9a-f]{40}$/.test(value);
@@ -28,7 +28,7 @@ function owned(c, claimed) {
 }
 function block(c, p, refs = {}) {
   const unknown = 'unresolved acceptance';
-  return `<!-- current-attempt -->\nDelegated attempt: ${c.id}-a${p.attempt}\nTask name: ${p.taskName}\nTask ID: ${refs.taskId ?? unknown}\nRun ID: ${refs.runId ?? unknown}\nChild session: ${refs.childSessionKey ?? unknown}\nWrapper task ID: ${refs.wrapperTaskId ?? unknown}\nTimeout seconds: ${p.timeoutSeconds}\nBackend: acpx\nAcceptance comment ID: ${refs.commentId ?? unknown}\n<!-- /current-attempt -->`;
+  return `<!-- current-attempt -->\nDelegated attempt: ${c.id}-a${p.attempt}\nTask name: ${p.taskName}\nProfile ID: ${p.profileId}\nModel: ${p.model}\nThinking: ${p.thinking}\nTask ID: ${refs.taskId ?? unknown}\nRun ID: ${refs.runId ?? unknown}\nChild session: ${refs.childSessionKey ?? unknown}\nWrapper task ID: ${refs.wrapperTaskId ?? unknown}\nTimeout seconds: ${p.timeoutSeconds}\nBackend: acpx\nAcceptance comment ID: ${refs.commentId ?? unknown}\n<!-- /current-attempt -->`;
 }
 function plan(p) {
   assert(Number.isInteger(p.attempt) && p.attempt >= 1 && p.attempt <= 999999 && typeof p.taskName === 'string' && p.taskName.trim() === p.taskName && /^[a-z][a-z0-9_-]{0,63}$/.test(p.taskName) && !['all','last'].includes(p.taskName));
@@ -45,10 +45,10 @@ function canonicalReviewCandidate(c, parent, cards) {
   return {candidate,scope};
 }
 function spawnArguments(c, p, review) {
-  const { workerAgentId, workerRuntime, workerModel, workerThinking } = topology();
+  const { workerAgentId, workerRuntime } = topology(),profile=p.model?{id:p.profileId,model:p.model,thinking:p.thinking}:workerProfile(p.profileId);
   const taskPrefix = `Work item: ${c.id}\nTask name: ${p.taskName}\n${review ? `Assignment: independent-review\nCandidate: ${review.candidate}\nScope: ${review.scope}\nRead-only review: do not edit files or create commits. Do not use Workboard, send messages, push, merge, or publish.\nInspect only this exact candidate checkout and verify HEAD is ${review.candidate} before and after review.\nRun the repository checks required by Scope. Report prioritized findings with file references; report no findings explicitly when applicable.\nVerify HEAD and the working tree are unchanged before completing.\n` : ''}${p.remaining ? `Remaining assignment: ${p.remaining}\n` : ''}`;
-  const spawnArgs = { runtime: workerRuntime, agentId: workerAgentId, mode: 'run', cwd: p.worktree, taskName: p.taskName, model: workerModel, thinking: workerThinking, runTimeoutSeconds: p.timeoutSeconds, cleanup: 'keep', expectsCompletionMessage: true, ...(review ? {task:taskPrefix} : {}) };
-  return { spawnArgs, taskPrefix, ...(review ? {reviewProof:{status:'passed',label:'Independent review',notePrefix:`Candidate: ${review.candidate}`}} : {}) };
+  const spawnArgs = { runtime: workerRuntime, agentId: workerAgentId, mode: 'run', cwd: p.worktree, taskName: p.taskName, model: profile.model, thinking: profile.thinking, runTimeoutSeconds: p.timeoutSeconds, cleanup: 'keep', expectsCompletionMessage: true, ...(review ? {task:taskPrefix} : {}) };
+  return { profile:{id:profile.id,model:profile.model,thinking:profile.thinking},spawnArgs, taskPrefix, ...(review ? {reviewProof:{status:'passed',label:'Independent review',notePrefix:`Candidate: ${review.candidate}`}} : {}) };
 }
 
 function inspectReviewWorktree(info, p, review, git) {
@@ -76,10 +76,10 @@ const withoutOneFinalLf = value => typeof value === 'string' && value.endsWith('
 
 // One bounded operation per invocation. No worker launch, publishing, messaging or separate ledger.
 export async function operate(operation, p, rpc, git = (cwd, args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 10000 }).trim(), githubRequest) {
-  const { productAgentId, engineeringAgentId, workerAgentId, workerRuntime, workerModel, workerThinking } = topology();
+  const { productAgentId, engineeringAgentId, workerAgentId, workerRuntime } = topology();
   if (operation.startsWith('handoff')) return handoffCard(operation, p, rpc);
   assert(p && typeof p === 'object' && !Array.isArray(p));
-  const fields = operation === 'prepare' ? ['boardId','id','attempt','taskName','timeoutSeconds','baseSha','worktree','branch','replaces','inspectedHead','remaining','reconciliation'] :
+  const fields = operation === 'prepare' ? ['boardId','id','attempt','taskName','profileId','timeoutSeconds','baseSha','worktree','branch','replaces','inspectedHead','remaining','reconciliation'] :
     operation === 'record' ? ['boardId','id','runId','childSessionKey','taskId','wrapperTaskId','attempt','taskName','timeoutSeconds','baseSha','worktree','branch'] :
     ['boardId','id','sha','reviewId','summary','hosted'];
   assert(Object.keys(p).every(k => fields.includes(k)), 'Unknown operation input');
@@ -140,6 +140,7 @@ export async function operate(operation, p, rpc, git = (cwd, args) => execFileSy
     if (operation === 'prepare') {
       owned(c, false); assert.equal(c.status, 'todo');
       plan(p);
+      const selected=workerProfile(p.profileId);p={...p,profileId:selected.id,model:selected.model,thinking:selected.thinking};
       if (review) inspectReviewWorktree(state.info, p, review, git);
       if (p.attempt > 1) {
         assert.equal(p.taskName,`wi-${c.id}-a${p.attempt}`,'Replacement task name must use the unique card/attempt identity');
@@ -149,7 +150,7 @@ export async function operate(operation, p, rpc, git = (cwd, args) => execFileSy
         assert(old && !old.uncertain, 'Prior attempt must reconcile');
         const archives = reconciledAttempts(c);
         const existing = archives.find(a => a.next.attempt === p.attempt);
-        const next = Object.fromEntries(['attempt','taskName','timeoutSeconds','baseSha','worktree','branch','replaces','inspectedHead','remaining','reconciliation'].map(k => [k,k === 'replaces' ? Object.fromEntries(['attempt','taskId','wrapperTaskId','runId','childSessionKey','commentId'].map(name => [name,p.replaces[name]])) : p[k]]));
+        const next = Object.fromEntries(['attempt','taskName','profileId','model','thinking','timeoutSeconds','baseSha','worktree','branch','replaces','inspectedHead','remaining','reconciliation'].map(k => [k,k === 'replaces' ? Object.fromEntries(['attempt','taskId','wrapperTaskId','runId','childSessionKey','commentId'].map(name => [name,p.replaces[name]])) : p[k]]));
         if (existing) assert.deepEqual(existing.next,next, 'Conflicting replacement preparation');
         const reused = old.attempt === `${c.id}-a${p.attempt}`;
         assert(!reused || (existing && !old.taskId && !old.wrapperTaskId && !old.runId && !old.childSessionKey), 'Current attempt already accepted or uncertain; never respawn');
@@ -161,7 +162,7 @@ export async function operate(operation, p, rpc, git = (cwd, args) => execFileSy
         if (existing) assert.deepEqual(existing.prior,prior, 'Prior archive changed');
         const assignments = [prior,...archives.filter(a => a.next.attempt !== p.attempt).flatMap(a => [a.prior,a.next]),...state.cards.filter(x => x.id !== c.id).map(x => ({taskName:currentAttempt(x)?.taskName,worktree:/^Worktree: (.+)$/m.exec(x.notes ?? '')?.[1],branch:/^Branch: (.+)$/m.exec(x.notes ?? '')?.[1]}))];
         assert(assignments.every(a => a.taskName !== p.taskName && a.worktree !== p.worktree && a.branch !== p.branch), 'Replacement task name, branch and worktree must be new');
-        const priorNotes = `Type: work-item\nFeature: ${parent.id}\nImmutable base: ${prior.baseSha}\nWorktree: ${prior.worktree}\nBranch: ${prior.branch}\n${block(c,{attempt:p.attempt-1,taskName:prior.taskName,timeoutSeconds:prior.timeoutSeconds},prior)}${prior.reconciliationId ? `\nAttempt reconciliation: ${prior.reconciliationId}\nRemaining assignment: ${prior.remaining}` : ''}`;
+        const priorNotes = `Type: work-item\nFeature: ${parent.id}\nImmutable base: ${prior.baseSha}\nWorktree: ${prior.worktree}\nBranch: ${prior.branch}\n${block(c,{attempt:p.attempt-1,taskName:prior.taskName,profileId:prior.profileId,model:prior.model,thinking:prior.thinking,timeoutSeconds:prior.timeoutSeconds},prior)}${prior.reconciliationId ? `\nAttempt reconciliation: ${prior.reconciliationId}\nRemaining assignment: ${prior.remaining}` : ''}`;
         const priorCard = {...c,notes:priorNotes};
         const inspect = () => {
           const common = git(field(state.info.notes,'Checkout'),['rev-parse','--path-format=absolute','--git-common-dir']);
@@ -221,14 +222,14 @@ export async function operate(operation, p, rpc, git = (cwd, args) => execFileSy
       }
       assert(!['replaces','inspectedHead','remaining','reconciliation'].some(k => Object.hasOwn(p,k)), 'Attempt 1 cannot replace an earlier attempt');
       if (old) {
-        assert(!old.uncertain && old.attempt === `${c.id}-a1` && old.taskName === p.taskName && old.timeoutSeconds === p.timeoutSeconds && !old.taskId && !old.runId && !old.childSessionKey, 'Existing attempt must reconcile');
+        assert(!old.uncertain && old.attempt === `${c.id}-a1` && old.taskName === p.taskName && old.profileId===p.profileId&&old.model===p.model&&old.thinking===p.thinking&&old.timeoutSeconds === p.timeoutSeconds && !old.taskId && !old.runId && !old.childSessionKey, 'Existing attempt must reconcile');
         assert.equal(field(c.notes, 'Immutable base'), p.baseSha);
         assert.equal(field(c.notes, 'Worktree'), p.worktree);
         assert.equal(field(c.notes, 'Branch'), p.branch);
         return { id: c.id, status: 'prepared', reused: true, ...spawnArguments(c, p, review) };
       }
       assert(!/^Immutable base:|^Worktree:|^Branch:/m.test(c.notes), 'Do not overwrite preexisting assignment fields');
-      const notes = `${c.notes.trimEnd()}\nImmutable base: ${p.baseSha}\nWorktree: ${p.worktree}\nBranch: ${p.branch}\nModel: ${workerModel}; Thinking: ${workerThinking}\n${block(c, p)}`;
+      const notes = `${c.notes.trimEnd()}\nImmutable base: ${p.baseSha}\nWorktree: ${p.worktree}\nBranch: ${p.branch}\n${block(c, p)}`;
       await rpc('workboard.cards.update', { id: c.id, expectedUpdatedAt: c.updatedAt, patch: { notes } });
       const result = (await read()).card; owned(result, false); assert.equal(result.notes, notes);
       return { id: c.id, status: 'prepared', attempt: `${c.id}-a1`, ...spawnArguments(c, p, review) };
@@ -269,7 +270,7 @@ export async function operate(operation, p, rpc, git = (cwd, args) => execFileSy
       for (const [task,runtime,taskId] of [[backing,workerRuntime,refs.taskId],[wrapper,'subagent',refs.wrapperTaskId]]) {
         assert(task?.taskId === taskId && task.runtime === runtime && task.agentId === workerAgentId && task.runId === p.runId && task.childSessionKey === p.childSessionKey && task.sessionKey === MAIN && task.ownerKey === MAIN, 'Native review task identity required');
       }
-      const expected = spawnArguments(c, { ...p, taskName:old.taskName, remaining:old.reconciliationId ? field(c.notes,'Remaining assignment') : undefined }, review).spawnArgs.task;
+      const expected = spawnArguments(c, { ...p, taskName:old.taskName,profileId:old.profileId,model:old.model,thinking:old.thinking, remaining:old.reconciliationId ? field(c.notes,'Remaining assignment') : undefined }, review).spawnArgs.task;
       assert.equal(withoutOneFinalLf(wrapper.prompt), withoutOneFinalLf(expected), 'Native wrapper prompt must equal the canonical independent review task');
     }
     let prompt = backing?.prompt ?? '';
@@ -318,7 +319,7 @@ export async function operate(operation, p, rpc, git = (cwd, args) => execFileSy
       assert.deepEqual({proof:c.metadata.proof,failureCount:c.metadata.failureCount,automation:c.metadata.automation},blockedReviewEvidence,'Blocked review failure evidence changed');
     }
     else { owned(c, false); assert(c.status === 'todo'); }
-    const replacement = block(c, { attempt: Number(old.attempt.split('-a').at(-1)), taskName: old.taskName, timeoutSeconds: old.timeoutSeconds }, { ...refs, commentId: receipt.id });
+    const replacement = block(c, { attempt: Number(old.attempt.split('-a').at(-1)), taskName: old.taskName,profileId:old.profileId,model:old.model,thinking:old.thinking,timeoutSeconds: old.timeoutSeconds }, { ...refs, commentId: receipt.id });
     const notes = c.notes.replace(/<!-- current-attempt -->[\s\S]*?<!-- \/current-attempt -->/, replacement);
     await rpc('workboard.cards.update', { id: c.id, expectedUpdatedAt: c.updatedAt, patch: { notes } });
     const afterUpdate = await read(), result = afterUpdate.card;

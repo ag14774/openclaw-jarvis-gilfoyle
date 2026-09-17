@@ -65,7 +65,7 @@ function fixture() {
     if (args[0] === 'rev-parse') return sha;
     throw Error('Unexpected Git operation');
   };
-  const prepare = { boardId: 'project', id: id(3), attempt: 1, taskName: 'wi-test-a1', timeoutSeconds: 1800, baseSha: sha, worktree: '/tmp/repo-worktree', branch: 'work-a1' };
+  const prepare = { boardId: 'project', id: id(3), attempt: 1, taskName: 'wi-test-a1', profileId:'deep',timeoutSeconds: 1800, baseSha: sha, worktree: '/tmp/repo-worktree', branch: 'work-a1' };
   const record = { boardId: 'project', id: id(3), runId: id(12), childSessionKey: `agent:opencode:acp:${id(13)}` };
   const finish = { boardId: 'project', id: id(2), sha, reviewId: id(3), summary: 'Requested conditions verified.' };
   const delegate = async () => {
@@ -82,18 +82,24 @@ function fixture() {
 test('prepare/record preserve native identity, release the owner slot and bind the current receipt', async () => {
   const f = fixture(), prepared = await operate('prepare', f.prepare, f.rpc, f.git);
   assert.deepEqual(prepared.taskPrefix, `Work item: ${id(3)}\nTask name: wi-test-a1\n`);
+  assert.deepEqual(prepared.profile,{id:'deep',model:'openai/gpt-5.6-sol',thinking:'high'});assert.equal(prepared.spawnArgs.model,'openai/gpt-5.6-sol');assert.equal(prepared.spawnArgs.thinking,'high');
   assert(!Object.hasOwn(prepared.spawnArgs, 'task'));
   assert(!Object.hasOwn(prepared, 'reviewProof'));
   f.claim(f.cards[2]);
   f.tasks.push(...['acp','subagent'].map((runtime, n) => ({ taskId: id(10+n), runtime, agentId: 'opencode', runId: f.record.runId, childSessionKey: f.record.childSessionKey, sessionKey: 'agent:gilfoyle:main', ownerKey: 'agent:gilfoyle:main', status: 'completed', endedAt: Date.now(), prompt: prepared.taskPrefix })));
   await operate('record', f.record, f.rpc, f.git);
   const c = f.cards[2], a = currentAttempt(c);
-  assert.equal(a.taskId, id(10)); assert.equal(a.wrapperTaskId, id(11)); assert(a.commentId);
+  assert.equal(a.taskId, id(10)); assert.equal(a.wrapperTaskId, id(11)); assert.equal(a.profileId,'deep');assert.equal(a.model,'openai/gpt-5.6-sol');assert.equal(a.thinking,'high');assert(a.commentId);
   assert.equal(c.status, 'todo'); assert(!c.metadata.claim && !c.execution && !c.sessionKey && !c.runId);
   const writes = f.calls.filter(c => !c.method.endsWith('.list') && c.method !== 'tasks.get').length;
   await operate('record', f.record, f.rpc, f.git);
   assert.equal(f.calls.filter(c => !c.method.endsWith('.list') && c.method !== 'tasks.get').length, writes);
   await assert.rejects(operate('record', { ...f.record, runId: id(99) }, f.rpc, f.git), /Immutable/);
+});
+
+test('prepare selects only a configured worker profile',async()=>{
+  const expert=fixture(),prepared=await operate('prepare',{...expert.prepare,profileId:'expert'},expert.rpc,expert.git);assert.deepEqual(prepared.profile,{id:'expert',model:'openai/gpt-6-astra',thinking:'low'});assert.equal(prepared.spawnArgs.model,'openai/gpt-6-astra');
+  const unknown=fixture();await assert.rejects(operate('prepare',{...unknown.prepare,profileId:'missing'},unknown.rpc,unknown.git),/Unknown worker profile/);assert(!unknown.calls.some(call=>call.method==='workboard.cards.update'));
 });
 
 test('conversation-aware delegation binds the exact Feature controller instead of canonical main',async()=>{
@@ -322,7 +328,7 @@ for(const outcome of ['failed','cancelled','completed']) test(`same Work item re
   assert(prepared.taskPrefix.includes(p.remaining)); assert.equal(currentAttempt(c).taskId,undefined);
   assert.equal(classifyCards(f.cards,{available:true,tasks:f.tasks}).get(c.id).stage,'acceptance-uncertain');
   const archive=reconciledAttempts(c)[0]; assert.deepEqual(archive.prior,{...prior,baseSha:f.prepare.baseSha,worktree:f.prepare.worktree,branch:f.prepare.branch});
-  assert.deepEqual(archive.next,p && Object.fromEntries(Object.entries(p).filter(([k])=>!['boardId','id'].includes(k))));
+  assert.deepEqual(archive.next,{...Object.fromEntries(Object.entries(p).filter(([k])=>!['boardId','id'].includes(k))),model:prepared.profile.model,thinking:prepared.profile.thinking});
   assert(c.metadata.comments.some(x=>x.id===prior.commentId)); assert.deepEqual(f.tasks,priorTasks);
   assert.deepEqual(c.metadata.proof,proof); assert.deepEqual(c.metadata.automation,identity); assert.equal(c.metadata.failureCount,3);
   const comments=c.metadata.comments.length;
@@ -938,7 +944,7 @@ for(const surface of ['title','labels','priority','workspace','runtime','retries
 
 test('recovery cannot turn an arbitrary unstarted card into accepted delegation', async () => {
   const f = fixture();
-  await assert.rejects(operate('record', { ...f.prepare, ...f.record }, f.rpc, f.git), /Prepared current attempt/);
+  await assert.rejects(operate('record', f.record, f.rpc, f.git), /Prepared current attempt/);
   assert(!f.calls.some(c => c.method === 'workboard.cards.update'));
 });
 

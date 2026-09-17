@@ -6,9 +6,9 @@ configureTopology({
   workerAgentId:'opencode',
   workerRuntime:'acp',
   sessionNamespace:'jarvis-gilfoyle',
-  workerModel:'openai/gpt-5.6-sol',
-  workerThinking:'high',
-  advisorModel:'openai/gpt-6-astra',
-  advisorThinking:'low',
-  advisorTimeoutSeconds:600,
+  workerProfiles:[
+    {id:'routine',model:'openai/gpt-5.6-sol',thinking:'medium',description:'Routine bounded implementation and inspection.'},
+    {id:'deep',model:'openai/gpt-5.6-sol',thinking:'high',description:'Complex implementation, debugging, and independent review.'},
+    {id:'expert',model:'openai/gpt-6-astra',thinking:'low',description:'Unusually difficult architecture, security, or diagnosis.'},
+  ],
 });

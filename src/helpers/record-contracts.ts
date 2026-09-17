@@ -139,17 +139,17 @@ export function reconciledAttempts(card) {
     if (!UUID.test(comment.id) || comment.body.length > 2000 || Object.keys(archive).sort().join(',') !== 'next,prior') throw Error('Invalid attempt archive');
     const prior = archive.prior, next = archive.next;
     if (!prior || !next || !Number.isInteger(next.attempt) || next.attempt < 2 || next.attempt > 999999 || prior.attempt !== `${card.id}-a${next.attempt - 1}` ||
-        Object.keys(next).sort().join(',') !== 'attempt,baseSha,branch,inspectedHead,reconciliation,remaining,replaces,taskName,timeoutSeconds,worktree' ||
-        Object.keys(prior).some(key => !['attempt','taskName','timeoutSeconds','backend','taskId','runId','childSessionKey','wrapperTaskId','commentId','reconciliationId','baseSha','worktree','branch','remaining'].includes(key))) throw Error('Invalid attempt archive identity');
+        Object.keys(next).sort().join(',') !== 'attempt,baseSha,branch,inspectedHead,model,profileId,reconciliation,remaining,replaces,taskName,thinking,timeoutSeconds,worktree' ||
+        Object.keys(prior).some(key => !['attempt','taskName','profileId','model','thinking','timeoutSeconds','backend','taskId','runId','childSessionKey','wrapperTaskId','commentId','reconciliationId','baseSha','worktree','branch','remaining'].includes(key))) throw Error('Invalid attempt archive identity');
     if (!next.replaces || Object.keys(next.replaces).sort().join(',') !== 'attempt,childSessionKey,commentId,runId,taskId,wrapperTaskId' || next.taskName !== `wi-${card.id}-a${next.attempt}` || !Number.isInteger(next.timeoutSeconds) || next.timeoutSeconds < 1 || next.timeoutSeconds > 1800 ||
         ![prior.baseSha,next.baseSha,next.inspectedHead].every(value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value)) ||
-        ![prior,next].every(value => typeof value.worktree === 'string' && isAbsolute(value.worktree) && typeof value.branch === 'string' && value.branch.trim() && value.branch.length <= 160 && !/[\r\n]/.test(value.worktree + value.branch)) ||
+        ![prior,next].every(value => typeof value.worktree === 'string' && isAbsolute(value.worktree) && typeof value.branch === 'string' && value.branch.trim() && value.branch.length <= 160 && !/[\r\n]/.test(value.worktree + value.branch) && /^[a-z][a-z0-9_-]{0,31}$/.test(value.profileId) && typeof value.model==='string'&&value.model.trim()===value.model&&value.model.length>0&&value.model.length<=160&&['off','minimal','low','medium','high','xhigh','max','ultra'].includes(value.thinking)) ||
         typeof next.remaining !== 'string' || !next.remaining.trim() || next.remaining.length > 240 || typeof next.reconciliation !== 'string' || next.reconciliation.length > 500 || /[\r\n]/.test(next.remaining + next.reconciliation) ||
         !next.reconciliation.includes(next.inspectedHead) || !next.reconciliation.includes(next.remaining) || next.reconciliation.length <= next.inspectedHead.length + next.remaining.length + 12 ||
         (prior.reconciliationId !== undefined && !UUID.test(prior.reconciliationId))) throw Error('Invalid reconciled assignment');
     for (const key of ['attempt','taskId','wrapperTaskId','runId','childSessionKey','commentId']) if (next.replaces?.[key] !== prior[key]) throw Error('Archive replacement mismatch');
     for (const key of ['baseSha','worktree','branch']) if (typeof prior[key] !== 'string' || !prior[key]) throw Error('Missing prior assignment');
-    const notes = `<!-- current-attempt -->\nDelegated attempt: ${prior.attempt}\nTask name: ${prior.taskName}\nTask ID: ${prior.taskId}\nRun ID: ${prior.runId}\nChild session: ${prior.childSessionKey}\nWrapper task ID: ${prior.wrapperTaskId}\nTimeout seconds: ${prior.timeoutSeconds}\nBackend: ${prior.backend}\nAcceptance comment ID: ${prior.commentId}\n<!-- /current-attempt -->`;
+    const notes = `<!-- current-attempt -->\nDelegated attempt: ${prior.attempt}\nTask name: ${prior.taskName}\nProfile ID: ${prior.profileId}\nModel: ${prior.model}\nThinking: ${prior.thinking}\nTask ID: ${prior.taskId}\nRun ID: ${prior.runId}\nChild session: ${prior.childSessionKey}\nWrapper task ID: ${prior.wrapperTaskId}\nTimeout seconds: ${prior.timeoutSeconds}\nBackend: ${prior.backend}\nAcceptance comment ID: ${prior.commentId}\n<!-- /current-attempt -->`;
     const receipts = (card.metadata?.comments ?? []).filter(value => value.id === prior.commentId);
     if (receipts.length !== 1) throw Error('Ambiguous prior acceptance');
     const accepted = currentAttempt({...card,notes,events:[],metadata:{comments:receipts}});
@@ -159,7 +159,7 @@ export function reconciledAttempts(card) {
   if (new Set(archives.map(archive => archive.next.attempt)).size !== archives.length) throw Error('Duplicate attempt archive');
   for (const archive of archives) {
     if (archive.prior.reconciliationId) {
-      if (!archives.some(previous => previous.commentId === archive.prior.reconciliationId && previous.next.attempt === archive.next.attempt - 1 && ['baseSha','worktree','branch','remaining','taskName','timeoutSeconds'].every(key => previous.next[key] === archive.prior[key]))) throw Error('Missing archive lineage');
+      if (!archives.some(previous => previous.commentId === archive.prior.reconciliationId && previous.next.attempt === archive.next.attempt - 1 && ['baseSha','worktree','branch','remaining','taskName','profileId','model','thinking','timeoutSeconds'].every(key => previous.next[key] === archive.prior[key]))) throw Error('Missing archive lineage');
     } else if (archives.some(previous => previous.next.attempt < archive.next.attempt)) throw Error('Missing archive lineage');
   }
   return archives;
@@ -173,14 +173,14 @@ export function currentAttempt(card) {
     return /attempt|task[ -]?id|run[ -]?id|child[ -]?session|task name/i.test(notes + history) ? {uncertain:true} : null;
   }
   if (parts.length !== 2 || parts[1].split(end).length !== 2 || parts[0].includes(end)) return {uncertain:true};
-  const fields = {}, allowed = ['Delegated attempt','Task name','Task ID','Run ID','Child session','Wrapper task ID','Timeout seconds','Backend','Acceptance comment ID'];
+  const fields = {}, allowed = ['Delegated attempt','Task name','Profile ID','Model','Thinking','Task ID','Run ID','Child session','Wrapper task ID','Timeout seconds','Backend','Acceptance comment ID'];
   for (const line of parts[1].split(end)[0].trim().split('\n')) {
     const split = line.indexOf(': '), key = line.slice(0,split), value = line.slice(split + 2);
     if (split < 0 || !allowed.includes(key) || Object.hasOwn(fields,key)) return {uncertain:true};
     fields[key] = value;
   }
-  if (!allowed.slice(0,8).every(key => Object.hasOwn(fields,key)) || !new RegExp(`^${card.id}-a[1-9][0-9]{0,5}$`).test(fields['Delegated attempt']) || !/^[a-z][a-z0-9_-]{0,63}$/.test(fields['Task name']) || fields.Backend !== 'acpx' || !/^[1-9][0-9]{0,3}$/.test(fields['Timeout seconds']) || Number(fields['Timeout seconds']) > 1800) return {uncertain:true};
-  const result = {attempt:fields['Delegated attempt'],taskName:fields['Task name'],timeoutSeconds:Number(fields['Timeout seconds']),backend:'acpx'};
+  if (!allowed.slice(0,11).every(key => Object.hasOwn(fields,key)) || !new RegExp(`^${card.id}-a[1-9][0-9]{0,5}$`).test(fields['Delegated attempt']) || !/^[a-z][a-z0-9_-]{0,63}$/.test(fields['Task name']) || !/^[a-z][a-z0-9_-]{0,31}$/.test(fields['Profile ID']) || !fields.Model?.trim() || fields.Model.length>160 || !['off','minimal','low','medium','high','xhigh','max','ultra'].includes(fields.Thinking) || fields.Backend !== 'acpx' || !/^[1-9][0-9]{0,3}$/.test(fields['Timeout seconds']) || Number(fields['Timeout seconds']) > 1800) return {uncertain:true};
+  const result = {attempt:fields['Delegated attempt'],taskName:fields['Task name'],profileId:fields['Profile ID'],model:fields.Model,thinking:fields.Thinking,timeoutSeconds:Number(fields['Timeout seconds']),backend:'acpx'};
   for (const [key,name] of [['Task ID','taskId'],['Run ID','runId'],['Wrapper task ID','wrapperTaskId']]) {
     if (fields[key] === 'unresolved acceptance') continue;
     if (!UUID.test(fields[key])) return {uncertain:true};
@@ -199,7 +199,7 @@ export function currentAttempt(card) {
       if (reconciliation.length !== 1) throw Error('Duplicate reconciliation');
       archives = reconciledAttempts(card);
       const archive = archives.find(value => `Attempt reconciliation: ${value.commentId}` === reconciliation[0]);
-      if (!archive || result.attempt !== `${card.id}-a${archive.next.attempt}` || result.taskName !== archive.next.taskName || result.timeoutSeconds !== archive.next.timeoutSeconds) throw Error('Current reconciliation mismatch');
+      if (!archive || result.attempt !== `${card.id}-a${archive.next.attempt}` || result.taskName !== archive.next.taskName || result.profileId!==archive.next.profileId||result.model!==archive.next.model||result.thinking!==archive.next.thinking||result.timeoutSeconds !== archive.next.timeoutSeconds) throw Error('Current reconciliation mismatch');
       for (const [key,name] of [['Immutable base','baseSha'],['Worktree','worktree'],['Branch','branch'],['Remaining assignment','remaining']]) {
         const lines = notes.split('\n').filter(line => line.startsWith(`${key}: `));
         if (lines.length !== 1 || lines[0] !== `${key}: ${archive.next[name]}`) throw Error('Current assignment mismatch');

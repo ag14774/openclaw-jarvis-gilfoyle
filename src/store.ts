@@ -15,34 +15,16 @@ export class Store {
     if(path!==':memory:'){mkdirSync(dirname(path),{recursive:true,mode:0o700});}
     this.db=new DatabaseSync(path);if(path!==':memory:')chmodSync(path,0o600);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
-    const hasProjects=Boolean(this.get("SELECT name FROM sqlite_master WHERE type='table' AND name='projects'")),version=this.get('PRAGMA user_version').user_version;
-    if(hasProjects&&version<2){
-      const columns=new Set(this.all('PRAGMA table_info(projects)').map(c=>c.name));
-      assert(columns.has('jarvis')&&columns.has('gilfoyle'),'Registry v1 columns missing; refuse migration');
-      this.tx(()=>{this.db.exec(`ALTER TABLE projects RENAME COLUMN jarvis TO product_conversation;
-        ALTER TABLE projects RENAME COLUMN gilfoyle TO engineering_conversation;
-        ALTER TABLE projects RENAME COLUMN fallback TO product_fallback;
-        ALTER TABLE projects ADD COLUMN engineering_fallback TEXT;
-        UPDATE deliveries SET role='product' WHERE role='main';
-        UPDATE deliveries SET role='engineering' WHERE role='gilfoyle';
-        UPDATE copies SET role='product' WHERE role='main';
-        UPDATE copies SET role='engineering' WHERE role='gilfoyle';
-        UPDATE exchanges SET role='product' WHERE role='main';
-        UPDATE exchanges SET role='engineering' WHERE role='gilfoyle';`);
-        for(const exchange of this.all('SELECT id,role,scope FROM exchanges'))this.run('UPDATE exchanges SET session=? WHERE id=?',projectSessionKey(exchange.role,exchange.scope),exchange.id);
-        this.db.exec('PRAGMA user_version=2;');
-      });
-    }
+    const version=this.get('PRAGMA user_version').user_version;assert(version===0||version===2,'Unsupported registry schema; create a fresh v2 registry');
     this.db.exec(`CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,purpose TEXT NOT NULL,context TEXT NOT NULL DEFAULT '',state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','draining','inactive')),priority INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,created INTEGER NOT NULL,product_conversation TEXT NOT NULL,engineering_conversation TEXT,product_fallback TEXT NOT NULL,engineering_fallback TEXT);
       CREATE TABLE IF NOT EXISTS boards(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),repository TEXT);
       CREATE TABLE IF NOT EXISTS receipts(key TEXT PRIMARY KEY,input TEXT NOT NULL,result TEXT NOT NULL,created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,kind TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL,route TEXT,status TEXT NOT NULL DEFAULT 'pending',due INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,receipt TEXT,error TEXT,created INTEGER NOT NULL,UNIQUE(project,event,role));
-      CREATE TABLE IF NOT EXISTS copies(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,role TEXT NOT NULL,route TEXT NOT NULL,consumed TEXT,UNIQUE(project,event,role,route));
+      CREATE TABLE IF NOT EXISTS copies(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,role TEXT NOT NULL,route TEXT NOT NULL,consumed TEXT,recurring INTEGER NOT NULL DEFAULT 0,UNIQUE(project,event,role,route));
       CREATE TABLE IF NOT EXISTS exchanges(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),scope TEXT NOT NULL,role TEXT NOT NULL,session TEXT NOT NULL UNIQUE,attempts INTEGER NOT NULL DEFAULT 0,lastDispatch INTEGER NOT NULL DEFAULT 0,runId TEXT,conclusion TEXT,closed INTEGER,observed TEXT,UNIQUE(project,scope,role));
       CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),spec TEXT NOT NULL,next INTEGER NOT NULL,intervalMs INTEGER,enabled INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS sources(session TEXT PRIMARY KEY,source TEXT NOT NULL,updated INTEGER NOT NULL);
       PRAGMA user_version=2;`);
-    if(!this.all('PRAGMA table_info(copies)').some(c=>c.name==='recurring'))this.db.exec('ALTER TABLE copies ADD COLUMN recurring INTEGER NOT NULL DEFAULT 0');
   }
   close(){this.db.close();}
   all(sql,...p){return this.db.prepare(sql).all(...p);}

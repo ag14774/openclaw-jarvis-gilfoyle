@@ -271,7 +271,7 @@ test('isolated native same-card replacement retains real committed Git effects a
       if(method==='workboard.cards.release')return {card:await store.releaseClaim(p.id,{ownerId:p.ownerId,status:p.status})};
       throw Error(`Unexpected isolated RPC ${method}`);
     };
-    const p1={boardId,id:item.id,attempt:1,taskName:'isolated-parser-a1',timeoutSeconds:1800,baseSha:base,worktree:first,branch:'work-a1'};
+    const p1={boardId,id:item.id,attempt:1,taskName:'isolated-parser-a1',profileId:'deep',timeoutSeconds:1800,baseSha:base,worktree:first,branch:'work-a1'};
     const prepared=await operate('prepare',p1,rpc,git);await store.claim(item.id,{ownerId:'gilfoyle'});
     const addTasks=(n,prompt,status)=>tasks.push(...['acp','subagent'].map((runtime,i)=>({taskId:uuid(n+i),runtime,agentId:'opencode',runId:uuid(n+2),childSessionKey:`agent:opencode:acp:${uuid(n+3)}`,sessionKey:'agent:gilfoyle:main',ownerKey:'agent:gilfoyle:main',createdAt:item.createdAt,updatedAt:Date.now(),endedAt:Date.now(),status,prompt})));
     addTasks(10,prepared.taskPrefix,'failed');
@@ -341,7 +341,7 @@ test('isolated native in-memory metadata preflight prevents proof, artifact and 
       let input;
       if(target==='archive') {
         card=await store.create({title:'Work item',boardId,tenant:feature.id,agentId:'gilfoyle',status:'todo',notes:`Type: work-item\nFeature: ${feature.id}\nRequires Work items: none`});
-        const p={boardId,id:card.id,attempt:1,taskName:'metadata-a1',timeoutSeconds:1800,baseSha:base,worktree:'/fixture/old',branch:'work-a1'};
+        const p={boardId,id:card.id,attempt:1,taskName:'metadata-a1',profileId:'deep',timeoutSeconds:1800,baseSha:base,worktree:'/fixture/old',branch:'work-a1'};
         const prepared=await operate('prepare',p,rpc,git);await store.claim(card.id,{ownerId:'gilfoyle'});
         tasks.push(...['acp','subagent'].map((runtime,n)=>({taskId:uuid(10+n),runtime,agentId:'opencode',sessionKey:'agent:gilfoyle:main',ownerKey:'agent:gilfoyle:main',runId:uuid(12),childSessionKey:`agent:opencode:acp:${uuid(13)}`,status:'failed',createdAt:card.createdAt,updatedAt:Date.now(),endedAt:Date.now(),prompt:prepared.taskPrefix})));
         await operate('record',{boardId,id:card.id,taskId:uuid(10),wrapperTaskId:uuid(11),runId:uuid(12),childSessionKey:`agent:opencode:acp:${uuid(13)}`},rpc,git);

@@ -208,7 +208,7 @@ test('same key rejects changed payload while valid claimed or transferred progre
 
 test('recognized prepared Work item and hosted Feature suffixes preserve immutable creation identity',async()=>{
   const f=fixture(),parent=await feature(f),created=(await createProductCard('work-item',itemInput(parent.id),f.rpc)).card,item=f.cards.find(card=>card.id===created.id),sha='a'.repeat(40);
-  item.notes+=`\nImmutable base: ${sha}\nWorktree: /tmp/work\nBranch: work-a1\nModel: openai/gpt-5.6-sol; Thinking: high\n<!-- current-attempt -->\nDelegated attempt: ${item.id}-a1\nTask name: item-a1\nTask ID: unresolved acceptance\nRun ID: unresolved acceptance\nChild session: unresolved acceptance\nWrapper task ID: unresolved acceptance\nTimeout seconds: 1800\nBackend: acpx\nAcceptance comment ID: unresolved acceptance\n<!-- /current-attempt -->`;
+  item.notes+=`\nImmutable base: ${sha}\nWorktree: /tmp/work\nBranch: work-a1\n<!-- current-attempt -->\nDelegated attempt: ${item.id}-a1\nTask name: item-a1\nProfile ID: deep\nModel: openai/gpt-5.6-sol\nThinking: high\nTask ID: unresolved acceptance\nRun ID: unresolved acceptance\nChild session: unresolved acceptance\nWrapper task ID: unresolved acceptance\nTimeout seconds: 1800\nBackend: acpx\nAcceptance comment ID: unresolved acceptance\n<!-- /current-attempt -->`;
   assert.equal((await createProductCard('work-item',itemInput(parent.id),f.rpc)).reused,true);
   const original=item.notes;item.notes=item.notes.replace('Assignment: implementation','Assignment: changed');
   await assert.rejects(createProductCard('work-item',itemInput(parent.id),f.rpc),/payload mismatch/);item.notes=original;

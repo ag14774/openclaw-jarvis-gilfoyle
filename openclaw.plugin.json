@@ -2,23 +2,21 @@
   "id": "jarvis-gilfoyle",
   "name": "Jarvis-Gilfoyle Project Runtime",
   "description": "Durable project identities and current conversation routing over native Workboard and delivery.",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "contracts": {"tools": ["jarvis_project", "gilfoyle_engineering"]},
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["statePath", "productAgentId", "engineeringAgentId", "workerAgentId", "fallbackConversations", "worker", "advisor"],
+    "required": ["statePath", "productAgentId", "engineeringAgentId", "fallbackConversations", "worker"],
     "properties": {
       "statePath": {"type": "string"},
       "productAgentId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
       "engineeringAgentId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
-      "workerAgentId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
       "sessionNamespace": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$", "default": "jarvis-gilfoyle"},
       "enabled": {"type": "boolean"},
       "scanMs": {"type": "integer", "minimum": 10000, "maximum": 600000},
       "fallbackConversations": {"type": "object", "additionalProperties": false, "required": ["product", "engineering"], "properties": {"product": {"type": "string"}, "engineering": {"type": "string"}}},
-      "worker": {"type": "object", "additionalProperties": false, "required": ["runtime", "model", "thinking"], "properties": {"runtime": {"type": "string", "enum": ["acp", "subagent"]}, "model": {"type": "string"}, "thinking": {"type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]}}},
-      "advisor": {"type": "object", "additionalProperties": false, "required": ["model", "thinking", "timeoutSeconds"], "properties": {"model": {"type": "string"}, "thinking": {"type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]}, "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 1800}}}
+      "worker": {"type": "object", "additionalProperties": false, "required": ["agentId", "runtime", "profiles"], "properties": {"agentId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"}, "runtime": {"type": "string", "enum": ["acp", "subagent"]}, "profiles": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "object", "additionalProperties": false, "required": ["id", "model", "thinking", "description"], "properties": {"id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}, "model": {"type": "string", "minLength": 1, "maxLength": 160}, "thinking": {"type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]}, "description": {"type": "string", "minLength": 1, "maxLength": 240}}}}}}
     }
   }
 }

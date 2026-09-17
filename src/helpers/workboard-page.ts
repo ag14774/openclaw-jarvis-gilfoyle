@@ -39,8 +39,8 @@ function childCapacity(evidence) {
   const children = (evidence.capacityTasks ?? evidence.tasks ?? []).filter(t => [workerRuntime, 'subagent'].includes(t.runtime) && ['queued', 'running'].includes(t.status));
   const identities = new Set(children.map(t => t.runId && t.childSessionKey ? `${t.runId}:${t.childSessionKey}` : t.taskId));
   let complete = evidence.available === true && children.every(t => {
-    const parts=String(t.childSessionKey??'').split(':'),id=parts.at(-1),worker=parts[1]===workerAgentId&&parts[2]===workerRuntime,advisor=t.runtime==='subagent'&&[productAgentId,engineeringAgentId].includes(parts[1])&&parts[2]==='subagent';
-    return UUID.test(t.runId??'')&&UUID.test(id??'')&&(worker||advisor);
+    const parts=String(t.childSessionKey??'').split(':'),id=parts.at(-1),worker=parts[1]===workerAgentId&&parts[2]===workerRuntime,managerSubagent=t.runtime==='subagent'&&[productAgentId,engineeringAgentId].includes(parts[1])&&parts[2]==='subagent';
+    return UUID.test(t.runId??'')&&UUID.test(id??'')&&(worker||managerSubagent);
   });
   for (const session of evidence.sessions ?? []) {
     if (!session.hasActiveRun) continue;

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.0 - 2026-09-17
+
+- Replaced separate worker/advisor model settings with 1–5 ordered worker profiles.
+- Added explicit profile discovery and required `profileId` selection for every new attempt.
+- Persisted concrete profile ID, model, and thinking with each attempt and reconciliation archive.
+- Removed the dedicated advisory operation and configuration.
+- Removed the legacy v1 registry migration path; only fresh/current v2 state is accepted.
+
 ## 2.0.1 - 2026-09-17
 
 - Moved TypeScript behavioral tests and support code under `test/`.
