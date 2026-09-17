@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.1 - 2026-09-17
+
+- Added Prettier with write and non-mutating check commands.
+- Added basic GitHub Actions CI for formatting, build, behavioral tests, and package checks.
+- Added an explicit manual native OpenClaw integration lane.
+- Removed source-text inspection, opaque-hash duplication, and exact harmless-read-count tests.
+- Removed private OpenClaw sanitizer loading from the default behavioral suite.
+- Strengthened GitHub failure fixtures to reject unarranged endpoints and corrected one false-positive workflow test.
+
 ## 2.2.0 - 2026-09-17
 
 - Replaced configured opaque conversation references with native fallback destinations.

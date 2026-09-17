@@ -40,7 +40,7 @@ Use this to validate the same package boundary used by a registry release:
 ```bash
 npm ci
 npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.1.tgz --force --accept-capabilities
 ```
 
 The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.
@@ -57,7 +57,7 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
     "entries": {
       "jarvis-gilfoyle": {
         "enabled": true,
-        "hooks": {"allowConversationAccess": true, "allowPromptInjection": true},
+        "hooks": { "allowConversationAccess": true, "allowPromptInjection": true },
         "config": {
           "enabled": true,
           "statePath": "/absolute/path/to/state.sqlite",
@@ -66,16 +66,41 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
           "sessionNamespace": "jarvis-gilfoyle",
           "scanMs": 60000,
           "fallbackDestinations": {
-            "product": {"channel": "telegram", "accountId": "default", "to": "telegram:123456789", "kind": "direct"},
-            "engineering": {"channel": "telegram", "accountId": "gilfoyle", "to": "telegram:123456789", "kind": "direct"}
+            "product": {
+              "channel": "telegram",
+              "accountId": "default",
+              "to": "telegram:123456789",
+              "kind": "direct"
+            },
+            "engineering": {
+              "channel": "telegram",
+              "accountId": "gilfoyle",
+              "to": "telegram:123456789",
+              "kind": "direct"
+            }
           },
           "worker": {
             "agentId": "opencode",
             "runtime": "acp",
             "profiles": [
-              {"id": "sol-low", "model": "openai/gpt-5.6-sol", "thinking": "low", "description": "Routine bounded implementation, inspection, and straightforward tests."},
-              {"id": "sol-medium", "model": "openai/gpt-5.6-sol", "thinking": "medium", "description": "Complex implementation, debugging, and independent review."},
-              {"id": "astra-low", "model": "openai/gpt-6-astra", "thinking": "low", "description": "Unusually difficult architecture, security, or diagnosis."}
+              {
+                "id": "sol-low",
+                "model": "openai/gpt-5.6-sol",
+                "thinking": "low",
+                "description": "Routine bounded implementation, inspection, and straightforward tests."
+              },
+              {
+                "id": "sol-medium",
+                "model": "openai/gpt-5.6-sol",
+                "thinking": "medium",
+                "description": "Complex implementation, debugging, and independent review."
+              },
+              {
+                "id": "astra-low",
+                "model": "openai/gpt-6-astra",
+                "thinking": "low",
+                "description": "Unusually difficult architecture, security, or diagnosis."
+              }
             ]
           }
         }
@@ -100,6 +125,7 @@ Requires Node.js with `node:sqlite` and OpenClaw `2026.9.2`.
 ```bash
 npm ci
 npm run build
+npm run format:check
 npm run check
 npm test
 npm pack --dry-run
@@ -107,8 +133,10 @@ npm pack --dry-run
 
 Source entrypoints are declared in `package.json` under `openclaw.extensions`; managed installs use the corresponding `openclaw.runtimeExtensions` compiled entrypoint. `openclaw.plugin.json` owns plugin identity, tool contracts, and configuration schema. `openclaw.json` owns enablement, grants, hooks, and deployment-specific configuration.
 
-The behavioral suite under `test/` uses Node's built-in `node:test` runner with `tsx` against `src/**/*.ts`; tests never import `dist`. `npm run check` separately builds and verifies the compiled registration/store boundary through `scripts/verify-dist.mjs`, and package validation inspects the packed artifact. These checks work on any machine with the declared Node and OpenClaw versions.
+The behavioral suite under `test/` uses Node's built-in `node:test` runner with `tsx` against `src/**/*.ts`; tests never import `dist`. `npm run check` separately builds and verifies the compiled registration/store boundary through `scripts/verify-dist.mjs`, and package validation inspects the packed artifact. These checks work on any machine with the declared Node and OpenClaw versions. See `TESTING.md` for test-layer and Arrange/Act/Assert guidance.
 
 The current store accepts only the v2 generic schema with `product|engineering` roles. Legacy registries are not migrated; create a fresh state database when adopting this release from a pre-v2 installation.
 
 Internal control prompts use the semantic markers `PROJECT WAKE` and `PROJECT CONTINUATION`; the public brand is deliberately excluded from those markers.
+
+GitHub Actions runs formatting, compiled-output verification, behavioral tests, and package-boundary checks on Node `22.22.3`. The pinned native OpenClaw integration lane is available through manual workflow dispatch.

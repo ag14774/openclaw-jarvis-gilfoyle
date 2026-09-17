@@ -2,22 +2,80 @@
   "id": "jarvis-gilfoyle",
   "name": "Jarvis-Gilfoyle Project Runtime",
   "description": "Durable project identities and current conversation routing over native Workboard and delivery.",
-  "version": "2.2.0",
-  "contracts": {"tools": ["jarvis_project", "gilfoyle_engineering"]},
+  "version": "2.2.1",
+  "contracts": { "tools": ["jarvis_project", "gilfoyle_engineering"] },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["statePath", "productAgentId", "engineeringAgentId", "fallbackDestinations", "worker"],
+    "required": [
+      "statePath",
+      "productAgentId",
+      "engineeringAgentId",
+      "fallbackDestinations",
+      "worker"
+    ],
     "properties": {
-      "statePath": {"type": "string"},
-      "productAgentId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
-      "engineeringAgentId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
-      "sessionNamespace": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$", "default": "jarvis-gilfoyle"},
-      "enabled": {"type": "boolean"},
-      "scanMs": {"type": "integer", "minimum": 10000, "maximum": 600000},
-      "fallbackDestinations": {"type": "object", "additionalProperties": false, "required": ["product", "engineering"], "properties": {"product": {"$ref": "#/$defs/fallbackDestination"}, "engineering": {"$ref": "#/$defs/fallbackDestination"}}},
-      "worker": {"type": "object", "additionalProperties": false, "required": ["agentId", "runtime", "profiles"], "properties": {"agentId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"}, "runtime": {"type": "string", "enum": ["acp", "subagent"]}, "profiles": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "object", "additionalProperties": false, "required": ["id", "model", "thinking", "description"], "properties": {"id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}, "model": {"type": "string", "minLength": 1, "maxLength": 160}, "thinking": {"type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]}, "description": {"type": "string", "minLength": 1, "maxLength": 240}}}}}}
+      "statePath": { "type": "string" },
+      "productAgentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+      "engineeringAgentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+      "sessionNamespace": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+        "default": "jarvis-gilfoyle"
+      },
+      "enabled": { "type": "boolean" },
+      "scanMs": { "type": "integer", "minimum": 10000, "maximum": 600000 },
+      "fallbackDestinations": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["product", "engineering"],
+        "properties": {
+          "product": { "$ref": "#/$defs/fallbackDestination" },
+          "engineering": { "$ref": "#/$defs/fallbackDestination" }
+        }
+      },
+      "worker": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agentId", "runtime", "profiles"],
+        "properties": {
+          "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+          "runtime": { "type": "string", "enum": ["acp", "subagent"] },
+          "profiles": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "model", "thinking", "description"],
+              "properties": {
+                "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+                "model": { "type": "string", "minLength": 1, "maxLength": 160 },
+                "thinking": {
+                  "type": "string",
+                  "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+                },
+                "description": { "type": "string", "minLength": 1, "maxLength": 240 }
+              }
+            }
+          }
+        }
+      }
     },
-    "$defs": {"fallbackDestination": {"type": "object", "additionalProperties": false, "required": ["channel", "accountId", "to", "kind"], "properties": {"channel": {"type": "string", "minLength": 1, "maxLength": 60}, "accountId": {"type": "string", "minLength": 1, "maxLength": 100}, "to": {"type": "string", "minLength": 1, "maxLength": 240}, "kind": {"const": "direct"}, "threadId": {"type": "string", "minLength": 1, "maxLength": 240}}}}
+    "$defs": {
+      "fallbackDestination": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["channel", "accountId", "to", "kind"],
+        "properties": {
+          "channel": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "accountId": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "to": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "kind": { "const": "direct" },
+          "threadId": { "type": "string", "minLength": 1, "maxLength": 240 }
+        }
+      }
+    }
   }
 }

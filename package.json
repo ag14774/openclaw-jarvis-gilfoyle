@@ -1,6 +1,6 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Role-configurable product and engineering project coordination for OpenClaw",
   "license": "UNLICENSED",
   "type": "module",
@@ -13,16 +13,21 @@
     "src/",
     "openclaw.plugin.json",
     "README.md",
+    "TESTING.md",
     "CHANGELOG.md"
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "build": "tsc -p tsconfig.json && node scripts/prune-dist.mjs",
     "check": "npm run build && node --check dist/index.js && node --check dist/runtime.js && node --check dist/store.js && node --check dist/rpc-bridge.js && node --check dist/topology.js && node scripts/verify-dist.mjs",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "test": "npm run test:source",
-    "test:source": "node --import tsx --test test/*.test.ts",
+    "test": "npm run test:behavior",
+    "test:behavior": "node --import tsx --test test/*.test.ts",
+    "test:native": "JG_NATIVE_TEST=1 node --import tsx --test test/*.test.ts",
+    "pack:check": "npm pack --dry-run --ignore-scripts",
     "prepack": "npm run check && npm test"
   },
   "keywords": [
@@ -40,13 +45,14 @@
     "url": "https://github.com/ag14774/openclaw-jarvis-gilfoyle/issues"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
   },
   "peerDependencies": {
     "openclaw": "2026.9.2"
   },
   "devDependencies": {
     "openclaw": "2026.9.2",
+    "prettier": "3.9.7",
     "tsx": "4.23.13",
     "typescript": "5.9.2"
   },
