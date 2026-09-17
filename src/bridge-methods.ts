@@ -8,6 +8,7 @@ const methods = new Set([
   'workboard.cards.update',
   'workboard.cards.comment',
   'workboard.cards.claim',
+  'workboard.cards.release',
   'workboard.cards.complete',
   'workboard.cards.proof',
   'tasks.list',

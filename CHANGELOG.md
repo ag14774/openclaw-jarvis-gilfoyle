@@ -3,6 +3,7 @@
 ## 2.2.3 - 2026-09-17
 
 - Fixed real delegation preparation by permitting the project-active guard through the companion RPC boundary.
+- Permitted claim release through the companion so accepted worker bindings can complete atomically.
 - Blocked obsolete project-control forwarding and same-agent canonical-main forwarding through `sessions_send`.
 - Suppressed the internal `REPLY_SKIP` loop-control token at the user-facing reply hook.
 
