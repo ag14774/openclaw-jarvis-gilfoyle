@@ -1,6 +1,6 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "Role-configurable product and engineering project coordination for OpenClaw",
   "license": "UNLICENSED",
   "type": "module",

@@ -6,25 +6,7 @@ import {
   cleanupSessionLifecycleArtifacts,
   getSessionEntry,
 } from 'openclaw/plugin-sdk/session-store-runtime';
-const methods = new Set([
-  'conversations.list',
-  'conversations.send',
-  'workboard.boards.list',
-  'workboard.boards.upsert',
-  'workboard.cards.list',
-  'workboard.cards.create',
-  'workboard.cards.update',
-  'workboard.cards.comment',
-  'workboard.cards.claim',
-  'workboard.cards.complete',
-  'workboard.cards.proof',
-  'tasks.list',
-  'tasks.get',
-  'sessions.list',
-  'sessions.create',
-  'sessions.delete',
-  'agent',
-]);
+import { companionMethodAllowed } from './bridge-methods.js';
 const lines = createInterface({ input: process.stdin });
 lines.on('line', async (line) => {
   let id;
@@ -57,7 +39,7 @@ lines.on('line', async (line) => {
         nowMs: Date.now(),
       });
     } else {
-      if (!methods.has(q.method)) throw Error('Unsupported companion method');
+      if (!companionMethodAllowed(q.method)) throw Error('Unsupported companion method');
       result = await callGatewayFromCli(q.method, { timeout: '20000', json: true }, q.params, {
         scopes: ['operator.read', 'operator.write', 'operator.admin'],
       });

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.3 - 2026-09-17
+
+- Fixed real delegation preparation by permitting the project-active guard through the companion RPC boundary.
+- Blocked obsolete project-control forwarding and same-agent canonical-main forwarding through `sessions_send`.
+- Suppressed the internal `REPLY_SKIP` loop-control token at the user-facing reply hook.
+
 ## 2.2.2 - 2026-09-17
 
 - Require every worker worktree to exist before delegation preparation.

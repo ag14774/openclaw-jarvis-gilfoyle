@@ -40,7 +40,7 @@ Use this to validate the same package boundary used by a registry release:
 ```bash
 npm ci
 npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.2.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.3.tgz --force --accept-capabilities
 ```
 
 The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.

@@ -382,6 +382,11 @@ export default {
           cancel: true,
           reason: 'Internal project context; proactive delivery uses its durable project route.',
         };
+      if (event.payload?.text?.trim() === 'REPLY_SKIP')
+        return {
+          cancel: true,
+          reason: 'Internal A2A loop-control token; never user-visible.',
+        };
     });
     api.on('message_sending', (_event, ctx) => {
       if (isProjectSession(ctx.sessionKey))
@@ -395,7 +400,14 @@ export default {
         exchange = r.store.get(
           'SELECT project FROM exchanges WHERE session=?',
           ctx.sessionKey ?? '',
-        );
+        ),
+        message = String(event.params?.message ?? ''),
+        target = String(event.params?.sessionKey ?? ''),
+        obsoleteProjectControl =
+          /^(?:JG|PROJECT) (?:FEATURE REQUEST|INTAKE HANDOFF|WAKE|CONTINUATION)\b/.test(message),
+        selfMainForward =
+          target === `agent:${ctx.agentId}:main` ||
+          (typeof event.params?.agentId === 'string' && event.params.agentId === ctx.agentId);
       if (
         exchange &&
         r.store.project(exchange.project).state === 'inactive' &&
@@ -407,13 +419,12 @@ export default {
         };
       if (
         event.toolName === 'sessions_send' &&
-        (isProjectSession(ctx.sessionKey) ||
-          /^PROJECT (WAKE|CONTINUATION)\b/.test(String(event.params?.message ?? '')))
+        (isProjectSession(ctx.sessionKey) || obsoleteProjectControl || selfMainForward)
       )
         return {
           block: true,
           blockReason:
-            'Project continuations use durable records and jarvis_project; do not insert hidden exchanges into a user or canonical product conversation.',
+            'Project intake and continuation use jarvis_project plus durable records directly; do not forward through canonical main or user conversations.',
         };
     });
     api.on('agent_end', async (_event, ctx) => {

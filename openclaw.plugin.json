@@ -2,7 +2,7 @@
   "id": "jarvis-gilfoyle",
   "name": "Jarvis-Gilfoyle Project Runtime",
   "description": "Durable project identities and current conversation routing over native Workboard and delivery.",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "contracts": { "tools": ["jarvis_project", "gilfoyle_engineering"] },
   "configSchema": {
     "type": "object",
