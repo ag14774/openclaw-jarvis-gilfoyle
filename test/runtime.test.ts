@@ -1,13 +1,13 @@
 import test from 'node:test';
-import './test-setup.mjs';
+import './support/setup.ts';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {Store} from './src/store.ts';
-import {ProjectRuntime,sourceString,orderReady} from './src/runtime.ts';
-import {controllerKey,isManagerActor} from './src/helpers/record-contracts.ts';
-import plugin from './src/index.ts';
+import {Store} from '../src/store.ts';
+import {ProjectRuntime,sourceString,orderReady} from '../src/runtime.ts';
+import {controllerKey,isManagerActor} from '../src/helpers/record-contracts.ts';
+import plugin from '../src/index.ts';
 const a={conversationRef:`conv_${'a'.repeat(32)}`,channel:'telegram',accountId:'default',target:'telegram:100',kind:'direct'};
 const b={conversationRef:`conv_${'b'.repeat(32)}`,channel:'discord',accountId:'default',target:'channel:200',threadId:'201',kind:'channel'};
 const g={...a,conversationRef:`conv_${'c'.repeat(32)}`,accountId:'gilfoyle'};

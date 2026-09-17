@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import './test-setup.mjs';
+import './support/setup.ts';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import { PAGE_CANDIDATE_LIMIT, PAGE_OUTPUT_BYTES, pageCards, validateQuery } from './src/helpers/workboard-page.ts';
-import {loadWorkboardTestInternals} from './test-openclaw-internals.mjs';
+import { PAGE_CANDIDATE_LIMIT, PAGE_OUTPUT_BYTES, pageCards, validateQuery } from '../src/helpers/workboard-page.ts';
+import {loadWorkboardTestInternals} from './support/openclaw-internals.ts';
 
 const query = { agentId: 'gilfoyle', includeArchived: false };
 function fixture(count) {
@@ -142,7 +142,7 @@ test('isolated native 201-card enumeration preserves every card', { skip: proces
 });
 
 test('pager import DAG is acyclic and pager has no mutation entrypoint dependency',()=>{
-  const root=join(dirname(fileURLToPath(import.meta.url)),'src/helpers'),files=['record-contracts.ts','workboard-page.ts','handoff-card.ts','create-card.ts','native-operation.ts'];
+  const root=join(dirname(fileURLToPath(import.meta.url)),'../src/helpers'),files=['record-contracts.ts','workboard-page.ts','handoff-card.ts','create-card.ts','native-operation.ts'];
   const pager=readFileSync(`${root}/workboard-page.ts`,'utf8'),graph=new Map(files.map(file=>[file,[...readFileSync(`${root}/${file}`,'utf8').matchAll(/from ['"]\.\/(.+?\.js)['"]/g)].map(match=>match[1].replace(/\.js$/,'.ts')).filter(value=>files.includes(value))]));
   const active=new Set(),done=new Set(),visit=file=>{assert(!active.has(file),`Import cycle at ${file}`);if(done.has(file))return;active.add(file);for(const next of graph.get(file))visit(next);active.delete(file);done.add(file);};
   files.forEach(visit);
@@ -212,7 +212,7 @@ test('isolated native neutral blocked handoff CAS preserves failures, scope and 
     await store.claim(other.id,{ownerId:'gilfoyle'});
     const returned = await store.update(card.id,{agentId:'gilfoyle',status:'blocked'},{expectedUpdatedAt:transferred.updatedAt});
     assert.equal(returned.metadata.failureCount,1); assert(!returned.metadata.claim);
-    const { handoffCard } = await import('./src/helpers/handoff-card.ts');
+    const { handoffCard } = await import('../src/helpers/handoff-card.ts');
     const source='channel=internal-ui;account=local;recipient=fixture;thread=none';
     const feature = await store.create({title:'Human question',boardId:'isolated-handoff',tenant:'project:isolated-handoff',idempotencyKey:'feature:isolated-handoff:question',agentId:'gilfoyle',status:'todo',notes:`Type: Feature\nDelivery: ${source}\nScope: original requested outcome`});
     const rpc = async (method,p) => {
@@ -238,8 +238,8 @@ test('isolated native neutral blocked handoff CAS preserves failures, scope and 
 
 test('isolated native same-card replacement retains real committed Git effects and records attempt 2', {skip:process.env.JG_NATIVE_TEST !== '1'},async t=>{
   const {WorkboardStore,sqliteStores}=await loadWorkboardTestInternals();
-  const { operate } = await import('./src/helpers/native-operation.ts');
-  const { currentAttempt,reconciledAttempts } = await import('./src/helpers/workboard-page.ts');
+  const { operate } = await import('../src/helpers/native-operation.ts');
+  const { currentAttempt,reconciledAttempts } = await import('../src/helpers/workboard-page.ts');
   const root=mkdtempSync(join(tmpdir(),'project-replacement-')),checkout=`${root}/repo`,first=`${root}/a1`,second=`${root}/a2`;
   const git=(cwd,args)=>execFileSync('git',['-C',cwd,...args],{encoding:'utf8',timeout:10000,stdio:['ignore','pipe','pipe']}).trim();
   execFileSync('git',['init','--initial-branch=main',checkout],{stdio:'pipe'});
@@ -301,8 +301,8 @@ test('isolated native same-card replacement retains real committed Git effects a
 
 test('isolated native in-memory metadata preflight prevents proof, artifact and comment eviction before any write', {skip:process.env.JG_NATIVE_TEST !== '1'},async t=>{
   const {WorkboardStore}=await loadWorkboardTestInternals();
-  const {operate}=await import('./src/helpers/native-operation.ts');
-  const {currentAttempt}=await import('./src/helpers/workboard-page.ts');
+  const {operate}=await import('../src/helpers/native-operation.ts');
+  const {currentAttempt}=await import('../src/helpers/workboard-page.ts');
   const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
   for(const target of ['question','archive']) {
     const rows=new Map(),memory={

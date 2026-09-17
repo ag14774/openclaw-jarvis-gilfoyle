@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import './test-setup.mjs';
-import { operate } from './src/helpers/native-operation.ts';
-import { currentAttempt, classifyCards, readView, reconciledAttempts } from './src/helpers/workboard-page.ts';
-import { githubFixture } from './github-fixture.mjs';
-import { assertCommentCapacity, handoffError, handoffMarker } from './src/helpers/handoff-card.ts';
-import { createProductCard, sealCreationPayload } from './src/helpers/create-card.ts';
-import { delegationError } from './src/helpers/record-delegation.ts';
-import {loadTaskPromptSanitizer} from './test-openclaw-internals.mjs';
-import {finishReport} from './src/helpers/finish-report.ts';
+import './support/setup.ts';
+import { operate } from '../src/helpers/native-operation.ts';
+import { currentAttempt, classifyCards, readView, reconciledAttempts } from '../src/helpers/workboard-page.ts';
+import { githubFixture } from './github-fixture.ts';
+import { assertCommentCapacity, handoffError, handoffMarker } from '../src/helpers/handoff-card.ts';
+import { createProductCard, sealCreationPayload } from '../src/helpers/create-card.ts';
+import { delegationError } from '../src/helpers/record-delegation.ts';
+import {loadTaskPromptSanitizer} from './support/openclaw-internals.ts';
+import {finishReport} from '../src/helpers/finish-report.ts';
 
 const sanitizeTaskPromptText=await loadTaskPromptSanitizer();
 

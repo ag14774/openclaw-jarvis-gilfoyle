@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1 - 2026-09-17
+
+- Moved TypeScript behavioral tests and support code under `test/`.
+- Kept behavioral tests source-only and moved compiled-output verification to `scripts/verify-dist.mjs`.
+- Removed host-specific test paths and resolved pinned OpenClaw integration fixtures dynamically.
+- Removed stale root migration artifacts and kept generated `dist/` out of Git.
+
 ## 2.0.0 - 2026-09-16
 
 - Extracted the runtime into a standalone OpenClaw plugin package.

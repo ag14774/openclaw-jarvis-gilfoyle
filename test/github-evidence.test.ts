@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import './test-setup.mjs';
-import { githubEvidence, hostedSpec } from './src/helpers/github-evidence.ts';
-import { classifyCards, pageCards } from './src/helpers/workboard-page.ts';
-import { githubFixture } from './github-fixture.mjs';
+import './support/setup.ts';
+import { githubEvidence, hostedSpec } from '../src/helpers/github-evidence.ts';
+import { classifyCards, pageCards } from '../src/helpers/workboard-page.ts';
+import { githubFixture } from './github-fixture.ts';
 
 test('GitHub evidence uses exact fixed GET requests and returns bounded identities only', async () => {
   const f = githubFixture();

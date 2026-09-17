@@ -1,6 +1,6 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Role-configurable product and engineering project coordination for OpenClaw",
   "license": "UNLICENSED",
   "type": "module",
@@ -18,12 +18,11 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.json",
-    "check": "npm run build && node --check dist/index.js && node --check dist/runtime.js && node --check dist/store.js && node --check dist/rpc-bridge.js && node --check dist/topology.js",
+    "check": "npm run build && node --check dist/index.js && node --check dist/runtime.js && node --check dist/store.js && node --check dist/rpc-bridge.js && node --check dist/topology.js && node scripts/verify-dist.mjs",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "test": "npm run test:source && npm run test:dist",
-    "test:source": "node --import tsx --test advisory-args.test.mjs card-creation.test.mjs native-operation.test.mjs github-evidence.test.mjs workboard-view.test.mjs workboard-page.test.mjs runtime.test.mjs topology.test.mjs",
-    "test:dist": "node --test dist-smoke.test.mjs",
+    "test": "npm run test:source",
+    "test:source": "node --import tsx --test test/*.test.ts",
     "prepack": "npm run check && npm test"
   },
   "keywords": [

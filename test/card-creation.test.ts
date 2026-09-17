@@ -4,10 +4,10 @@ import {mkdtempSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import './test-setup.mjs';
-import { createProductCard, creationError, ensureCreatedCard, sealCreationPayload } from './src/helpers/create-card.ts';
-import { classifyCards } from './src/helpers/workboard-page.ts';
-import {loadWorkboardTestInternals} from './test-openclaw-internals.mjs';
+import './support/setup.ts';
+import { createProductCard, creationError, ensureCreatedCard, sealCreationPayload } from '../src/helpers/create-card.ts';
+import { classifyCards } from '../src/helpers/workboard-page.ts';
+import {loadWorkboardTestInternals} from './support/openclaw-internals.ts';
 
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const source = 'channel=internal-ui;account=local;recipient=owner;thread=none';

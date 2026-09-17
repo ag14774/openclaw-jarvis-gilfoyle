@@ -40,7 +40,7 @@ Use this to validate the same package boundary used by a registry release:
 ```bash
 npm ci
 npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.0.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.0.1.tgz --force --accept-capabilities
 ```
 
 The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.
@@ -97,7 +97,7 @@ npm pack --dry-run
 
 Source entrypoints are declared in `package.json` under `openclaw.extensions`; managed installs use the corresponding `openclaw.runtimeExtensions` compiled entrypoint. `openclaw.plugin.json` owns plugin identity, tool contracts, and configuration schema. `openclaw.json` owns enablement, grants, hooks, and deployment-specific configuration.
 
-The behavioral suite uses Node's built-in `node:test` runner with `tsx` to execute `src/**/*.ts`. A separate distribution smoke test imports `dist/**/*.js`, and package validation inspects the packed artifact. This keeps source-unit, compiled-runtime, and package-boundary failures distinct.
+The behavioral suite under `test/` uses Node's built-in `node:test` runner with `tsx` against `src/**/*.ts`; tests never import `dist`. `npm run check` separately builds and verifies the compiled registration/store boundary through `scripts/verify-dist.mjs`, and package validation inspects the packed artifact. These checks work on any machine with the declared Node and OpenClaw versions.
 
 The v2 store performs a one-time v1 migration from named conversation columns and agent-ID role values to generic columns and `product|engineering` roles. Stop the Gateway and back up the registry before opening a v1 database with v2.
 

@@ -4,10 +4,10 @@ import {DatabaseSync} from 'node:sqlite';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {configureTopology,agentForRole,projectSessionKey,roleForAgent} from './src/topology.ts';
-import {advisoryArgs} from './src/helpers/advisory-args.ts';
-import {controllerKey} from './src/helpers/record-contracts.ts';
-import {Store} from './src/store.ts';
+import {configureTopology,agentForRole,projectSessionKey,roleForAgent} from '../src/topology.ts';
+import {advisoryArgs} from '../src/helpers/advisory-args.ts';
+import {controllerKey} from '../src/helpers/record-contracts.ts';
+import {Store} from '../src/store.ts';
 
 const route={conversationRef:`conv_${'a'.repeat(32)}`,channel:'test',accountId:'default',target:'owner',kind:'direct'};
 

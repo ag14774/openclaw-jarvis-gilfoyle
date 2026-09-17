@@ -1,4 +1,4 @@
-import {configureTopology} from './src/topology.ts';
+import {configureTopology} from '../../src/topology.ts';
 
 configureTopology({
   productAgentId:'main',
