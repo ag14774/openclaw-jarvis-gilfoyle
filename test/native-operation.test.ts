@@ -190,12 +190,21 @@ function fixture() {
   };
   const git = (cwd, args) => {
     if (args[0] === 'worktree')
-      return `worktree /tmp/repo\nHEAD ${sha}\nbranch refs/heads/main\n\nworktree /tmp/review-worktree\nHEAD ${sha}\nbranch refs/heads/review-a1`;
+      return `worktree /tmp/repo\nHEAD ${sha}\nbranch refs/heads/main\n\nworktree /tmp/repo-worktree\nHEAD ${sha}\nbranch refs/heads/work-a1\n\nworktree /tmp/review-worktree\nHEAD ${sha}\nbranch refs/heads/review-a1\n\nworktree /tmp/other-worktree\nHEAD ${sha}\nbranch refs/heads/other-a1\n\nworktree /tmp/sibling-worktree\nHEAD ${sha}\nbranch refs/heads/sibling-a1`;
     if (args[0] === 'remote') return 'file:///tmp/remote.git';
     if (args.includes('--git-common-dir') || args.includes('--absolute-git-dir'))
       return '/tmp/repo/.git';
     if (args.includes('--show-toplevel')) return cwd;
-    if (args[0] === 'symbolic-ref') return cwd === '/tmp/review-worktree' ? 'review-a1' : 'main';
+    if (args[0] === 'symbolic-ref')
+      return cwd === '/tmp/review-worktree'
+        ? 'review-a1'
+        : cwd === '/tmp/repo-worktree'
+          ? 'work-a1'
+          : cwd === '/tmp/other-worktree'
+            ? 'other-a1'
+            : cwd === '/tmp/sibling-worktree'
+              ? 'sibling-a1'
+              : 'main';
     if (args[0] === 'status' || args[0] === 'merge-base') return '';
     if (args[0] === 'rev-parse') return sha;
     throw Error('Unexpected Git operation');
@@ -279,6 +288,7 @@ test('prepare/record preserve native identity, release the owner slot and bind t
   assert.deepEqual(prepared.profile, { id: 'deep', model: 'openai/gpt-5.6-sol', thinking: 'high' });
   assert.equal(prepared.spawnArgs.model, 'openai/gpt-5.6-sol');
   assert.equal(prepared.spawnArgs.thinking, 'high');
+  assert.equal(prepared.spawnArgs.cwd, f.prepare.worktree);
   assert(!Object.hasOwn(prepared.spawnArgs, 'task'));
   assert(!Object.hasOwn(prepared, 'reviewProof'));
   f.claim(f.cards[2]);
@@ -341,6 +351,72 @@ test('prepare selects only a configured worker profile', async () => {
     /Unknown worker profile/,
   );
   assert(!unknown.calls.some((call) => call.method === 'workboard.cards.update'));
+});
+
+for (const fault of [
+  'unregistered',
+  'branch-registration',
+  'checkout-reuse',
+  'integration-branch',
+  'wrong-repo',
+  'wrong-root',
+  'wrong-head',
+  'dirty',
+])
+  test(`attempt 1 rejects ${fault} worktree before durable preparation`, async () => {
+    const f = fixture(),
+      p = { ...f.prepare };
+    if (fault === 'checkout-reuse') p.worktree = '/tmp/repo';
+    if (fault === 'integration-branch') p.branch = 'main';
+    const git = (cwd, args) => {
+      if (fault === 'unregistered' && args[0] === 'worktree')
+        return `worktree /tmp/repo\nHEAD ${sha}\nbranch refs/heads/main`;
+      if (fault === 'branch-registration' && args[0] === 'worktree')
+        return f.git(cwd, args).replace('branch refs/heads/work-a1', 'branch refs/heads/other');
+      if (fault === 'wrong-repo' && cwd === p.worktree && args.includes('--git-common-dir'))
+        return '/tmp/other/.git';
+      if (fault === 'wrong-root' && cwd === p.worktree && args.includes('--show-toplevel'))
+        return '/tmp/repo-worktree/subdirectory';
+      if (
+        fault === 'wrong-head' &&
+        cwd === p.worktree &&
+        args[0] === 'rev-parse' &&
+        args[1] === 'HEAD'
+      )
+        return 'b'.repeat(40);
+      if (fault === 'dirty' && cwd === p.worktree && args[0] === 'status')
+        return ' M implementation.ts';
+      return f.git(cwd, args);
+    };
+    await assert.rejects(
+      operate('prepare', p, f.rpc, git),
+      /worktree|branch|repository|root|HEAD|Dirty/i,
+    );
+    assert(!f.calls.some((call) => call.method === 'workboard.cards.update'));
+  });
+
+test('attempt 1 rejects another Work item durable branch and worktree identity', async () => {
+  const f = fixture();
+  await f.delegate();
+  const sibling = {
+    ...structuredClone(f.cards[2]),
+    id: id(4),
+    status: 'todo',
+    notes: `Type: work-item\nFeature: ${id(2)}\nRequires Work items: none\nAssignment: sibling`,
+    metadata: {
+      automation: {
+        boardId: 'project',
+        tenant: id(2),
+        idempotencyKey: `work-item:${id(2)}:sibling`,
+      },
+    },
+  };
+  f.cards.push(sibling);
+  await assert.rejects(
+    operate('prepare', { ...f.prepare, id: sibling.id, taskName: 'sibling-a1' }, f.rpc, f.git),
+    /branch and worktree must be new/,
+  );
+  assert(!/^Immutable base:/m.test(sibling.notes));
 });
 
 test('conversation-aware delegation binds the exact Feature controller instead of canonical main', async () => {
@@ -654,7 +730,7 @@ test('native intake creates a same-tenant Feature then prepares its Work item wi
       },
     },
   });
-  await operate('prepare', f.prepare, f.rpc);
+  await operate('prepare', f.prepare, f.rpc, f.git);
   assert.deepEqual(f.cards[1], feature);
 });
 
@@ -873,7 +949,7 @@ test('an existing replacement archive is not charged twice during byte-tight CAS
 test('an accepted delegation comment can finish its missing marker without reserving another receipt', async () => {
   const f = fixture(),
     c = f.cards[2];
-  await operate('prepare', f.prepare, f.rpc);
+  await operate('prepare', f.prepare, f.rpc, f.git);
   f.claim(c);
   f.tasks.push(
     ...['acp', 'subagent'].map((runtime, n) => ({
@@ -1574,7 +1650,14 @@ test('an accepted active sibling may mention the blocked card without blocking i
     worktree: '/tmp/other-worktree',
     branch: 'other-a1',
   };
-  const prepared = await operate('prepare', p, f.rpc);
+  const git = (cwd, args) => {
+    if (args[0] === 'worktree')
+      return `${f.git(cwd, args)}\n\nworktree ${p.worktree}\nHEAD ${p.baseSha}\nbranch refs/heads/${p.branch}`;
+    if (cwd === p.worktree && args[0] === 'symbolic-ref') return p.branch;
+    if (cwd === p.worktree && args[0] === 'rev-parse' && args[1] === 'HEAD') return p.baseSha;
+    return f.git(cwd, args);
+  };
+  const prepared = await operate('prepare', p, f.rpc, git);
   f.claim(sibling);
   const boundedPrompt = (prepared.taskPrefix + 'x'.repeat(4100)).slice(0, 3999) + '\u2026';
   f.tasks.push(
@@ -1854,12 +1937,16 @@ test('one waiting child does not stop sibling admission; parent wait and stop do
     metadata: { automation: { boardId: 'project', tenant: id(2) } },
   });
   await operate('handoff', question(id(3)), f.rpc);
-  await operate('prepare', { ...f.prepare, id: id(4), taskName: 'sibling-a1' }, f.rpc);
+  const sibling = {
+    ...f.prepare,
+    id: id(4),
+    taskName: 'sibling-a1',
+    worktree: '/tmp/sibling-worktree',
+    branch: 'sibling-a1',
+  };
+  await operate('prepare', sibling, f.rpc, f.git);
   f.cards[1].status = 'blocked';
-  await assert.rejects(
-    operate('prepare', { ...f.prepare, id: id(4), taskName: 'sibling-a1' }, f.rpc),
-    /held/,
-  );
+  await assert.rejects(operate('prepare', sibling, f.rpc, f.git), /held/);
   f.cards[1].status = 'todo';
   f.cards.push({
     id: id(66),
@@ -1868,10 +1955,7 @@ test('one waiting child does not stop sibling admission; parent wait and stop do
     notes: 'Type: action',
     metadata: { automation: { boardId: 'project', tenant: id(2) } },
   });
-  await assert.rejects(
-    operate('prepare', { ...f.prepare, id: id(4), taskName: 'sibling-a1' }, f.rpc),
-    /stop/,
-  );
+  await assert.rejects(operate('prepare', sibling, f.rpc, f.git), /stop/);
 });
 
 test('stop race and terminal cancellation preserve source and never auto-resume', async () => {
@@ -1906,7 +1990,7 @@ test('zero accepted workers never classify as a healthy worker wait', async () =
     classifyCards(f.cards, { available: true, tasks: [] }).get(id(2)).stage,
     'orchestration',
   );
-  await operate('prepare', f.prepare, f.rpc);
+  await operate('prepare', f.prepare, f.rpc, f.git);
   const rows = classifyCards(f.cards, { available: true, tasks: [] });
   assert.equal(rows.get(id(3)).stage, 'acceptance-uncertain');
   assert.equal(rows.get(id(2)).stage, 'orchestration');
@@ -2053,7 +2137,10 @@ for (const status of ['failed', 'cancelled'])
     await operate('handoff-answer', answer(q), f.rpc);
     await operate('handoff-apply', application(q), f.rpc);
     assert.deepEqual(f.tasks, before);
-    await assert.rejects(operate('prepare', f.prepare, f.rpc), /Existing attempt must reconcile/);
+    await assert.rejects(
+      operate('prepare', f.prepare, f.rpc, f.git),
+      /Existing attempt must reconcile/,
+    );
     assert.equal(
       classifyCards(f.cards, { available: true, tasks: f.tasks }).get(id(3)).stage,
       'recovery-required',
@@ -2087,7 +2174,7 @@ test('unstarted same-card questions mentioning attempts are not fabricated worke
     await operate('handoff-apply', application(q), f.rpc);
     assert.equal(currentAttempt(f.cards[2]), null);
   }
-  await operate('prepare', f.prepare, f.rpc);
+  await operate('prepare', f.prepare, f.rpc, f.git);
   assert.equal(currentAttempt(f.cards[2]).taskId, undefined);
 });
 

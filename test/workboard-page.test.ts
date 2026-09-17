@@ -448,20 +448,8 @@ test(
       'Initial fixture',
     ]);
     const base = git(checkout, ['rev-parse', 'HEAD']);
+    let head;
     git(checkout, ['worktree', 'add', '-b', 'work-a1', first, base]);
-    writeFileSync(`${first}/parser.js`, 'export const parsed = "retained implementation";\n');
-    git(first, ['add', '--', 'parser.js']);
-    git(first, [
-      '-c',
-      'user.name=Isolated Test',
-      '-c',
-      'user.email=isolated@example.invalid',
-      'commit',
-      '-m',
-      'Retained partial implementation',
-    ]);
-    const head = git(first, ['rev-parse', 'HEAD']);
-    git(checkout, ['worktree', 'add', '-b', 'work-a2', second, head]);
     const stores = sqliteStores({ dbPath: `${root}/native.sqlite` }),
       store = new WorkboardStore(stores.cards, stores);
     try {
@@ -554,6 +542,19 @@ test(
         branch: 'work-a1',
       };
       const prepared = await operate('prepare', p1, rpc, git);
+      writeFileSync(`${first}/parser.js`, 'export const parsed = "retained implementation";\n');
+      git(first, ['add', '--', 'parser.js']);
+      git(first, [
+        '-c',
+        'user.name=Isolated Test',
+        '-c',
+        'user.email=isolated@example.invalid',
+        'commit',
+        '-m',
+        'Retained partial implementation',
+      ]);
+      head = git(first, ['rev-parse', 'HEAD']);
+      git(checkout, ['worktree', 'add', '-b', 'work-a2', second, head]);
       await store.claim(item.id, { ownerId: 'gilfoyle' });
       const addTasks = (n, prompt, status) =>
         tasks.push(
@@ -782,13 +783,15 @@ test(
             };
           throw Error(`Unexpected isolated metadata RPC ${method}`);
         };
+        let oldHead = base;
         const git = (cwd, args) => {
           if (args[0] === 'worktree')
-            return `worktree /fixture/new\nHEAD ${head}\nbranch refs/heads/work-a2`;
+            return `worktree /fixture/old\nHEAD ${base}\nbranch refs/heads/work-a1\n\nworktree /fixture/new\nHEAD ${head}\nbranch refs/heads/work-a2`;
           if (args.includes('--git-common-dir')) return '/fixture/repo/.git';
           if (args.includes('--show-toplevel')) return cwd;
           if (args[0] === 'symbolic-ref') return cwd === '/fixture/old' ? 'work-a1' : 'work-a2';
-          if (args[0] === 'rev-parse' && args[1] === 'HEAD') return head;
+          if (args[0] === 'rev-parse' && args[1] === 'HEAD')
+            return cwd === '/fixture/old' ? oldHead : head;
           if (args[0] === 'status' || args[0] === 'merge-base') return '';
           throw Error('Unexpected mock Git inspection');
         };
@@ -844,6 +847,7 @@ test(
             rpc,
             git,
           );
+          oldHead = head;
           const a = currentAttempt(await store.get(card.id)),
             remaining = 'Complete only the remaining validation.';
           input = {

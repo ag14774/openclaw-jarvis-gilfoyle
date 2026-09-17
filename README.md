@@ -40,7 +40,7 @@ Use this to validate the same package boundary used by a registry release:
 ```bash
 npm ci
 npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.1.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.2.tgz --force --accept-capabilities
 ```
 
 The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.
@@ -113,6 +113,8 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
 Grant `jarvis_project` and `gilfoyle_engineering` to both configured manager agents. The plugin enforces their different authorities internally.
 
 Worker profiles are ordered from lowest to highest capability and are limited to five. Gilfoyle selects the lowest adequate `profileId` during `prepare`; arbitrary model overrides are rejected. Each attempt retains its concrete profile ID, model, and thinking level, so later configuration changes do not rewrite execution evidence.
+
+Every implementation or review worktree must be created before `prepare`. The plugin validates that the worktree is uniquely registered with its branch, belongs to the selected repository, is a clean canonical root at the immutable base SHA, is distinct from the integration checkout/branch, and does not reuse another retained attempt identity. The returned `spawnArgs.cwd` binds the worker to that validated worktree; the plugin does not create worktrees or spawn workers itself.
 
 Fallback destinations use OpenClaw's native `channel`/`accountId`/`to` address format, with optional `threadId`. The plugin requires direct destinations, rediscovers one exact current conversation reference before every fallback send, and fails closed when the address is unavailable or ambiguous. Opaque `conversationRef` values do not belong in static configuration.
 

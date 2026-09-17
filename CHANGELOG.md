@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.2 - 2026-09-17
+
+- Require every worker worktree to exist before delegation preparation.
+- Validate unique registration, branch pairing, repository identity, canonical root, immutable base HEAD, cleanliness, and integration-checkout isolation for ordinary attempts as well as reviews and replacements.
+- Reject reuse of another Work item's retained branch or worktree identity.
+
 ## 2.2.1 - 2026-09-17
 
 - Added Prettier with write and non-mutating check commands.

@@ -131,22 +131,22 @@ function spawnArguments(c, p, review) {
   };
 }
 
-function inspectReviewWorktree(info, p, review, git) {
-  assert.equal(p.baseSha, review.candidate, 'Review base must equal the exact candidate');
+function inspectPreparedWorktree(info, p, git) {
   const checkout = field(info.notes, 'Checkout'),
     integration = field(info.notes, 'Integration branch');
-  assert.notEqual(p.branch, integration, 'Review branch must be distinct from integration');
+  assert.notEqual(p.worktree, checkout, 'Worker worktree must be distinct from the checkout');
+  assert.notEqual(p.branch, integration, 'Worker branch must be distinct from integration');
   const common = git(checkout, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   const worktrees = git(checkout, ['worktree', 'list', '--porcelain']).split('\n\n');
   assert.equal(
     worktrees.filter((entry) => entry.split('\n').includes(`worktree ${p.worktree}`)).length,
     1,
-    'Review worktree must be precreated and uniquely registered',
+    'Worker worktree must be precreated and uniquely registered',
   );
   assert.equal(
     worktrees.filter((entry) => entry.split('\n').includes(`branch refs/heads/${p.branch}`)).length,
     1,
-    'Review branch must be uniquely registered',
+    'Worker branch must be uniquely registered',
   );
   assert.equal(
     worktrees.filter(
@@ -155,33 +155,55 @@ function inspectReviewWorktree(info, p, review, git) {
         entry.split('\n').includes(`branch refs/heads/${p.branch}`),
     ).length,
     1,
-    'Review worktree and branch registration must match',
+    'Worker worktree and branch registration must match',
   );
   assert.equal(
     git(p.worktree, ['rev-parse', '--path-format=absolute', '--git-common-dir']),
     common,
-    'Review worktree belongs to another repository',
+    'Worker worktree belongs to another repository',
   );
   assert.equal(
     git(p.worktree, ['rev-parse', '--show-toplevel']),
     p.worktree,
-    'Canonical review worktree root required',
+    'Canonical worker worktree root required',
   );
   assert.equal(
     git(p.worktree, ['symbolic-ref', '--short', 'HEAD']),
     p.branch,
-    'Review branch changed',
+    'Worker branch changed',
   );
   assert.equal(
     git(p.worktree, ['rev-parse', 'HEAD']),
-    review.candidate,
-    'Review HEAD differs from candidate',
+    p.baseSha,
+    'Worker HEAD differs from immutable base',
   );
   assert.equal(
     git(p.worktree, ['status', '--porcelain', '--untracked-files=all']),
     '',
-    'Dirty review worktree',
+    'Dirty worker worktree',
   );
+}
+
+function assertWorktreeIdentityAvailable(cards, card, p) {
+  const assignments = cards
+    .filter((item) => item.id !== card.id)
+    .flatMap((item) => {
+      const worktree = /^Worktree: (.+)$/m.exec(item.notes ?? '')?.[1],
+        branch = /^Branch: (.+)$/m.exec(item.notes ?? '')?.[1];
+      return [
+        ...(worktree || branch ? [{ worktree, branch }] : []),
+        ...reconciledAttempts(item).flatMap((attempt) => [attempt.prior, attempt.next]),
+      ];
+    });
+  assert(
+    assignments.every((attempt) => attempt.worktree !== p.worktree && attempt.branch !== p.branch),
+    'Worker branch and worktree must be new',
+  );
+}
+
+function inspectReviewWorktree(info, p, review, git) {
+  assert.equal(p.baseSha, review.candidate, 'Review base must equal the exact candidate');
+  inspectPreparedWorktree(info, p, git);
 }
 function acceptedReviewProof(proof, candidate) {
   const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -409,7 +431,9 @@ export async function operate(
       plan(p);
       const selected = workerProfile(p.profileId);
       p = { ...p, profileId: selected.id, model: selected.model, thinking: selected.thinking };
+      assertWorktreeIdentityAvailable(state.cards, c, p);
       if (review) inspectReviewWorktree(state.info, p, review, git);
+      else inspectPreparedWorktree(state.info, p, git);
       if (p.attempt > 1) {
         assert.equal(
           p.taskName,
