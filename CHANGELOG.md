@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.4 - 2026-09-18
+
+- Removed deployment-specific defenses for obsolete canonical-main controls and `REPLY_SKIP`; reusable behavior relies on the current protocol and clean manager sessions.
+- Retained the current companion guard and claim-release methods required by real delegation preparation and recording.
+
 ## 2.2.3 - 2026-09-17
 
 - Fixed real delegation preparation by permitting the project-active guard through the companion RPC boundary.

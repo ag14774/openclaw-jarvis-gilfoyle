@@ -626,11 +626,8 @@ test('supported hooks suppress internal transport and outbound projections witho
     ),
     ['jarvis_project', 'gilfoyle_engineering'],
   );
-  const internal = {
-      agentId: 'gilfoyle',
-      sessionKey: 'agent:gilfoyle:jarvis-gilfoyle:feature',
-    },
-    user = { agentId: 'main', sessionKey: 'agent:main:telegram:direct:100' };
+  const internal = { sessionKey: 'agent:gilfoyle:jarvis-gilfoyle:feature' },
+    user = { sessionKey: 'agent:main:telegram:direct:100' };
   assert(
     (
       await hooks.get('before_tool_call')(
@@ -644,48 +641,6 @@ test('supported hooks suppress internal transport and outbound projections witho
   );
   assert.equal(hooks.get('message_sending')({}, internal).cancel, true);
   assert.equal(hooks.get('reply_payload_sending')({}, internal).cancel, true);
-  assert.equal(
-    hooks.get('reply_payload_sending')(
-      { payload: { text: 'REPLY_SKIP' }, sessionKey: user.sessionKey },
-      user,
-    ).cancel,
-    true,
-  );
-  assert(
-    (
-      await hooks.get('before_tool_call')(
-        {
-          toolName: 'sessions_send',
-          params: {
-            message: 'JG FEATURE REQUEST\nproject: Alpha',
-            sessionKey: 'agent:main:main',
-          },
-        },
-        user,
-      )
-    ).block,
-  );
-  assert(
-    (
-      await hooks.get('before_tool_call')(
-        {
-          toolName: 'sessions_send',
-          params: { message: 'Please process this', sessionKey: 'agent:main:main' },
-        },
-        user,
-      )
-    ).block,
-  );
-  assert.equal(
-    await hooks.get('before_tool_call')(
-      {
-        toolName: 'sessions_send',
-        params: { message: 'Give your technical view', sessionKey: 'agent:gilfoyle:main' },
-      },
-      user,
-    ),
-    undefined,
-  );
   assert.equal(hooks.get('message_sending')({}, user), undefined);
   assert.equal(
     hooks.get('message_sending')(
