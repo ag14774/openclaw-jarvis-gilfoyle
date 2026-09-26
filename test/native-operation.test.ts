@@ -12,7 +12,7 @@ import { githubFixture } from './github-fixture.ts';
 import { assertCommentCapacity, handoffError, handoffMarker } from '../src/helpers/handoff-card.ts';
 import { createProductCard, sealCreationPayload } from '../src/helpers/create-card.ts';
 import { delegationError } from '../src/helpers/record-delegation.ts';
-import { finishReport } from '../src/helpers/finish-report.ts';
+import { finalizeFeature } from '../src/helpers/finalize-feature.ts';
 
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const sha = 'a'.repeat(40);
@@ -515,7 +515,7 @@ test('current-route question receipt and explicit cross-conversation answer surv
   assert.equal(f.cards[1].status, 'todo');
 });
 
-test('read-only scheduled report closes with unchanged Git proof and one native notification', async () => {
+test('settled work finalizes with unchanged Git proof and one native notification', async () => {
   const f = fixture();
   f.cards.splice(2);
   f.cards[1].notes += '\nScope: Read-only report of current test status';
@@ -527,10 +527,10 @@ test('read-only scheduled report closes with unchanged Git proof and one native 
     summary: 'Current tests pass.',
     evidence: 'Observed npm test with three passing checks and unchanged HEAD.',
   };
-  const result = await finishReport(input, f.rpc, f.git);
+  const result = await finalizeFeature(input, f.rpc, f.git);
   assert.equal(f.cards[1].status, 'done');
   assert.equal(f.cards.find((c) => c.id === result.notificationId).agentId, 'main');
-  await finishReport(input, f.rpc, f.git);
+  await finalizeFeature(input, f.rpc, f.git);
   assert.equal(
     f.cards.filter(
       (c) => c.metadata.automation.idempotencyKey === `action:${id(2)}:owner-notification`,
@@ -539,13 +539,13 @@ test('read-only scheduled report closes with unchanged Git proof and one native 
   );
 });
 
-test('read-only report rejects a changed checkout before creating a notification', async () => {
+test('finalization rejects a changed checkout before creating a notification', async () => {
   const f = fixture();
   f.cards.splice(2);
   f.cards[1].notes += '\nScope: Read-only report';
   f.claim(f.cards[1]);
   await assert.rejects(
-    finishReport(
+    finalizeFeature(
       { boardId: 'project', id: id(2), sha, summary: 'Findings', evidence: 'Checked' },
       f.rpc,
       (cwd, args) => (args[0] === 'status' ? ' M stats.mjs' : f.git(cwd, args)),
@@ -553,6 +553,109 @@ test('read-only report rejects a changed checkout before creating a notification
     /clean/,
   );
   assert.equal(f.cards.length, 2);
+});
+
+test('finalization repairs an already-completed Feature without changing its outcome', async () => {
+  const f = fixture();
+  f.cards.splice(2);
+  f.cards[1].status = 'done';
+  f.cards[1].completedAt = Date.now();
+  f.cards[1].metadata.automation.summary = 'The requested behavior was already available.';
+  f.cards[1].metadata.proof = [
+    { status: 'passed', label: 'Existing behavior', note: 'Verified on repository main.' },
+  ];
+  const result = await finalizeFeature(
+    {
+      boardId: 'project',
+      id: id(2),
+      summary: 'The requested behavior was already available.',
+      evidence: 'Verified the existing behavior and retained prior delivery evidence.',
+    },
+    f.rpc,
+    f.git,
+  );
+  assert.equal(result.status, 'finalized');
+  assert.equal(
+    f.cards[1].metadata.automation.summary,
+    'The requested behavior was already available.',
+  );
+  assert.equal(
+    f.cards.filter(
+      (card) => card.metadata.automation.idempotencyKey === `action:${id(2)}:owner-notification`,
+    ).length,
+    1,
+  );
+});
+
+test('finalization validates an existing terminal outcome before staging its notice', async () => {
+  const f = fixture();
+  f.cards.splice(2);
+  f.cards[1].status = 'done';
+  f.cards[1].completedAt = Date.now();
+  f.cards[1].metadata.automation.summary = 'Existing outcome';
+  f.cards[1].metadata.proof = [{ status: 'passed', note: 'Existing proof' }];
+  await assert.rejects(
+    finalizeFeature(
+      {
+        boardId: 'project',
+        id: id(2),
+        sha,
+        summary: 'Changed outcome',
+        evidence: 'New claim',
+      },
+      f.rpc,
+      f.git,
+    ),
+    /Terminal Feature evidence mismatch/,
+  );
+  assert.equal(f.cards.length, 2);
+});
+
+test('finalization rejects malformed related children before staging a notice', async () => {
+  const f = fixture();
+  f.cards[2].status = 'done';
+  f.cards[2].metadata.proof = [{ status: 'passed', note: 'Claimed complete' }];
+  f.cards[2].metadata.automation.tenant = id(99);
+  f.claim(f.cards[1]);
+  await assert.rejects(
+    finalizeFeature(
+      {
+        boardId: 'project',
+        id: id(2),
+        sha,
+        summary: 'No change required.',
+        evidence: 'Checked current state.',
+      },
+      f.rpc,
+      f.git,
+    ),
+    /Malformed Feature child/,
+  );
+  assert.equal(f.cards.length, 3);
+});
+
+test('finalization rejects linked or unsealed relevant children', async () => {
+  const f = fixture();
+  f.cards[2].status = 'done';
+  f.cards[2].metadata.proof = [{ status: 'passed', note: 'Claimed complete' }];
+  f.cards[2].notes += `\nCreation: sha256:${'b'.repeat(64)}`;
+  f.cards[2].metadata.links = [{ type: 'parent', targetCardId: id(2) }];
+  f.claim(f.cards[1]);
+  await assert.rejects(
+    finalizeFeature(
+      {
+        boardId: 'project',
+        id: id(2),
+        sha,
+        summary: 'No change required.',
+        evidence: 'Checked current state.',
+      },
+      f.rpc,
+      f.git,
+    ),
+    /Native dependency links/,
+  );
+  assert.equal(f.cards.length, 3);
 });
 
 test('internal operational recovery preserves failed execution without inventing a user answer', async () => {

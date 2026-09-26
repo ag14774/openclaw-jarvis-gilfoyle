@@ -8,6 +8,7 @@ import {
   createProductCard,
 } from './helpers/create-card.js';
 import { readView, pageCards } from './helpers/workboard-page.js';
+import { finalizeFeature } from './helpers/finalize-feature.js';
 import { handoffCard, assertCommentCapacity } from './helpers/handoff-card.js';
 import { handoffMarker, controllerKey, currentAttempt } from './helpers/record-contracts.js';
 import { topology, isProjectSessionKey, roleForAgent, agentForRole } from './topology.js';
@@ -336,6 +337,12 @@ export class ProjectRuntime {
         "SELECT id,event,status FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent')",
         id,
       ),
+      communicationIntents: this.store
+        .all(
+          "SELECT id,event,scope,kind,facts,status FROM communication_intents WHERE project=? AND status='pending' ORDER BY created",
+          id,
+        )
+        .map((intent) => ({ ...intent, facts: JSON.parse(intent.facts) })),
       milestoneCandidates: this.milestoneCandidates(p, cards),
     };
   }
@@ -354,6 +361,10 @@ export class ProjectRuntime {
         })),
       notifications: this.store.all(
         "SELECT id,event,status FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent')",
+        id,
+      ),
+      communicationIntents: this.store.all(
+        "SELECT id,event,scope,kind,status FROM communication_intents WHERE project=? AND status='pending'",
         id,
       ),
       schedules: this.store.all(
@@ -537,8 +548,7 @@ export class ProjectRuntime {
       return {
         ...(await this.summary(p.id)),
         confirmInNewConversation: true,
-        requiredConfirmation:
-          'In one natural reply confirm this role-specific move and include purpose, associated repository names/links (or none), active Features, open decisions, and next steps. Do not omit these continuity fields.',
+        continuityFields: ['purpose', 'repositories', 'features', 'decisions', 'nextSteps'],
       };
     }
     if (operation === 'context') {
@@ -615,6 +625,52 @@ export class ProjectRuntime {
         reused: Boolean(prior),
         retainedMessage: d.text,
         receipt: d.receipt ? JSON.parse(d.receipt) : null,
+      };
+    }
+    if (operation === 'communication-decision') {
+      assert(
+        agentId === productAgentId && internal && typeof input.notify === 'boolean',
+        'The product agent decides project communication',
+      );
+      const intent = this.store.get(
+        'SELECT * FROM communication_intents WHERE project=? AND event=?',
+        p.id,
+        input.event,
+      );
+      assert(intent, 'Unknown communication intent');
+      if (exchange)
+        assert.equal(intent.scope, exchange.scope, 'Communication belongs to another topic');
+      if (intent.status !== 'pending')
+        return {
+          event: intent.event,
+          status: intent.status,
+          delivery: this.store.get(
+            'SELECT id,status FROM deliveries WHERE project=? AND event=? AND role=?',
+            p.id,
+            intent.event,
+            'product',
+          ),
+        };
+      const delivery = input.notify
+        ? this.store.enqueue({
+            project: p.id,
+            event: intent.event,
+            kind: intent.kind,
+            message: text(input.message, 6000),
+          })
+        : null;
+      this.store.run(
+        'UPDATE communication_intents SET status=?,reason=?,updated=? WHERE id=?',
+        input.notify ? 'composed' : 'dismissed',
+        text(input.reason ?? 'Jarvis communication judgment', 1000),
+        this.now(),
+        intent.id,
+      );
+      this.requestTick();
+      return {
+        event: intent.event,
+        status: input.notify ? 'composed' : 'dismissed',
+        deliveryId: delivery?.id ?? null,
       };
     }
     if (operation === 'milestone-decision') {
@@ -715,7 +771,6 @@ export class ProjectRuntime {
           c.id === exchange.scope || c.metadata?.automation?.tenant === exchange.scope,
           'Question belongs to another topic',
         );
-      const q = JSON.parse(c.metadata.comments.find((x) => x.id === h.question).body).data;
       const existing = this.store.get(
         'SELECT * FROM deliveries WHERE project=? AND event=? AND role=?',
         p.id,
@@ -728,7 +783,7 @@ export class ProjectRuntime {
           project: p.id,
           event: `question:${h.checkpoint}`,
           kind: 'question',
-          message: `${p.name}: ${q.question}`,
+          message: text(input.message, 6000),
         });
       await this.deliver(d);
       const sent = this.store.get('SELECT * FROM deliveries WHERE id=?', d.id);
@@ -829,7 +884,12 @@ export class ProjectRuntime {
       );
       const inventory = await this.inventory(p.id);
       assert.equal(input.revision, inventory.revision, 'Project changed; show refreshed inventory');
-      const expected = [...inventory.cards, ...inventory.notifications, ...inventory.schedules]
+      const expected = [
+        ...inventory.cards,
+        ...inventory.notifications,
+        ...inventory.communicationIntents,
+        ...inventory.schedules,
+      ]
         .map((x) => x.id)
         .sort();
       const choices = input.dispositions ?? {};
@@ -863,19 +923,31 @@ export class ProjectRuntime {
       const drain =
         live ||
         inventory.cards.some((c) => choices[c.id] !== 'pending') ||
-        inventory.notifications.some((n) => choices[n.id] === 'finish');
+        inventory.notifications.some((n) => choices[n.id] === 'finish') ||
+        inventory.communicationIntents.some((intent) => choices[intent.id] === 'finish');
       for (const n of inventory.notifications.filter((n) => choices[n.id] === 'stop')) {
         const d = this.store.get('SELECT * FROM deliveries WHERE id=?', n.id);
         assert(!d.route, 'In-flight delivery must reconcile before cancellation');
         this.store.run("UPDATE deliveries SET status='cancelled' WHERE id=?", n.id);
       }
+      for (const intent of inventory.communicationIntents.filter(
+        (intent) => choices[intent.id] === 'stop',
+      ))
+        this.store.run(
+          "UPDATE communication_intents SET status='dismissed',reason=?,updated=? WHERE id=?",
+          'Explicit user stop disposition before inactivation',
+          this.now(),
+          intent.id,
+        );
       for (const s of inventory.schedules.filter((s) => choices[s.id] === 'stop'))
         this.store.run('UPDATE schedules SET enabled=0 WHERE id=?', s.id);
-      this.store.run(
-        'UPDATE projects SET state=?,revision=revision+1 WHERE id=?',
+      const updated = this.store.run(
+        'UPDATE projects SET state=?,revision=revision+1 WHERE id=? AND revision=?',
         drain ? 'draining' : 'inactive',
         p.id,
+        input.revision,
       );
+      assert.equal(updated.changes, 1, 'Project changed; show refreshed inventory');
       this.store.run(
         'INSERT OR REPLACE INTO receipts VALUES(?,?,?,?)',
         `inactivate:${p.id}`,
@@ -900,10 +972,7 @@ export class ProjectRuntime {
         agentId === productAgentId && p.state !== 'inactive',
         'Recovery cannot reactivate an inactive project',
       );
-      this.store.run(
-        'UPDATE exchanges SET attempts=0,lastDispatch=0 WHERE project=? AND closed IS NULL',
-        p.id,
-      );
+      this.store.run('UPDATE exchanges SET attempts=0,lastDispatch=0 WHERE project=?', p.id);
       this.requestTick();
       return { reconciliationRequested: true, executionRestarted: false };
     }
@@ -1049,7 +1118,8 @@ export class ProjectRuntime {
       feature = cards.find((c) => c.id === d.event.slice(7));
     assert(
       feature?.status === 'done' &&
-        /^Outcome: (delivered|cancelled)\b/.test(feature.metadata?.automation?.summary ?? '') &&
+        typeof feature.metadata?.automation?.summary === 'string' &&
+        feature.metadata.automation.summary.trim() &&
         feature.metadata?.proof?.some((p) => p.status === 'passed'),
       'Terminal Feature proof required',
     );
@@ -1082,7 +1152,7 @@ export class ProjectRuntime {
         receipt.conversationRef === route.conversationRef,
       'Actual sent native receipt required',
     );
-    const summary = `Result: sent. Native ${receipt.channel ?? route.channel} receipt messageId: ${receipt.messageId}.`;
+    const summary = `Native delivery receipt recorded: ${receipt.messageId}.`;
     const note = `Native ${receipt.channel ?? route.channel} receipt messageId: ${receipt.messageId}; conversation: ${route.conversationRef}; delivery: ${d.id}; event: ${d.event}.${d.status === 'fallback-sent' ? ' Preferred route failed; actual fallback receipt retained.' : ''}`;
     const proof = { status: 'passed', label: 'Native project notification receipt', note };
     const priorFailures = notice.metadata.failureCount;
@@ -1196,7 +1266,7 @@ export class ProjectRuntime {
       event: `fallback:${d.id}`,
       kind: 'fallback',
       managerRole: d.role,
-      message: `I could not confirm delivery to the preferred conversation for ${p.name} after bounded checks. Its binding has not changed. ${d.kind === 'question' ? 'A project question is waiting.' : 'A project update is waiting.'}\n\n${d.text}`,
+      message: d.text,
       route,
     });
     await this.deliver(fallback);
@@ -1232,14 +1302,14 @@ export class ProjectRuntime {
       );
     }
   }
-  async dispatch(project, scope, managerRole, cardIds) {
+  async dispatch(project, scope, managerRole, cardIds, attention = {}) {
     if (this.roleAdmission.has(managerRole)) return;
     this.roleAdmission.add(managerRole);
     const before = this.store.exchange(project.id, scope, managerRole),
       agentId = agentForRole(managerRole);
     this.running.add(before.session);
     try {
-      return await this.dispatchAttempt(project, scope, managerRole, cardIds);
+      return await this.dispatchAttempt(project, scope, managerRole, cardIds, attention);
     } catch (error) {
       this.health.lastDispatchFailure = {
         project: project.id,
@@ -1256,26 +1326,35 @@ export class ProjectRuntime {
           before.id,
         );
       const failed = this.store.get('SELECT * FROM exchanges WHERE id=?', before.id);
-      if (failed.attempts >= 3)
-        this.store.enqueue({
+      if (failed.attempts >= 3 && managerRole === 'engineering') {
+        this.store.requestCommunication({
           project: project.id,
-          event: `handoff-failure:${failed.id}`,
+          event: `coordination:${failed.id}:${String(failed.observed ?? 'unknown').slice(0, 16)}`,
           kind: 'blocker',
-          message: `${project.name}: I could not reconcile or start the scoped native ${agentId === topology().productAgentId ? 'communication' : 'engineering'} controller after three bounded attempts. The accepted obligation remains recorded; engineering start has not been confirmed. No replacement work has been assumed safe.`,
+          scope,
+          facts: {
+            condition: 'coordination-stalled',
+            managerRole,
+            attemptsAtLeast: 3,
+            obligationRetained: true,
+            replacementAuthorized: false,
+          },
         });
+        this.requestTick();
+      }
       throw error;
     } finally {
       this.running.delete(before.session);
       this.roleAdmission.delete(managerRole);
     }
   }
-  async dispatchAttempt(project, scope, managerRole, cardIds) {
+  async dispatchAttempt(project, scope, managerRole, cardIds, attention = {}) {
     const agentId = agentForRole(managerRole);
     if (this.store.project(project.id).state === 'inactive') return;
     let e = this.store.exchange(project.id, scope, managerRole);
     const cards = await this.cards(project),
-      observed = hash(
-        cards
+      observed = hash([
+        ...cards
           .filter((c) => c.id === scope || c.metadata?.automation?.tenant === scope)
           .map((c) => [
             c.id,
@@ -1285,7 +1364,16 @@ export class ProjectRuntime {
             c.metadata?.automation?.summary,
             c.metadata?.proof,
           ]),
-      );
+        ...(managerRole === 'product'
+          ? this.store
+              .all(
+                "SELECT event,kind,facts,status FROM communication_intents WHERE project=? AND scope=? AND status='pending' ORDER BY created",
+                project.id,
+                scope,
+              )
+              .map((intent) => [intent.event, intent.kind, intent.facts, intent.status])
+          : []),
+      ]);
     if (e.observed !== observed) {
       this.store.run(
         'UPDATE exchanges SET attempts=0,lastDispatch=0,observed=? WHERE id=?',
@@ -1295,6 +1383,31 @@ export class ProjectRuntime {
       e = this.store.get('SELECT * FROM exchanges WHERE id=?', e.id);
     }
     if (e.closed || this.now() - e.lastDispatch < 120000) return;
+    if (e.attempts >= 3) {
+      if (
+        managerRole === 'engineering' &&
+        !this.store.get(
+          "SELECT id FROM communication_intents WHERE project=? AND scope=? AND status='pending' LIMIT 1",
+          project.id,
+          scope,
+        )
+      )
+        this.store.requestCommunication({
+          project: project.id,
+          event: `coordination:${e.id}:${e.observed.slice(0, 16)}`,
+          kind: 'blocker',
+          scope,
+          facts: {
+            condition: 'coordination-stalled',
+            managerRole,
+            attemptsAtLeast: 3,
+            obligationRetained: true,
+            replacementAuthorized: false,
+          },
+        });
+      if (this.now() - e.lastDispatch < 1800000) return;
+      this.store.run('UPDATE exchanges SET attempts=0 WHERE id=?', e.id);
+    }
     const sessions = await this.rpc('sessions.list', { agentId, limit: 500 });
     assert(!sessions.hasMore, 'Manager activity enumeration incomplete');
     if (
@@ -1317,16 +1430,6 @@ export class ProjectRuntime {
       )
     )
       return;
-    if (e.attempts >= 3) {
-      this.store.enqueue({
-        project: project.id,
-        event: `stall:${e.id}:${e.observed.slice(0, 16)}`,
-        kind: 'blocker',
-        message: `Engineering coordination for ${project.name} could not make durable progress after three recovery attempts. The recorded work is preserved; no replacement worker has been assumed safe. The outstanding checkpoint remains eligible for bounded reconciliation.`,
-      });
-      if (this.now() - e.lastDispatch < 1800000) return;
-      this.store.run('UPDATE exchanges SET attempts=0 WHERE id=?', e.id);
-    }
     await this.rpc('sessions.create', {
       key: e.session,
       agentId,
@@ -1375,7 +1478,7 @@ export class ProjectRuntime {
         deliver: false,
         idempotencyKey: runId,
         timeout: 600,
-        message: `PROJECT CONTINUATION\nProject: ${project.id}\nScope: ${scope}\nCards: ${cardIds.join(', ')}\nLoad jarvis-gilfoyle-protocol and use jarvis_project summary for this project only. Read the actual scoped Feature and relevant native records before concluding. Latest accepted Feature scope: ${field(cards.find((c) => c.id === scope) ?? {}, 'Scope') ?? 'Read the scoped card.'}\nBounded native execution references for acceptance-gap reconciliation (verify exact Work-item binding with tasks.get; an empty list is not launch authorization): ${JSON.stringify(nativeReferences)}\nAccepted Features record explicit authorization. Older declaration-time brainstorming language in purpose/context does not revoke them; current scope, stops and handoffs control execution. This is an internal Feature/communication context, never a user chat. Perform the next authorized action, not a progress description. Do not read other project or personal transcripts. Preserve accepted workers and reviews. The product agent judges summary.milestoneCandidates with milestone-decision and sends other proactive communication only through jarvis_project notify/question-delivery; it does not mutate engineering cards or repeat intake acknowledgements. The engineering agent transfers native obligations to the product agent and does not rewrite product intent. Conclude durably before finishing; final output NO_REPLY. A real child wait may use sessions_yield.`,
+        message: `PROJECT CONTINUATION\nProject: ${project.id}\nScope: ${scope}\nRelevant records: ${cardIds.join(', ')}\nAttention classifications: ${JSON.stringify(attention)}\nFeature scope: ${field(cards.find((c) => c.id === scope) ?? {}, 'Scope') ?? 'Read the scoped durable records.'}\nBounded native execution references: ${JSON.stringify(nativeReferences)}\nLoad jarvis-gilfoyle-protocol, read jarvis_project summary and the scoped native records, then perform the next safe action. Attention classifications are diagnostics, not authorization. This is an internal context, not a user chat. Preserve accepted evidence, use the product agent for user communication, record a durable conclusion, and end with NO_REPLY.`,
       });
       if (this.health.lastDispatchFailure?.scope === scope) this.health.lastDispatchFailure = null;
     } finally {
@@ -1487,6 +1590,20 @@ export class ProjectRuntime {
             await this.settleNotice(d);
           const cards = await this.cards(p),
             ready = [];
+          for (const intent of this.store.all(
+            "SELECT * FROM communication_intents WHERE project=? AND status='pending' ORDER BY created",
+            p.id,
+          ))
+            ready.push({
+              feature: intent.scope,
+              managerRole: 'product',
+              agentId: productAgentId,
+              id: `communication:${intent.id}`,
+              created: intent.created,
+              priority: 1000,
+              ownsClaim: false,
+              stage: 'communication-intent',
+            });
           for (const milestone of this.milestoneCandidates(p, cards))
             ready.push({
               feature: milestone.featureId,
@@ -1496,6 +1613,7 @@ export class ProjectRuntime {
               created: milestone.created,
               priority: 0,
               ownsClaim: false,
+              stage: 'milestone-decision',
             });
           for (const board of p.boards) {
             for (const [managerRole, agentId] of [
@@ -1510,6 +1628,26 @@ export class ProjectRuntime {
                   const item = Object.fromEntries(r.fields.map((k, i) => [k, row[i]]));
                   const c = cards.find((c) => c.id === item.id);
                   if (!c || type(c) === 'project-info' || quiet.has(item.stage)) continue;
+                  if (
+                    managerRole === 'engineering' &&
+                    item.stage === 'notification-repair' &&
+                    type(c) === 'feature' &&
+                    c.status === 'done' &&
+                    typeof c.metadata?.automation?.summary === 'string' &&
+                    c.metadata.proof?.some((proof) => proof.status === 'passed')
+                  ) {
+                    await finalizeFeature(
+                      {
+                        boardId: board.id,
+                        id: c.id,
+                        summary: c.metadata.automation.summary,
+                        evidence:
+                          'Retained terminal outcome and passed Feature proof verified for notification repair.',
+                      },
+                      this.rpc,
+                    );
+                    continue;
+                  }
                   const feature = type(c) === 'feature' ? c.id : c.metadata.automation.tenant;
                   const parent = cards.find((c) => c.id === feature);
                   if (!parent) continue;
@@ -1521,6 +1659,7 @@ export class ProjectRuntime {
                     created: c.createdAt,
                     priority: c.priority === 'urgent' ? 1000 : 0,
                     ownsClaim: Boolean(c.metadata?.claim),
+                    stage: item.stage,
                   });
                 }
                 q = r.hasMore ? { ...q, after: r.nextAfter, membership: r.membership } : null;
@@ -1536,15 +1675,25 @@ export class ProjectRuntime {
             const unfinished = cards.filter(
               (c) => choices[c.id] && choices[c.id] !== 'pending' && c.status !== 'done',
             );
+            const finishIntentEvents = new Set(
+              this.store
+                .all('SELECT id,event FROM communication_intents WHERE project=?', p.id)
+                .filter((intent) => choices[intent.id] === 'finish')
+                .map((intent) => intent.event),
+            );
             const notices = this.store
               .all(
                 "SELECT * FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent')",
                 p.id,
               )
-              .filter((d) => choices[d.id] === 'finish');
+              .filter((d) => choices[d.id] === 'finish' || finishIntentEvents.has(d.event));
+            const intents = this.store
+              .all("SELECT * FROM communication_intents WHERE project=? AND status='pending'", p.id)
+              .filter((intent) => choices[intent.id] === 'finish');
             if (
               !unfinished.length &&
               !notices.length &&
+              !intents.length &&
               !(await this.hasActiveExecution(p, cards))
             ) {
               this.store.run(
@@ -1561,8 +1710,9 @@ export class ProjectRuntime {
           const groups = new Map();
           for (const r of ready) {
             const k = `${r.managerRole}:${r.feature}`;
-            if (!groups.has(k)) groups.set(k, { ...r, ids: [] });
+            if (!groups.has(k)) groups.set(k, { ...r, ids: [], attention: {} });
             if (!groups.get(k).ids.includes(r.id)) groups.get(k).ids.push(r.id);
+            groups.get(k).attention[r.id] = r.stage;
             groups.get(k).ownsClaim ||= r.ownsClaim;
           }
           // Native one-owner claim and two-child capacity still govern engineering.
@@ -1575,8 +1725,8 @@ export class ProjectRuntime {
                 g.feature,
                 g.managerRole,
               ),
-              observed = hash(
-                cards
+              observed = hash([
+                ...cards
                   .filter((c) => c.id === g.feature || c.metadata?.automation?.tenant === g.feature)
                   .map((c) => [
                     c.id,
@@ -1586,16 +1736,40 @@ export class ProjectRuntime {
                     c.metadata?.automation?.summary,
                     c.metadata?.proof,
                   ]),
-              );
+                ...(g.managerRole === 'product'
+                  ? this.store
+                      .all(
+                        "SELECT event,kind,facts,status FROM communication_intents WHERE project=? AND scope=? AND status='pending' ORDER BY created",
+                        p.id,
+                        g.feature,
+                      )
+                      .map((intent) => [intent.event, intent.kind, intent.facts, intent.status])
+                  : []),
+              ]);
             if (e?.observed === observed) {
               if (this.now() - e.lastDispatch < 120000) continue;
               if (e.attempts >= 3 && this.now() - e.lastDispatch < 1800000) {
-                this.store.enqueue({
-                  project: p.id,
-                  event: `stall:${e.id}:${e.observed.slice(0, 16)}`,
-                  kind: 'blocker',
-                  message: `Engineering coordination for ${p.name} could not make durable progress after three recovery attempts. The recorded work is preserved; no replacement worker has been assumed safe. The outstanding checkpoint remains eligible for bounded reconciliation.`,
-                });
+                if (
+                  g.managerRole === 'engineering' &&
+                  !this.store.get(
+                    "SELECT id FROM communication_intents WHERE project=? AND scope=? AND status='pending' LIMIT 1",
+                    p.id,
+                    g.feature,
+                  )
+                )
+                  this.store.requestCommunication({
+                    project: p.id,
+                    event: `coordination:${e.id}:${e.observed.slice(0, 16)}`,
+                    kind: 'blocker',
+                    scope: g.feature,
+                    facts: {
+                      condition: 'coordination-stalled',
+                      managerRole: g.managerRole,
+                      attemptsAtLeast: 3,
+                      obligationRetained: true,
+                      replacementAuthorized: false,
+                    },
+                  });
                 continue;
               }
             }
@@ -1612,7 +1786,7 @@ export class ProjectRuntime {
       for (const g of orderReady(dispatches)) {
         if (used.has(g.managerRole)) continue;
         used.add(g.managerRole);
-        this.dispatch(g.project, g.feature, g.managerRole, g.ids).catch(() =>
+        this.dispatch(g.project, g.feature, g.managerRole, g.ids, g.attention).catch(() =>
           this.log('Internal continuation failed; retry remains durable'),
         );
       }

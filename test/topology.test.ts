@@ -80,7 +80,7 @@ test('fresh registry stores only generic roles and configured sessions', () => {
     scope = '20000000-0000-4000-8000-000000000002';
   store.enqueue({ project: project.id, event: 'result', message: 'done' });
   store.exchange(project.id, scope, 'engineering');
-  assert.equal(store.get('PRAGMA user_version').user_version, 2);
+  assert.equal(store.get('PRAGMA user_version').user_version, 3);
   assert.equal(store.get('PRAGMA quick_check').quick_check, 'ok');
   assert.equal(store.get('SELECT role FROM deliveries').role, 'product');
   const exchange = store.get('SELECT role,session FROM exchanges');

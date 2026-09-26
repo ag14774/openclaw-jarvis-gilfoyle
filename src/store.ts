@@ -44,8 +44,8 @@ export class Store {
     );
     const version = this.get('PRAGMA user_version').user_version;
     assert(
-      version === 0 || version === 2,
-      'Unsupported registry schema; create a fresh v2 registry',
+      [0, 2, 3].includes(version),
+      'Unsupported registry schema; create a fresh current registry',
     );
     this.db
       .exec(`CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,purpose TEXT NOT NULL,context TEXT NOT NULL DEFAULT '',state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','draining','inactive')),priority INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,created INTEGER NOT NULL,product_conversation TEXT NOT NULL,engineering_conversation TEXT,product_fallback TEXT NOT NULL,engineering_fallback TEXT);
@@ -54,9 +54,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,kind TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL,route TEXT,status TEXT NOT NULL DEFAULT 'pending',due INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,receipt TEXT,error TEXT,created INTEGER NOT NULL,UNIQUE(project,event,role));
       CREATE TABLE IF NOT EXISTS copies(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,role TEXT NOT NULL,route TEXT NOT NULL,consumed TEXT,recurring INTEGER NOT NULL DEFAULT 0,UNIQUE(project,event,role,route));
       CREATE TABLE IF NOT EXISTS exchanges(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),scope TEXT NOT NULL,role TEXT NOT NULL,session TEXT NOT NULL UNIQUE,attempts INTEGER NOT NULL DEFAULT 0,lastDispatch INTEGER NOT NULL DEFAULT 0,runId TEXT,conclusion TEXT,closed INTEGER,observed TEXT,UNIQUE(project,scope,role));
+      CREATE TABLE IF NOT EXISTS communication_intents(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,scope TEXT NOT NULL,kind TEXT NOT NULL,facts TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','composed','dismissed')),reason TEXT,created INTEGER NOT NULL,updated INTEGER NOT NULL,UNIQUE(project,event));
       CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),spec TEXT NOT NULL,next INTEGER NOT NULL,intervalMs INTEGER,enabled INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS sources(session TEXT PRIMARY KEY,source TEXT NOT NULL,updated INTEGER NOT NULL);
-      PRAGMA user_version=2;`);
+      PRAGMA user_version=3;`);
   }
   close() {
     this.db.close();
@@ -237,6 +238,41 @@ export class Store {
       this.now(),
     );
     return this.get('SELECT * FROM deliveries WHERE id=?', id);
+  }
+  requestCommunication({ project, event, scope, kind, facts }) {
+    this.project(project);
+    text(event, 240);
+    text(scope, 160);
+    text(kind, 80);
+    const encoded = JSON.stringify(facts);
+    assert(encoded.length <= 6000, 'Communication facts exceed bound');
+    const id = hash([project, event]).slice(0, 40),
+      old = this.get(
+        'SELECT * FROM communication_intents WHERE project=? AND event=?',
+        project,
+        event,
+      );
+    if (old) {
+      assert.equal(old.scope, scope, 'Communication scope changed');
+      assert.equal(old.kind, kind, 'Communication kind changed');
+      assert.equal(old.facts, encoded, 'Communication facts changed');
+      return old;
+    }
+    this.run(
+      'INSERT INTO communication_intents VALUES(?,?,?,?,?,?,?,?,?,?)',
+      id,
+      project,
+      event,
+      scope,
+      kind,
+      encoded,
+      'pending',
+      null,
+      this.now(),
+      this.now(),
+    );
+    this.run('UPDATE projects SET revision=revision+1 WHERE id=?', project);
+    return this.get('SELECT * FROM communication_intents WHERE id=?', id);
   }
   copy({ project, event, managerRole, route, recurring = false }) {
     role(managerRole);

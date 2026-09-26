@@ -48,8 +48,12 @@ test('project survives reopen without repository or model session; declaration i
     path = join(root, 'db');
   let s = new Store(path);
   const p = s.declare({ key: '1', name: 'Alpha', purpose: 'Idea', route: a, productFallback: a });
+  s.run('DROP TABLE communication_intents');
+  s.run('PRAGMA user_version=2');
   s.close();
   s = new Store(path);
+  assert.equal(s.get('PRAGMA user_version').user_version, 3);
+  assert.equal(s.all('SELECT * FROM communication_intents').length, 0);
   assert.equal(s.project(p.id).purpose, 'Idea');
   assert.deepEqual(s.project(p.id).boards, []);
   assert.equal(
@@ -121,6 +125,10 @@ test('bounded failure refreshes one exact address-based owner fallback without r
     advance(60001);
   }
   assert.equal(calls.filter((c) => c.conversationRef === fresh.conversationRef).length, 1);
+  assert.equal(
+    calls.find((c) => c.conversationRef === fresh.conversationRef).message,
+    'Which repository?',
+  );
   assert.equal(store.project(p.id).productFallback.conversationRef, fresh.conversationRef);
   assert.equal(store.project(p.id).productConversation.conversationRef, b.conversationRef);
   assert.equal(store.get('SELECT status FROM deliveries WHERE id=?', d.id).status, 'fallback-sent');
@@ -232,6 +240,106 @@ test('inactivation rejects omitted dispositions and incomplete inventory', async
   assert.equal(store.project(p.id).state, 'active');
 });
 
+test('inactivation requires and honors a pending communication-intent disposition', async () => {
+  const { store, p, rt } = fixture(async () => ({ cards: [], total: 0 }));
+  const intent = store.requestCommunication({
+    project: p.id,
+    event: 'blocker:inactivation',
+    scope: '10000000-0000-4000-8000-000000000001',
+    kind: 'blocker',
+    facts: { condition: 'coordination-stalled' },
+  });
+  await assert.rejects(
+    rt.operation(
+      'inactivate',
+      { projectId: p.id, confirmed: true, revision: 2, dispositions: {} },
+      { agentId: 'main', operator: true },
+    ),
+    /Every unfinished/,
+  );
+  await rt.operation(
+    'inactivate',
+    {
+      projectId: p.id,
+      confirmed: true,
+      revision: 2,
+      dispositions: { [intent.id]: 'stop' },
+    },
+    { agentId: 'main', operator: true },
+  );
+  assert.equal(store.project(p.id).state, 'inactive');
+  assert.equal(
+    store.get('SELECT status FROM communication_intents WHERE id=?', intent.id).status,
+    'dismissed',
+  );
+});
+
+test('inactivation fails if a communication intent appears after inventory', async () => {
+  const { store, p, rt } = fixture(async () => ({ cards: [], total: 0 }));
+  rt.hasActiveExecution = async () => {
+    store.requestCommunication({
+      project: p.id,
+      event: 'blocker:concurrent',
+      scope: '10000000-0000-4000-8000-000000000001',
+      kind: 'blocker',
+      facts: { condition: 'concurrent-recovery' },
+    });
+    return false;
+  };
+  await assert.rejects(
+    rt.operation(
+      'inactivate',
+      { projectId: p.id, confirmed: true, revision: 1, dispositions: {} },
+      { agentId: 'main', operator: true },
+    ),
+    /Project changed/,
+  );
+  assert.equal(store.project(p.id).state, 'active');
+  assert.equal(store.all("SELECT * FROM communication_intents WHERE status='pending'").length, 1);
+});
+
+test('draining tracks the delivery produced from a finish communication intent', async () => {
+  const { store, p, rt } = fixture();
+  const scope = '10000000-0000-4000-8000-000000000001';
+  const intent = store.requestCommunication({
+    project: p.id,
+    event: `blocker:${scope}`,
+    scope,
+    kind: 'blocker',
+    facts: { condition: 'coordination-stalled' },
+  });
+  await rt.operation(
+    'inactivate',
+    {
+      projectId: p.id,
+      confirmed: true,
+      revision: 2,
+      dispositions: { [intent.id]: 'finish' },
+    },
+    { agentId: 'main', operator: true },
+  );
+  const exchange = store.exchange(p.id, scope, 'product');
+  const decision = await rt.operation(
+    'communication-decision',
+    {
+      projectId: p.id,
+      event: intent.event,
+      notify: true,
+      reason: 'The owner should know.',
+      message: 'I retained the request and need more time to resolve its coordination state.',
+    },
+    { agentId: 'main', sessionKey: exchange.session },
+  );
+  store.run('UPDATE exchanges SET closed=? WHERE id=?', rt.now(), exchange.id);
+  store.run(
+    "UPDATE deliveries SET status='retry',due=? WHERE id=?",
+    rt.now() + 60000,
+    decision.deliveryId,
+  );
+  await rt.tick();
+  assert.equal(store.project(p.id).state, 'draining');
+});
+
 test('nearby milestones share a late-routed receipt without losing their event identities', async () => {
   const sent = [];
   const { store, p, rt, advance } = fixture(async (m, args) => {
@@ -280,15 +388,57 @@ test('native metadata tokens prevent a queued message replacing an in-flight sou
   );
 });
 
-test('native-controller admission failures are bounded and leave one durable blocker', async () => {
+test('native-controller admission failures request Jarvis composition without sending static prose', async () => {
   const { store, p, rt, advance } = fixture(async () => {
     throw Error('native unavailable');
   });
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 3; i++) {
     await assert.rejects(rt.dispatch(store.project(p.id), 'feature', 'engineering', ['card']));
     advance(120001);
   }
-  assert.equal(store.all("SELECT * FROM deliveries WHERE kind='blocker'").length, 1);
+  await rt.dispatch(store.project(p.id), 'feature', 'engineering', ['card']);
+  assert.equal(store.all("SELECT * FROM deliveries WHERE kind='blocker'").length, 0);
+  const intents = store.all("SELECT * FROM communication_intents WHERE kind='blocker'");
+  assert.equal(intents.length, 1);
+  assert.equal(intents[0].status, 'pending');
+  assert.equal(JSON.parse(intents[0].facts).condition, 'coordination-stalled');
+  assert.equal(
+    store.get("SELECT attempts FROM exchanges WHERE scope='feature' AND role='engineering'")
+      .attempts,
+    3,
+  );
+});
+
+test('Jarvis turns structured communication facts into the only user-facing message', async () => {
+  const { store, p, rt } = fixture();
+  const scope = '10000000-0000-4000-8000-000000000001';
+  store.requestCommunication({
+    project: p.id,
+    event: `blocker:${scope}`,
+    scope,
+    kind: 'blocker',
+    facts: { condition: 'coordination-stalled', obligationRetained: true },
+  });
+  const e = store.exchange(p.id, scope, 'product');
+  const result = await rt.operation(
+    'communication-decision',
+    {
+      projectId: p.id,
+      event: `blocker:${scope}`,
+      notify: true,
+      reason: 'The owner should know what is waiting.',
+      message:
+        'I found a coordination issue and kept the request safely recorded while I investigate it.',
+    },
+    { agentId: 'main', sessionKey: e.session },
+  );
+  assert.equal(result.status, 'composed');
+  const delivery = store.get('SELECT * FROM deliveries WHERE id=?', result.deliveryId);
+  assert.equal(
+    delivery.text,
+    'I found a coordination issue and kept the request safely recorded while I investigate it.',
+  );
+  assert(!delivery.text.includes('bounded attempts'));
 });
 
 test('controller admission validates complete native scope and admits only one turn per role', async () => {
@@ -305,7 +455,9 @@ test('controller admission validates complete native scope and admits only one t
     }
     throw Error(m);
   });
-  await rt.dispatch(p, 'scope-a', 'engineering', ['card-a']);
+  await rt.dispatch(p, 'scope-a', 'engineering', ['card-a'], {
+    'card-a': 'notification-repair',
+  });
   const q = store.declare({
     key: 'q',
     name: 'Other',
@@ -316,6 +468,9 @@ test('controller admission validates complete native scope and admits only one t
   await rt.dispatch(q, 'scope-b', 'engineering', ['card-b']);
   assert.equal(calls.filter((c) => c.m === 'agent').length, 1);
   assert(calls.some((c) => c.m === 'workboard.cards.list'));
+  assert(
+    calls.find((c) => c.m === 'agent').args.message.includes('"card-a":"notification-repair"'),
+  );
 });
 
 test('receipt-backed settlement repairs only notification bookkeeping and never repeats a send or completion', async () => {
@@ -393,7 +548,7 @@ test('receipt-backed settlement repairs only notification bookkeeping and never 
   assert.equal(cards[1].metadata.proof.length, 2);
   assert.equal(cards[1].metadata.proof[0].id, 'original-proof');
   assert.equal(cards[1].metadata.failureCount, 2);
-  assert(cards[1].metadata.automation.summary.startsWith('Result: sent.'));
+  assert(cards[1].metadata.automation.summary.includes('600'));
   assert(!calls.includes('conversations.send') && !calls.includes('workboard.cards.complete'));
 });
 
@@ -515,6 +670,28 @@ test('source serialization accommodates supported channel punctuation without de
   assert(one.includes('recipient=%21room:example.org'));
   assert(one.endsWith('thread=a%2Fb'));
   assert.notEqual(one, two);
+});
+
+test('explicit recovery resets closed and open retry budgets without directly reopening execution', async () => {
+  const { store, p, rt } = fixture();
+  const closed = store.exchange(p.id, 'closed-scope', 'engineering');
+  const open = store.exchange(p.id, 'open-scope', 'product');
+  store.run(
+    'UPDATE exchanges SET attempts=3,lastDispatch=?,closed=? WHERE id=?',
+    20,
+    30,
+    closed.id,
+  );
+  store.run('UPDATE exchanges SET attempts=2,lastDispatch=? WHERE id=?', 20, open.id);
+  const result = await rt.operation(
+    'recover',
+    { projectId: p.id },
+    { agentId: 'main', operator: true },
+  );
+  assert.equal(result.executionRestarted, false);
+  const rows = store.all('SELECT id,attempts,lastDispatch,closed FROM exchanges ORDER BY id');
+  assert(rows.every((row) => row.attempts === 0 && row.lastDispatch === 0));
+  assert(rows.find((row) => row.id === closed.id).closed);
 });
 
 test('temporary context cleanup preserves durable conclusions and retry budget across context recreation', async () => {

@@ -25,6 +25,7 @@ const STATUSES = new Set([
   'blocked',
   'done',
 ]);
+const CANONICAL_PROJECT_STATUSES = new Set(['todo', 'running', 'blocked', 'done']);
 const VIEWS = new Set(['queue', 'todoUndelegated', 'delegated', 'attention']);
 export const PAGE_CANDIDATE_LIMIT = 96;
 export const PAGE_OUTPUT_BYTES = 12000;
@@ -63,7 +64,7 @@ function sentOwnerNotice(notice, feature) {
     (!notice.metadata?.archivedAt || feature.metadata?.archivedAt) &&
     typeof summary === 'string' &&
     summary.length <= 1400 &&
-    /^Result: sent(?:\b|$)/.test(summary) &&
+    summary.trim().length > 0 &&
     notice.metadata?.proof?.some(
       (proof) =>
         proof.status === 'passed' &&
@@ -160,7 +161,9 @@ export function classifyCards(cards, evidence = {}, now = Date.now()) {
       /^Type: feature$/im.test(parent.notes) &&
       (parent.notes.match(/^Type:/gim) ?? []).length === 1 &&
       parent.metadata?.automation?.boardId === card.metadata?.automation?.boardId;
-    if (card.status === 'done') {
+    if (type && !CANONICAL_PROJECT_STATUSES.has(card.status)) {
+      stage = 'status-reconciliation';
+    } else if (card.status === 'done') {
       stage = 'settled';
       // The default board is explicitly not a registered product project.
       if (
@@ -178,7 +181,8 @@ export function classifyCards(cards, evidence = {}, now = Date.now()) {
                 c.labels?.includes('owner-notification'))),
         );
         if (
-          !/^Outcome: (delivered|cancelled)\b/.test(card.metadata?.automation?.summary ?? '') ||
+          typeof card.metadata?.automation?.summary !== 'string' ||
+          !card.metadata.automation.summary.trim() ||
           !card.metadata?.proof?.some((p) => p.status === 'passed')
         )
           stage = 'terminal-proof-uncertain';
@@ -358,7 +362,7 @@ export function classifyCards(cards, evidence = {}, now = Date.now()) {
       card.sessionKey
     )
       stage = 'manager-reconciliation';
-    else if (type === 'work item' && ['todo', 'ready'].includes(card.status)) {
+    else if (type === 'work item' && card.status === 'todo') {
       const requires = /^Requires Work items: (.+)$/m.exec(notes)?.[1];
       const dependencies = requires === 'none' ? [] : requires?.split(', ');
       const valid =
@@ -383,7 +387,7 @@ export function classifyCards(cards, evidence = {}, now = Date.now()) {
           ? 'todoUndelegated'
           : 'dependency-wait';
       if (
-        !['todo', 'ready', 'review'].includes(parent.status) ||
+        !['todo', 'running'].includes(parent.status) ||
         parent.metadata?.archivedAt ||
         handoffHeld(parent) ||
         parent.labels?.includes('user-held') ||
@@ -396,12 +400,8 @@ export function classifyCards(cards, evidence = {}, now = Date.now()) {
         )
       )
         stage = 'parent-wait';
-    } else if (type === 'feature' && ['todo', 'ready', 'review'].includes(card.status))
-      stage = 'orchestration';
-    else if (type === 'action' && ['todo', 'ready', 'review'].includes(card.status))
-      stage = 'action';
-    else if (card.status === 'backlog' || card.status === 'scheduled') stage = 'held';
-    else if (card.status === 'review') stage = 'pending-verification';
+    } else if (type === 'feature' && card.status === 'todo') stage = 'orchestration';
+    else if (type === 'action' && card.status === 'todo') stage = 'action';
     if (
       card.status !== 'done' &&
       ((notes.match(/^Type:/gim) ?? []).length !== 1 ||

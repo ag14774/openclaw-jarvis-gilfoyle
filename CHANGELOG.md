@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.3.0 - 2026-09-18
+
+- Replaced lexical read-only closure with one generic `finalize` operation for settled non-publication outcomes and idempotent missing-notification repair.
+- Removed enumerated terminal-summary prefixes; terminal validity now uses durable completion and passed evidence.
+- Replaced runtime-authored recovery blockers with structured communication intents that Jarvis composes or dismisses.
+- Required Jarvis-composed question wording and preserved that wording verbatim during fallback delivery.
+- Defined `todo`, `running`, `blocked`, and `done` as the canonical project-card statuses; other native statuses now require reconciliation.
+- Migrated v2 registries in place to v3 communication-intent storage.
+
 ## 2.2.4 - 2026-09-18
 
 - Removed deployment-specific defenses for obsolete canonical-main controls and `REPLY_SKIP`; reusable behavior relies on the current protocol and clean manager sessions.

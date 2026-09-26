@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { createProductCard, creationError } from './helpers/create-card.js';
 import { operate } from './helpers/native-operation.js';
-import { finishReport } from './helpers/finish-report.js';
+import { finalizeFeature } from './helpers/finalize-feature.js';
 import { handoffCard, handoffError } from './helpers/handoff-card.js';
 import { readView } from './helpers/workboard-page.js';
 import { delegationError } from './helpers/record-delegation.js';
@@ -30,6 +30,7 @@ const inputSchema = {
         'associate',
         'intake',
         'notify',
+        'communication-decision',
         'milestone-decision',
         'delivery',
         'also-notify',
@@ -59,7 +60,7 @@ const engineeringOperations = [
   'publish-gate',
   'gate',
   'finish',
-  'finish-report',
+  'finalize',
   'handoff',
   'handoff-product-decision',
   'handoff-apply',
@@ -131,7 +132,7 @@ export default {
           name: 'gilfoyle_engineering',
           label: 'Project engineering records',
           description:
-            'Validated Workboard record creation, configured worker profiles, delegation binding, handoffs, evidence queries, publication gates, and read-only report closure. Available only inside a registered project context. It performs bookkeeping and validation; it never spawns workers, sends user messages, pushes, creates pull requests, merges, or deploys.',
+            'Validated Workboard creation, worker binding, handoffs, evidence queries, publication gates, and generic settled-outcome finalization. Available only inside a registered project context. It performs bookkeeping and validation; it never spawns workers, sends user messages, pushes, creates pull requests, merges, or deploys.',
           parameters: engineeringSchema,
           async execute(_id, args) {
             const r = get(),
@@ -180,7 +181,7 @@ export default {
               else if (operation === 'profiles') result = { profiles: workerProfiles() };
               else if (['prepare', 'record', 'publish-gate', 'gate', 'finish'].includes(operation))
                 result = await operate(operation, input, rpc);
-              else if (operation === 'finish-report') result = await finishReport(input, rpc);
+              else if (operation === 'finalize') result = await finalizeFeature(input, rpc);
               else if (
                 [
                   'handoff',

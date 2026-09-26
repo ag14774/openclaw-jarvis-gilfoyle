@@ -182,7 +182,7 @@ test('queue requires accepted same-parent dependencies, product wait remains qui
   const answer = {
     ...item(4),
     agentId: 'gilfoyle',
-    status: 'review',
+    status: 'todo',
     notes: `Type: action\nFeature: ${parent.id}\nWait: product-answer`,
   };
   assert.equal(
@@ -422,7 +422,7 @@ test('a live orphaned session prevents absent-ledger admission', () => {
   assert.equal(page.capacity.complete, false);
 });
 
-test('terminal Feature cannot hide missing notification or invalid outcome proof', () => {
+test('terminal Feature cannot hide missing notification or invalid delivery proof', () => {
   const f = {
     ...parent,
     status: 'done',
@@ -431,8 +431,6 @@ test('terminal Feature cannot hide missing notification or invalid outcome proof
       proof: [{ status: 'passed' }],
     },
   };
-  assert.equal(classifyCards([f]).get(f.id).stage, 'terminal-proof-uncertain');
-  f.metadata.automation.summary = 'Outcome: delivered';
   assert.equal(classifyCards([f]).get(f.id).stage, 'notification-repair');
   const notice = { ...item(6), agentId: 'gilfoyle', notes: `Type: action\nFeature: ${f.id}` };
   notice.metadata.automation.idempotencyKey = `action:${f.id}:owner-notification`;
@@ -441,10 +439,11 @@ test('terminal Feature cannot hide missing notification or invalid outcome proof
   assert.equal(classifyCards([f, notice]).get(f.id).stage, 'notification-pending');
   notice.status = 'done';
   notice.completedAt = 4;
-  notice.metadata.automation.summary = 'Result: uncertain';
-  notice.metadata.proof = [{ status: 'passed', note: 'Native Telegram receipt; messageId=1597' }];
+  notice.metadata.automation.summary = 'Delivery receipt recorded';
+  notice.metadata.proof = [
+    { status: 'passed', note: 'Delivery completed without receipt identity' },
+  ];
   assert.equal(classifyCards([f, notice]).get(f.id).stage, 'notification-pending');
-  notice.metadata.automation.summary = 'Result: sent';
   delete notice.metadata.proof;
   assert.equal(classifyCards([f, notice]).get(f.id).stage, 'notification-pending');
   notice.metadata.proof = [
@@ -545,8 +544,15 @@ test('terminal Feature requires exact notice identity and receipt-specific evide
   delete todo.metadata.proof;
   assert.equal(classifyCards([f, todo]).get(f.id).stage, 'notification-pending');
   const uncertain = structuredClone(valid);
-  uncertain.metadata.automation.summary = 'Result: uncertain';
-  assert.equal(classifyCards([f, uncertain]).get(f.id).stage, 'notification-pending');
+  uncertain.metadata.automation.summary = 'Delivery receipt retained';
+  assert.equal(classifyCards([f, uncertain]).get(f.id).stage, 'settled');
+});
+
+test('noncanonical native workflow statuses require explicit reconciliation', () => {
+  for (const status of ['triage', 'backlog', 'scheduled', 'ready', 'review']) {
+    const card = { ...item(7), status };
+    assert.equal(classifyCards([parent, card]).get(card.id).stage, 'status-reconciliation');
+  }
 });
 
 test('duplicate dependency fields and non-Feature parents fail closed', () => {

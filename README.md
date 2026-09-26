@@ -118,6 +118,10 @@ Every implementation or review worktree must be created before `prepare`. The pl
 
 Fallback destinations use OpenClaw's native `channel`/`accountId`/`to` address format, with optional `threadId`. The plugin requires direct destinations, rediscovers one exact current conversation reference before every fallback send, and fails closed when the address is unavailable or ambiguous. Opaque `conversationRef` values do not belong in static configuration.
 
+The plugin keeps deterministic identity, evidence, idempotency, routing and receipt checks in code while managers retain semantic judgment. `finalize` provides one terminal handoff for settled non-publication outcomes; publication adapters add their own irreversible-effect validation before using the same owner-notification flow. Recovery records structured communication facts for the product manager to explain instead of sending canned user prose. Fallback retries preserve the manager-authored message verbatim.
+
+Project cards use `todo`, `running`, `blocked`, and `done`. Other native Workboard statuses remain readable for compatibility but are surfaced for reconciliation rather than assigned project semantics. Worker and reviewer liveness comes from native task/session evidence, not card status.
+
 The managed install record locates the package. Do not also add the same checkout to `plugins.load.paths`. For an unmanaged development load instead, omit `plugins install` and set `plugins.load.paths` to the repository path.
 
 ## Development
@@ -137,7 +141,7 @@ Source entrypoints are declared in `package.json` under `openclaw.extensions`; m
 
 The behavioral suite under `test/` uses Node's built-in `node:test` runner with `tsx` against `src/**/*.ts`; tests never import `dist`. `npm run check` separately builds and verifies the compiled registration/store boundary through `scripts/verify-dist.mjs`, and package validation inspects the packed artifact. These checks work on any machine with the declared Node and OpenClaw versions. See `TESTING.md` for test-layer and Arrange/Act/Assert guidance.
 
-The current store accepts only the v2 generic schema with `product|engineering` roles. Legacy registries are not migrated; create a fresh state database when adopting this release from a pre-v2 installation.
+The current v3 store uses generic `product|engineering` roles and adds durable communication-composition intents. Existing v2 registries migrate in place; pre-v2 registries are not supported.
 
 Internal control prompts use the semantic markers `PROJECT WAKE` and `PROJECT CONTINUATION`; the public brand is deliberately excluded from those markers.
 

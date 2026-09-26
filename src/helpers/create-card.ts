@@ -487,11 +487,16 @@ function validateReferences(cards, expected, type, existing = false) {
   const features = cards.filter((card) => card.id === featureId);
   assert.equal(features.length, 1, 'Invalid Feature reference');
   const feature = features[0];
-  const terminalReuse =
-    existing &&
+  const terminalNotification =
     type === 'action' &&
-    (expected.idempotencyKey.endsWith(':owner-notification') ||
-      expected.idempotencyKey.endsWith(':cancellation:stop'));
+    expected.idempotencyKey.endsWith(':owner-notification') &&
+    feature.status === 'done' &&
+    typeof feature.metadata?.automation?.summary === 'string' &&
+    feature.metadata.automation.summary.trim() &&
+    feature.metadata?.proof?.some((proof) => proof.status === 'passed');
+  const terminalReuse =
+    terminalNotification ||
+    (existing && type === 'action' && expected.idempotencyKey.endsWith(':cancellation:stop'));
   const canonicalStopParent =
     !expected.idempotencyKey.endsWith(':cancellation:stop') ||
     (feature.metadata?.automation?.tenant === expected.boardId &&
