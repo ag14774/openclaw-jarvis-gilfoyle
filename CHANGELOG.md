@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.0 - 2026-09-26
+
+- Agents decide scope, work structure and conclusions; shared terminal handoff supports settled success, failure, cancellation and findings without an outcome taxonomy.
+- Replace question-category routing with explicit `decisionBy` authority and one manager decision operation; retain real user-answer provenance.
+- Add source-bound scope amendments, meaningful native card states, read-only manager access and scoped private consultations.
+- Bind review execution to assignment fields instead of exact English; support verified squash trees as well as merge commits; make worker capacity configurable.
+- Preserve manager-authored optional fallback explanations, expose validation conditions, and check controller tasks before temporary-context cleanup.
+- Breaking tool contract: work intake/schedules use `authorized`, decision operation is `decide`, and a fresh v4 registry is required. No old-record migration or compatibility aliases.
+
 ## 2.3.0 - 2026-09-18
 
 - Replaced lexical read-only closure with one generic `finalize` operation for settled non-publication outcomes and idempotent missing-notification repair.

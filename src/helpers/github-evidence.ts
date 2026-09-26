@@ -217,9 +217,9 @@ export async function githubEvidence(
       const candidateCommit = await get(`git/commits/${candidate}`);
       assert(
         commit.sha === pr.merge_commit_sha &&
-          commit.parents?.length === 2 &&
+          [1, 2].includes(commit.parents?.length) &&
           commit.parents[0].sha === s.baseSha &&
-          commit.parents[1].sha === candidate &&
+          (commit.parents.length === 1 || commit.parents[1].sha === candidate) &&
           candidateCommit.sha === candidate &&
           sha(commit.tree?.sha) &&
           commit.tree.sha === candidateCommit.tree?.sha,

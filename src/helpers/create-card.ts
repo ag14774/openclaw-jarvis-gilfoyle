@@ -200,6 +200,11 @@ function immutableNotes(card, expected, type, cards) {
     return;
   }
   let remaining = suffix;
+  if (type === 'feature') {
+    remaining = remaining
+      .replace(/^Current scope: [^\r\n]{1,1400}\n?/m, '')
+      .replace(/^Scope revision: [1-9][0-9]*\n?/m, '');
+  }
   if (/^Handoff:/m.test(remaining)) {
     const handoff = handoffMarker(card);
     assert(handoff && !handoff.uncertain, 'Malformed progressed handoff');
@@ -608,13 +613,14 @@ const creationResult = (card, reused, type) => ({
 export async function ensureCreatedCard(expected, rpc) {
   const type = validateExpected(expected);
   const stop = type === 'action' && expected.idempotencyKey.endsWith(':cancellation:stop');
+  const notification = type === 'action' && expected.idempotencyKey.endsWith(':owner-notification');
   const repositoryPending =
     type === 'feature' &&
     /^Project identity: [0-9a-f-]{36}$/m.test(expected.notes) &&
     /^Repository scope: pending$/m.test(expected.notes);
   let state = await readBoard(expected.boardId, rpc, {
       allowMissingProject: type === 'project-info',
-      skipProjectInfo: stop || repositoryPending,
+      skipProjectInfo: stop || notification || repositoryPending,
     }),
     cards = state.cards;
   if (['feature', 'work-item'].includes(type) && !repositoryPending)
@@ -633,7 +639,9 @@ export async function ensureCreatedCard(expected, rpc) {
   const receipt = response?.card ?? response;
   assert(receipt && UUID.test(receipt.id), 'Invalid creation response');
   immutableMatch(receipt, expected, type, [...cards, receipt]);
-  state = await readBoard(expected.boardId, rpc, { skipProjectInfo: stop || repositoryPending });
+  state = await readBoard(expected.boardId, rpc, {
+    skipProjectInfo: stop || notification || repositoryPending,
+  });
   cards = state.cards;
   if (['feature', 'work-item'].includes(type) && !repositoryPending)
     assert.equal(state.readiness, 'ready', 'Project is paused');
@@ -962,9 +970,6 @@ export async function createProductCard(operation, input, rpc) {
   if (operation === 'review')
     assert(SLUG.test(input.reviewKey) && SHA.test(input.candidate), 'Invalid review identity');
   if (operation === 'exceptional-intervention')
-    assert(
-      ['cancellation-uncertain', 'communication-urgent'].includes(input.kind),
-      'Unsupported intervention kind',
-    );
+    assert(SLUG.test(input.kind), 'Bounded intervention identity required');
   return ensureCreatedCard(generated(operation, input), rpc);
 }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { terminalHandoff } from './terminal-handoff.js';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -15,11 +16,7 @@ import {
 } from './record-contracts.js';
 import { githubEvidence, hostedCandidate, hostedSpec } from './github-evidence.js';
 import { handoffCard, settledWorkers, assertCommentCapacity } from './handoff-card.js';
-import {
-  assertCanonicalReviewCard,
-  ensureCreatedCard,
-  sealCreationPayload,
-} from './create-card.js';
+import { assertCanonicalReviewCard } from './create-card.js';
 import { topology, workerProfile } from '../topology.js';
 
 const uuid = (value) =>
@@ -220,8 +217,6 @@ function acceptedReviewProof(proof, candidate) {
     new RegExp(`^Candidate: ${escaped}\\. .+$`).test(firstLine)
   );
 }
-const withoutOneFinalLf = (value) =>
-  typeof value === 'string' && value.endsWith('\n') ? value.slice(0, -1) : value;
 
 // One bounded operation per invocation. No worker launch, publishing, messaging or separate ledger.
 export async function operate(
@@ -427,7 +422,10 @@ export async function operate(
     }
     if (operation === 'prepare') {
       owned(c, false);
-      assert.equal(c.status, 'todo');
+      assert(
+        ['todo', 'ready'].includes(c.status),
+        'Work item must be open and ready for preparation',
+      );
       plan(p);
       const selected = workerProfile(p.profileId);
       p = { ...p, profileId: selected.id, model: selected.model, thinking: selected.thinking };
@@ -641,7 +639,10 @@ export async function operate(
         const fresh = async () => {
           const s = await read();
           owned(s.card, false);
-          assert.equal(s.card.status, 'todo');
+          assert(
+            ['todo', 'ready'].includes(s.card.status),
+            'Work item must remain open for preparation',
+          );
           assert.deepEqual(s.info, state.info, 'Project changed during replacement');
           assert.deepEqual(
             s.cards.find((x) => x.id === parent.id),
@@ -904,11 +905,17 @@ export async function operate(
         },
         review,
       ).spawnArgs.task;
-      assert.equal(
-        withoutOneFinalLf(wrapper.prompt),
-        withoutOneFinalLf(expected),
-        'Native wrapper prompt must equal the canonical independent review task',
-      );
+      for (const name of ['Work item', 'Task name', 'Assignment', 'Candidate', 'Scope']) {
+        const lines = String(wrapper.prompt ?? '')
+          .split('\n')
+          .filter((line) => line.startsWith(`${name}: `));
+        assert.equal(lines.length, 1, `Review task needs one ${name} field`);
+        assert.equal(
+          lines[0],
+          expected.split('\n').find((line) => line.startsWith(`${name}: `)),
+          `Review task ${name} differs from prepared assignment`,
+        );
+      }
     }
     let prompt = backing?.prompt ?? '';
     if (
@@ -1194,10 +1201,9 @@ export async function operate(
           actionKey === `action:${f.id}:cancellation:stop` &&
           /^Kind: cancellation$/m.test(x.notes ?? '') &&
           x.labels?.includes('stop');
-        const intervention =
-          /^action:[0-9a-f-]{36}:intervention:(cancellation-uncertain|communication-urgent)$/.exec(
-            actionKey ?? '',
-          );
+        const intervention = /^action:[0-9a-f-]{36}:intervention:([a-z0-9][a-z0-9_-]{0,63})$/.exec(
+          actionKey ?? '',
+        );
         const canonicalIntervention =
           intervention &&
           /^Kind: exceptional-intervention$/m.test(x.notes ?? '') &&
@@ -1584,138 +1590,56 @@ export async function operate(
       ])
     : null;
   const summary = `Outcome: delivered. ${p.summary}\nCandidate: ${p.sha}${hostedResult ? `\nMerged commit: ${hostedResult.mergeSha}` : ''}`;
-  const expectedNotice = sealCreationPayload({
-    boardId: p.boardId,
-    tenant: c.id,
-    idempotencyKey: key,
-    title: 'Owner notification',
-    agentId: engineeringAgentId,
-    status: 'todo',
-    priority: 'normal',
-    labels: ['type:action', 'owner-notification'],
-    workspace: { kind: 'scratch' },
-    maxRuntimeSeconds: 1,
-    maxRetries: 1,
-    notes: `Type: action\nKind: owner-notification\nFeature: ${c.id}\nDelivery: ${delivery}\nCandidate: ${p.sha}\nSummary: ${p.summary}`,
-  });
-  let notices = children.filter((x) => x.metadata?.automation?.idempotencyKey === key);
-  assert(notices.length <= 1, 'Duplicate notification identity');
-  if (notices.length) assert(type(notices[0], 'action'), 'Malformed canonical notification');
-  assert(
-    !children.some(
-      (x) =>
-        type(x, 'action') &&
-        (/^Kind: (owner-)?notification$/im.test(x.notes ?? '') ||
-          x.labels?.includes('notification') ||
-          x.labels?.includes('owner-notification')) &&
-        x.metadata.automation.idempotencyKey !== key,
-    ),
-    'Existing noncanonical notice requires reconciliation, not replacement',
-  );
-  if (c.status !== 'done') {
-    owned(c, true);
-    await ensureCreatedCard(expectedNotice, rpc);
-    state = await read();
-    c = state.card;
-    children = validate(state);
-    owned(c, true);
-    if (hosted)
-      assert.equal(
-        JSON.stringify([
-          state.info,
-          state.cards
-            .filter(
-              (x) =>
-                x.metadata?.automation?.tenant === p.id &&
-                x.metadata?.automation?.idempotencyKey !== key,
-            )
-            .sort((a, b) => a.id.localeCompare(b.id)),
-        ]),
-        finishSnapshot,
-        'Hosted scope changed before completion',
-      );
-    assert.equal(c.updatedAt, initialUpdatedAt, 'Feature changed before completion');
-    notices = children.filter((x) => x.metadata?.automation?.idempotencyKey === key);
-    assert.equal(notices.length, 1);
-    owned(notices[0], false);
-    assert.equal(notices[0].status, 'todo');
-    assert(
-      type(notices[0], 'action') &&
-        field(notices[0].notes, 'Feature') === c.id &&
-        field(notices[0].notes, 'Candidate') === p.sha &&
-        field(notices[0].notes, 'Summary') === p.summary,
-      'Reused notification payload mismatch',
-    );
-    assert.equal(field(notices[0].notes, 'Delivery'), delivery, 'Staged delivery context changed');
-    await rpc('workboard.cards.complete', {
-      id: c.id,
+  const result = await terminalHandoff(
+    {
+      feature: c,
+      boardId: p.boardId,
       summary,
-      proof: {
+      noticeSummary: p.summary,
+      candidate: p.sha,
+      evidence: {
         status: 'passed',
         label: hosted ? 'Verified hosted delivery' : 'Verified local delivery',
         note: hosted
           ? `Candidate: ${p.sha}; merged commit: ${hostedResult.mergeSha}; base: ${hosted.baseSha}; independent review: ${p.reviewId}; retained hosted gate verified.`
           : `Manager acceptance: ${p.summary}. Independent review ${p.reviewId}; prepared HEAD and selected bare main match ${p.sha}.`,
       },
-    });
-  }
-  state = await read();
-  c = state.card;
-  validate(state);
-  assert.equal(c.status, 'done');
-  assert(
-    c.metadata.automation.summary.startsWith('Outcome: delivered.') &&
-      c.metadata.automation.summary.includes(p.sha),
-  );
-  if (hosted)
-    assert(
-      c.metadata.automation.summary === summary &&
-        c.metadata.proof?.some(
-          (x) =>
-            x.status === 'passed' &&
-            x.label === 'Verified hosted delivery' &&
-            x.note?.includes(`merged commit: ${hostedResult.mergeSha};`),
-        ),
-      'Hosted terminal merge evidence mismatch',
-    );
-  notices = state.cards.filter(
-    (x) => x.metadata?.automation?.tenant === c.id && x.metadata.automation.idempotencyKey === key,
-  );
-  assert.equal(notices.length, 1);
-  await ensureCreatedCard(expectedNotice, rpc);
-  const notice = notices[0];
-  assertNoNativeCardLinks(notice);
-  assert(
-    type(notice, 'action') &&
-      field(notice.notes, 'Feature') === c.id &&
-      field(notice.notes, 'Candidate') === p.sha &&
-      field(notice.notes, 'Summary') === p.summary,
-    'Notification identity mismatch',
-  );
-  assert(!notice.metadata?.archivedAt || notice.status === 'done');
-  if (notice.agentId === engineeringAgentId) {
-    owned(notice, false);
-    assert.equal(notice.status, 'todo');
-    // CAS changes only ownership, preserving failures/proof and rejecting a concurrent claim.
-    await rpc('workboard.cards.update', {
-      id: notice.id,
-      expectedUpdatedAt: notice.updatedAt,
-      patch: { agentId: productAgentId },
-    });
-  } else assert.equal(notice.agentId, productAgentId, 'Unexpected notification owner');
-  const final = (await read()).cards.find((x) => x.id === notice.id);
-  assert.equal(final.agentId, productAgentId);
-  assert(
-    !final.metadata?.claim || final.metadata.claim.ownerId === productAgentId,
-    'Unexpected notification claim',
+      validate: async () => {
+        const fresh = await read();
+        validate(fresh);
+        if (fresh.card.status !== 'done' && hosted)
+          assert.equal(
+            JSON.stringify([
+              fresh.info,
+              fresh.cards
+                .filter(
+                  (x) =>
+                    x.metadata?.automation?.tenant === p.id &&
+                    x.metadata.automation.idempotencyKey !== key,
+                )
+                .sort((a, b) => a.id.localeCompare(b.id)),
+            ]),
+            finishSnapshot,
+            'Hosted scope changed before completion',
+          );
+        if (hosted && fresh.card.status === 'done')
+          assert(
+            fresh.card.metadata.proof?.some(
+              (x) =>
+                x.status === 'passed' &&
+                x.label === 'Verified hosted delivery' &&
+                x.note?.includes(`merged commit: ${hostedResult.mergeSha};`),
+            ),
+            'Hosted terminal merge evidence mismatch',
+          );
+        return fresh;
+      },
+    },
+    rpc,
   );
   return {
-    id: c.id,
-    status: 'finished',
-    notificationId: notice.id,
-    notificationStatus: final.status,
+    ...result,
     sha: p.sha,
     ...(hostedResult ? { mergeSha: hostedResult.mergeSha } : {}),
-    wakeRequired: final.status !== 'done' && !final.metadata?.claim,
   };
 }

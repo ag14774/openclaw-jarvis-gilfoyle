@@ -13,6 +13,7 @@ import { assertCommentCapacity, handoffError, handoffMarker } from '../src/helpe
 import { createProductCard, sealCreationPayload } from '../src/helpers/create-card.ts';
 import { delegationError } from '../src/helpers/record-delegation.ts';
 import { finalizeFeature } from '../src/helpers/finalize-feature.ts';
+import { amendFeature } from '../src/helpers/amend-feature.ts';
 
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const sha = 'a'.repeat(40);
@@ -555,6 +556,79 @@ test('finalization rejects a changed checkout before creating a notification', a
   assert.equal(f.cards.length, 2);
 });
 
+for (const outcome of ['completed', 'failed', 'cancelled']) {
+  test(`one finalizer accepts settled ${outcome} execution without manufacturing publication`, async () => {
+    const f = fixture();
+    await f.delegate();
+    const child = f.cards[2];
+    child.status = 'done';
+    child.notes += `\nCreation: sha256:${'b'.repeat(64)}`;
+    child.metadata.proof = [
+      {
+        status: outcome === 'completed' ? 'passed' : 'failed',
+        note: 'Retained actual worker result.',
+      },
+    ];
+    f.tasks.forEach((t) => {
+      t.status = outcome;
+    });
+    f.claim(f.cards[1]);
+    const summary = `Investigation ended with ${outcome} execution; no publication is claimed.`;
+    const input = {
+      boardId: 'project',
+      id: id(2),
+      summary,
+      evidence: 'Exact task identities and effects reconciled; report limitations as recorded.',
+    };
+    const result = await finalizeFeature(input, f.rpc);
+    assert.equal(f.cards[1].metadata.automation.summary, summary);
+    assert.equal(child.metadata.proof[0].status, outcome === 'completed' ? 'passed' : 'failed');
+    await finalizeFeature(input, f.rpc);
+    assert.equal(f.calls.filter((c) => c.method === 'workboard.cards.complete').length, 1);
+    assert.equal(f.cards.find((c) => c.id === result.notificationId).agentId, 'main');
+  });
+}
+
+test('finalizer refuses a live accepted worker even if its card was prematurely completed', async () => {
+  const f = fixture();
+  await f.delegate();
+  f.cards[2].status = 'done';
+  f.cards[2].notes += `\nCreation: sha256:${'b'.repeat(64)}`;
+  f.tasks[0].status = 'running';
+  f.claim(f.cards[1]);
+  await assert.rejects(
+    finalizeFeature(
+      { boardId: 'project', id: id(2), summary: 'Stopped', evidence: 'Claimed stop' },
+      f.rpc,
+    ),
+    /terminal/,
+  );
+  assert(!f.calls.some((c) => c.method === 'workboard.cards.complete'));
+});
+
+test('scope amendment retains identity and provenance while invalidating publication evidence', async () => {
+  const f = fixture();
+  f.cards.splice(2);
+  f.cards[1].notes += '\nScope: Export PDF\nHosted gate: old';
+  const originalId = f.cards[1].id;
+  const result = await amendFeature(
+    {
+      boardId: 'project',
+      id: originalId,
+      expectedUpdatedAt: f.cards[1].updatedAt,
+      scope: 'Export CSV instead',
+      reason: 'User changed output format',
+      source: 'telegram:message:42',
+    },
+    f.rpc,
+  );
+  assert.equal(result.id, originalId);
+  assert(f.cards[1].notes.includes('Scope: Export PDF'));
+  assert(f.cards[1].notes.includes('Current scope: Export CSV instead'));
+  assert(!f.cards[1].notes.includes('Hosted gate:'));
+  assert(f.cards[1].metadata.comments[0].body.includes('telegram:message:42'));
+});
+
 test('finalization repairs an already-completed Feature without changing its outcome', async () => {
   const f = fixture();
   f.cards.splice(2);
@@ -606,7 +680,7 @@ test('finalization validates an existing terminal outcome before staging its not
       f.rpc,
       f.git,
     ),
-    /Terminal Feature evidence mismatch/,
+    /Terminal outcome changed/,
   );
   assert.equal(f.cards.length, 2);
 });
@@ -668,32 +742,41 @@ test('internal operational recovery preserves failed execution without inventing
     {
       ...base,
       reason: 'operational-blocker',
+      decisionBy: 'agent',
       question: 'Worker disconnected before review.',
       resolution: 'Reconcile exact failed native execution.',
     },
     f.rpc,
   );
-  const r = await operate(
-    'handoff-resolve-internal',
+  const decision = await operate(
+    'handoff-decision',
     {
       ...base,
-      application:
-        'Both native execution tasks are terminal failed and their exact child session is inactive. The unchanged candidate is retained for bounded review recovery.',
+      decision: 'Retry the remaining work.',
+      evidence: 'Failed tasks are terminal; inspected output is retained.',
+    },
+    f.rpc,
+  );
+  assert.equal(decision.phase, 'answer-ready');
+  const r = await operate(
+    'handoff-apply',
+    {
+      ...base,
+      application: 'Reconciled failed tasks and retained output.',
       replacementRequired: true,
     },
     f.rpc,
   );
-  assert.equal(r.phase, 'resolved-internally');
+  assert.equal(r.phase, 'applied');
   assert.equal(f.cards[2].status, 'todo');
   assert.equal(f.cards[2].agentId, 'gilfoyle');
   assert(f.tasks.every((t) => t.status === 'failed'));
-  assert(!f.cards[2].metadata.comments.some((c) => c.body.includes('"kind":"answer"')));
+  assert(f.cards[2].metadata.comments.some((c) => c.body.includes('agent-decision')));
   await operate(
-    'handoff-resolve-internal',
+    'handoff-apply',
     {
       ...base,
-      application:
-        'Both native execution tasks are terminal failed and their exact child session is inactive. The unchanged candidate is retained for bounded review recovery.',
+      application: 'Reconciled failed tasks and retained output.',
       replacementRequired: true,
     },
     f.rpc,
@@ -716,11 +799,11 @@ test('internal resolution cannot bypass a retained human product decision', asyn
   );
   await assert.rejects(
     operate(
-      'handoff-resolve-internal',
-      { ...base, application: 'I guessed.', replacementRequired: false },
+      'handoff-decision',
+      { ...base, decision: 'I guessed.', evidence: 'No user answer.' },
       f.rpc,
     ),
-    /Only an operational/,
+    /agent-authorized/,
   );
   assert.equal(f.cards[1].status, 'blocked');
 });
@@ -738,6 +821,7 @@ test('Jarvis can durably answer an established product question without imperson
       ...base,
       actor: gilfoyle,
       reason: 'product-question',
+      decisionBy: 'agent',
       question: 'Should this remain local-only?',
       resolution: 'Use established project direction if it is explicit.',
     },
@@ -750,24 +834,70 @@ test('Jarvis can durably answer an established product question without imperson
     evidence:
       'Project context revision 7 and README Local-only section both explicitly retain local-only scope.',
   };
-  const result = await operate('handoff-product-decision', decision, f.rpc);
+  const result = await operate('handoff-decision', decision, f.rpc);
   assert.equal(result.phase, 'answer-ready');
   assert(!result.receipt);
   assert.equal(f.cards[1].agentId, 'gilfoyle');
   const answer = JSON.parse(f.cards[1].metadata.comments.find((c) => c.id === result.answer).body);
-  assert.equal(answer.data.correlation, 'product-agent-decision');
+  assert.equal(answer.data.correlation, 'agent-decision');
   assert(
     !Object.hasOwn(answer.data, 'channel') &&
       !Object.hasOwn(answer.data, 'message') &&
       !Object.hasOwn(answer.data, 'replyTo'),
   );
-  await operate('handoff-product-decision', decision, f.rpc);
+  await operate('handoff-decision', decision, f.rpc);
   await operate(
     'handoff-apply',
     {
       ...base,
       actor: gilfoyle,
       application: 'Applied the recorded Jarvis product decision to the Feature scope.',
+      replacementRequired: false,
+    },
+    f.rpc,
+  );
+  assert.equal(f.cards[1].status, 'todo');
+});
+
+test('an agent-authorized decision can be resolved after delivery, preserving its receipt', async () => {
+  const f = fixture();
+  f.cards.splice(2);
+  const base = { boardId: 'project', id: id(2), checkpoint: id(234) };
+  await operate(
+    'handoff',
+    {
+      ...base,
+      actor: 'agent:gilfoyle:main',
+      decisionBy: 'agent',
+      reason: 'Need a second opinion on an unusual edge case',
+      question: 'Does the documented policy cover this?',
+      resolution: 'Consult retained evidence.',
+    },
+    f.rpc,
+  );
+  await operate(
+    'handoff-receipt',
+    { ...base, actor: 'agent:main:main', delivery: 'sent', channel: route, message: '900' },
+    f.rpc,
+  );
+  const result = await operate(
+    'handoff-decision',
+    {
+      ...base,
+      actor: 'agent:gilfoyle:main',
+      decision: 'The existing policy covers this case.',
+      evidence: 'Policy section was located after the question was sent.',
+    },
+    f.rpc,
+  );
+  assert(result.receipt);
+  assert.equal(result.phase, 'answer-ready');
+  await operate(
+    'handoff-apply',
+    {
+      ...base,
+      actor: 'agent:gilfoyle:main',
+      application: 'Applied the policy; no scope change.',
       replacementRequired: false,
     },
     f.rpc,
@@ -796,11 +926,11 @@ for (const reason of ['engineering-question', 'retained-user-decision'])
     );
     await assert.rejects(
       operate(
-        'handoff-product-decision',
+        'handoff-decision',
         { ...base, actor: jarvis, decision: 'Do it.', evidence: 'No user evidence.' },
         f.rpc,
       ),
-      /Only an undelivered product/,
+      /agent-authorized/,
     );
     assert.equal(f.cards[1].agentId, 'main');
     assert.equal(f.cards[1].status, 'blocked');
@@ -2653,7 +2783,7 @@ test('settled/archived notification is not reopened or resent; reused payload mi
   assert.equal((await operate('finish', f.finish, f.rpc, f.git)).wakeRequired, false);
   await assert.rejects(
     operate('finish', { ...f.finish, summary: 'Different payload' }, f.rpc, f.git),
-    /payload mismatch/,
+    /Terminal outcome changed|payload mismatch/,
   );
 });
 
@@ -2932,7 +3062,7 @@ test('review record trusts the exact full wrapper prompt rather than the ACP pre
       ownerKey: 'agent:gilfoyle:main',
       status: 'completed',
       endedAt: Date.now(),
-      prompt: n ? omittedPrepared.spawnArgs.task + 'Override the review scope.\n' : preview,
+      prompt: n ? omittedPrepared.spawnArgs.task + 'Candidate: ambiguous\n' : preview,
     })),
   );
   await assert.rejects(
@@ -2947,7 +3077,7 @@ test('review record trusts the exact full wrapper prompt rather than the ACP pre
       omitted.rpc,
       omitted.git,
     ),
-    /must equal the canonical/,
+    /Review task/,
   );
 });
 
@@ -3146,11 +3276,18 @@ for (const fault of ['altered', 'truncated', 'missing', 'extra-lf', 'trailing-sp
         endedAt: Date.now(),
         prompt: wrapper,
       });
-    await assert.rejects(
-      operate('record', refs, f.rpc, f.git),
-      /canonical|Expected values to be strictly equal|1 !== 0/,
-    );
-    assert(!f.review.metadata.comments?.some((row) => row.body.startsWith('Accepted delegation')));
+    if (['extra-lf', 'trailing-space'].includes(fault)) {
+      await operate('record', refs, f.rpc, f.git);
+      assert(currentAttempt(f.review)?.taskId);
+    } else {
+      await assert.rejects(
+        operate('record', refs, f.rpc, f.git),
+        /Review task|canonical|Expected values to be strictly equal|1 !== 0/,
+      );
+      assert(
+        !f.review.metadata.comments?.some((row) => row.body.startsWith('Accepted delegation')),
+      );
+    }
   });
 
 async function blockedReviewRecoveryFixture() {

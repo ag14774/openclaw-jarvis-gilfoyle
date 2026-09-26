@@ -29,6 +29,7 @@ const inputSchema = {
         'priority',
         'associate',
         'intake',
+        'amend',
         'notify',
         'communication-decision',
         'milestone-decision',
@@ -62,9 +63,8 @@ const engineeringOperations = [
   'finish',
   'finalize',
   'handoff',
-  'handoff-product-decision',
+  'decide',
   'handoff-apply',
-  'handoff-resolve-internal',
   'workboard-query',
 ];
 const engineeringSchema = {
@@ -86,6 +86,7 @@ export default {
       engineeringAgentId: cfg.engineeringAgentId,
       workerAgentId: cfg.worker?.agentId,
       workerRuntime: cfg.worker?.runtime,
+      workerLimit: cfg.worker?.limit ?? 2,
       workerProfiles: cfg.worker?.profiles,
       sessionNamespace: cfg.sessionNamespace,
     });
@@ -145,23 +146,17 @@ export default {
               isError: true,
             });
             try {
-              if (!exchange) throw Error('Registered project context required');
               const operation = args.operation,
                 input = args.input ?? {};
+              const readOnly = ['profiles', 'workboard-query'].includes(operation);
+              if (!exchange && !readOnly)
+                throw Error('Registered project context required for mutations');
               if (Object.hasOwn(input, 'actor')) throw Error('Actor is supplied by the runtime');
-              if (
-                ctx.agentId === configured.productAgentId &&
-                operation !== 'handoff-product-decision'
-              )
+              if (ctx.agentId === configured.productAgentId && operation !== 'decide' && !readOnly)
                 throw Error(
                   'The product agent engineering authority is limited to product decisions',
                 );
-              if (
-                ctx.agentId === configured.engineeringAgentId &&
-                operation === 'handoff-product-decision'
-              )
-                throw Error('The product agent owns product decisions');
-              if (input.boardId) {
+              if (input.boardId && exchange) {
                 const board = r.store.get('SELECT project FROM boards WHERE id=?', input.boardId);
                 if (!board || board.project !== exchange.project)
                   throw Error('Board belongs to another project');
@@ -182,14 +177,13 @@ export default {
               else if (['prepare', 'record', 'publish-gate', 'gate', 'finish'].includes(operation))
                 result = await operate(operation, input, rpc);
               else if (operation === 'finalize') result = await finalizeFeature(input, rpc);
-              else if (
-                [
-                  'handoff',
-                  'handoff-product-decision',
-                  'handoff-apply',
-                  'handoff-resolve-internal',
-                ].includes(operation)
-              )
+              else if (operation === 'decide')
+                result = await handoffCard(
+                  'handoff-decision',
+                  { ...input, actor: ctx.sessionKey },
+                  rpc,
+                );
+              else if (['handoff', 'handoff-apply'].includes(operation))
                 result = await handoffCard(operation, { ...input, actor: ctx.sessionKey }, rpc);
               else if (operation === 'workboard-query') result = await readView(input, rpc);
               else throw Error('Unsupported engineering operation');
@@ -208,7 +202,11 @@ export default {
                 complete: false,
                 code: 'validation-failed',
                 error:
-                  'Engineering operation could not be safely completed; reread the same durable state before retrying.',
+                  error instanceof assert.AssertionError
+                    ? String(error.message).split('\n')[0].slice(0, 500)
+                    : 'Operation failed; inspect the scoped records and runtime health.',
+                operation,
+                recordId: args.input?.id ?? args.input?.featureId,
               });
             }
           },
@@ -406,16 +404,29 @@ export default {
           block: true,
           blockReason: 'Project is inactive; its pending obligations are deliberately paused.',
         };
-      if (
-        event.toolName === 'sessions_send' &&
-        (isProjectSession(ctx.sessionKey) ||
-          /^PROJECT (WAKE|CONTINUATION)\b/.test(String(event.params?.message ?? '')))
-      )
+      if (event.toolName === 'sessions_send' && isProjectSession(ctx.sessionKey)) {
+        const target = r.store.get(
+          'SELECT project,scope,closed FROM exchanges WHERE session=?',
+          event.params?.sessionKey ?? '',
+        );
+        const source = r.store.get(
+          'SELECT project,scope FROM exchanges WHERE session=?',
+          ctx.sessionKey,
+        );
+        if (
+          target &&
+          source &&
+          target.project === source.project &&
+          target.scope === source.scope &&
+          !target.closed
+        )
+          return;
         return {
           block: true,
           blockReason:
             'Project continuations use durable records and jarvis_project; do not insert hidden exchanges into a user or canonical product conversation.',
         };
+      }
     });
     api.on('agent_end', async (_event, ctx) => {
       if (isProjectSession(ctx.sessionKey) || ctx.agentId === configured.workerAgentId)

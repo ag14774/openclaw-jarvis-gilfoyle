@@ -238,7 +238,9 @@ for (const change of [
   (f) => (f.pr.merge_commit_sha = 'unknown'),
   (f) => (f.commit.sha = 'c'.repeat(40)),
   (f) => f.commit.parents.reverse(),
-  (f) => f.commit.parents.pop(),
+  (f) => {
+    f.commit.parents = [];
+  },
   (f) => (f.commit.tree.sha = 'c'.repeat(40)),
 ])
   test('finish requires actual merge identity, ordered parents and candidate tree', async () => {
@@ -247,6 +249,14 @@ for (const change of [
     change(f);
     await assertIncomplete(f, githubEvidence(f.spec, f.candidate, 'finish', f.request));
   });
+
+test('verified squash publication accepts the exact approved base and candidate tree', async () => {
+  const f = githubFixture();
+  f.merge();
+  f.commit.parents.pop();
+  const result = await githubEvidence(f.spec, f.candidate, 'finish', f.request);
+  assert.equal(result.status, 'merged');
+});
 
 test('strict hosted normalization denies endpoint injection and excessive or empty requirements', () => {
   const f = githubFixture(),

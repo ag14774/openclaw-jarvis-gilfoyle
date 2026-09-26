@@ -118,9 +118,11 @@ Every implementation or review worktree must be created before `prepare`. The pl
 
 Fallback destinations use OpenClaw's native `channel`/`accountId`/`to` address format, with optional `threadId`. The plugin requires direct destinations, rediscovers one exact current conversation reference before every fallback send, and fails closed when the address is unavailable or ambiguous. Opaque `conversationRef` values do not belong in static configuration.
 
-The plugin keeps deterministic identity, evidence, idempotency, routing and receipt checks in code while managers retain semantic judgment. `finalize` provides one terminal handoff for settled non-publication outcomes; publication adapters add their own irreversible-effect validation before using the same owner-notification flow. Recovery records structured communication facts for the product manager to explain instead of sending canned user prose. Fallback retries preserve the manager-authored message verbatim.
+Agents decide intent, scope, decomposition and conclusions. The plugin validates identity, authority, settled execution and delivery. `finalize` accepts any settled work, including failed/cancelled execution and findings. Publication adapters verify claimed external effects and call the same terminal handoff. Outcome text is not a protocol enum. Recovery records facts for the product manager to explain. Optional `fallbackMessage` preserves a manager-authored explanation when the preferred route fails.
 
-Project cards use `todo`, `running`, `blocked`, and `done`. Other native Workboard statuses remain readable for compatibility but are surfaced for reconciliation rather than assigned project semantics. Worker and reviewer liveness comes from native task/session evidence, not card status.
+Native Workboard states retain useful semantics: triage requires judgment, backlog/scheduled defer, todo/ready are open, review awaits verification, blocked retains a hold and done is settled. Worker liveness comes from task/session evidence, not card status. `worker.limit` configures cooperative capacity (default two); the native manager claim slot remains a platform constraint.
+
+`intake` and `schedule` require `authorized:true` for the requested work, without treating inspection as modification permission. Optional stable `requestKey` separates requests in one message. `amend` records a source-bound revision of open scope and invalidates publication checkpoints after affected execution settles. `handoff` carries free-form reason plus `decisionBy:user|agent`; `decide` records an evidence-backed manager decision, including after a question was sent. Only authentic user answers resolve user-reserved decisions. Read-only helper operations work outside execution contexts; private consultations may target registered open contexts of the same project and Feature.
 
 The managed install record locates the package. Do not also add the same checkout to `plugins.load.paths`. For an unmanaged development load instead, omit `plugins install` and set `plugins.load.paths` to the repository path.
 
@@ -141,7 +143,7 @@ Source entrypoints are declared in `package.json` under `openclaw.extensions`; m
 
 The behavioral suite under `test/` uses Node's built-in `node:test` runner with `tsx` against `src/**/*.ts`; tests never import `dist`. `npm run check` separately builds and verifies the compiled registration/store boundary through `scripts/verify-dist.mjs`, and package validation inspects the packed artifact. These checks work on any machine with the declared Node and OpenClaw versions. See `TESTING.md` for test-layer and Arrange/Act/Assert guidance.
 
-The current v3 store uses generic `product|engineering` roles and adds durable communication-composition intents. Existing v2 registries migrate in place; pre-v2 registries are not supported.
+This release requires a fresh v4 project registry. Existing projects and schema versions are not migrated. Personal OpenClaw state is separate and must not be erased when resetting the plugin registry.
 
 Internal control prompts use the semantic markers `PROJECT WAKE` and `PROJECT CONTINUATION`; the public brand is deliberately excluded from those markers.
 

@@ -96,16 +96,19 @@ export function handoffComment(card, comment) {
     );
     assert(Object.keys(evidence).sort().join(',') === 'actor,card,checkpoint,data,kind');
     assert(
-      isManagerActor(
-        evidence.actor,
-        ['question', 'application'].includes(evidence.kind)
-          ? topology().engineeringAgentId
-          : topology().productAgentId,
-      ),
+      (evidence.kind === 'answer' &&
+        evidence.data?.correlation === 'agent-decision' &&
+        isManagerActor(evidence.actor, topology().engineeringAgentId)) ||
+        isManagerActor(
+          evidence.actor,
+          ['question', 'application'].includes(evidence.kind)
+            ? topology().engineeringAgentId
+            : topology().productAgentId,
+        ),
     );
     assert(evidence.data && typeof evidence.data === 'object' && !Array.isArray(evidence.data));
     const keys = {
-      question: 'question,reason,resolution,source',
+      question: 'decisionBy,question,reason,resolution,source',
       receipt: 'channel,delivery,message',
       answer: 'answer,channel,message,replyTo',
       application: 'application,replacementRequired',
@@ -122,16 +125,17 @@ export function handoffComment(card, comment) {
     const productDecision =
       evidence.kind === 'answer' &&
       Object.keys(evidence.data).sort().join(',') === 'correlation,decision,evidence' &&
-      evidence.data.correlation === 'product-agent-decision';
+      evidence.data.correlation === 'agent-decision';
     assert(
       Object.keys(evidence.data).sort().join(',') === keys[evidence.kind] ||
         adjacent ||
         correlated ||
         productDecision ||
         (evidence.kind === 'question' &&
-          ['question,reason,resolution', 'question,reason,resolution,routing,source'].includes(
-            Object.keys(evidence.data).sort().join(','),
-          )) ||
+          [
+            'decisionBy,question,reason,resolution',
+            'decisionBy,question,reason,resolution,routing,source',
+          ].includes(Object.keys(evidence.data).sort().join(','))) ||
         (evidence.kind === 'receipt' &&
           evidence.data.delivery === 'uncertain' &&
           Object.keys(evidence.data).sort().join(',') === 'channel,delivery'),
@@ -140,13 +144,8 @@ export function handoffComment(card, comment) {
       assert(evidence.kind === 'question' && evidence.data.routing === 'project');
     if (evidence.kind === 'question')
       assert(
-        [
-          'product-question',
-          'product-suggestion',
-          'engineering-question',
-          'retained-user-decision',
-          'operational-blocker',
-        ].includes(evidence.data.reason) &&
+        bounded(evidence.data.reason) &&
+          ['user', 'agent'].includes(evidence.data.decisionBy) &&
           bounded(evidence.data.question) &&
           bounded(evidence.data.resolution) &&
           (evidence.data.source === undefined ||
@@ -210,23 +209,14 @@ export function handoffMarker(card) {
     assert(
       uuid(marker.checkpoint) &&
         uuid(marker.question) &&
-        [
-          'needs-message',
-          'uncertain',
-          'sent',
-          'answer-ready',
-          'applied',
-          'resolved-internally',
-        ].includes(marker.phase),
+        ['needs-message', 'uncertain', 'sent', 'answer-ready', 'applied'].includes(marker.phase),
     );
     for (const key of ['receipt', 'answer', 'application'])
       if (marker[key] !== undefined) assert(uuid(marker[key]));
     assert(marker.phase !== 'sent' || marker.receipt);
     assert(marker.phase !== 'uncertain' || marker.receipt);
     assert(!['answer-ready', 'applied'].includes(marker.phase) || marker.answer);
-    assert(!['applied', 'resolved-internally'].includes(marker.phase) || marker.application);
-    if (marker.phase === 'resolved-internally')
-      assert(!marker.answer, 'Internal resolution must not fabricate a user answer');
+    assert(marker.phase !== 'applied' || marker.application);
     assert(
       marker.phase !== 'needs-message' ||
         (!marker.receipt && !marker.answer && !marker.application),
@@ -278,10 +268,7 @@ export function handoffMarker(card) {
         if (key === 'question')
           assert(value.data.source, 'Handoff requires explicit retained source');
         if (key === 'receipt') {
-          assert(
-            ['uncertain', 'resolved-internally'].includes(marker.phase) ||
-              value.data.delivery === 'sent',
-          );
+          assert(marker.phase === 'uncertain' || value.data.delivery === 'sent');
           const question = JSON.parse(
             card.metadata.comments.find((comment) => comment.id === marker.question).body,
           ).data;
@@ -293,11 +280,8 @@ export function handoffMarker(card) {
           );
         }
         if (key === 'answer') {
-          if (value.data.correlation === 'product-agent-decision')
-            assert(
-              !marker.receipt &&
-                ['decision', 'evidence'].every((name) => bounded(value.data[name])),
-            );
+          if (value.data.correlation === 'agent-decision')
+            assert(['decision', 'evidence'].every((name) => bounded(value.data[name])));
           else {
             assert(marker.receipt, 'User answer requires a delivery receipt');
             const receipt = JSON.parse(
@@ -322,7 +306,7 @@ export function handoffMarker(card) {
 
 export function handoffHeld(card) {
   const marker = handoffMarker(card);
-  return Boolean(marker && !['applied', 'resolved-internally'].includes(marker.phase));
+  return Boolean(marker && marker.phase !== 'applied');
 }
 
 export function handoffEvidencePending(card, marker = handoffMarker(card)) {

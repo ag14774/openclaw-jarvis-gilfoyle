@@ -10,6 +10,7 @@ let current = Object.freeze({
   engineeringAgentId: 'engineering',
   workerAgentId: 'worker',
   workerRuntime: 'acp',
+  workerLimit: 2,
   sessionNamespace: 'jarvis-gilfoyle',
   workerProfiles: Object.freeze([
     Object.freeze({
@@ -34,6 +35,10 @@ export function configureTopology(input = {}) {
   );
   assert(NAMESPACE.test(next.sessionNamespace), 'Invalid sessionNamespace');
   assert(['acp', 'subagent'].includes(next.workerRuntime), 'Invalid workerRuntime');
+  assert(
+    Number.isSafeInteger(next.workerLimit) && next.workerLimit >= 1 && next.workerLimit <= 20,
+    'Worker limit must be 1 to 20',
+  );
   assert(
     Array.isArray(next.workerProfiles) &&
       next.workerProfiles.length >= 1 &&

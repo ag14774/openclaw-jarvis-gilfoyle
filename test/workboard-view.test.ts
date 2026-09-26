@@ -548,10 +548,16 @@ test('terminal Feature requires exact notice identity and receipt-specific evide
   assert.equal(classifyCards([f, uncertain]).get(f.id).stage, 'settled');
 });
 
-test('noncanonical native workflow statuses require explicit reconciliation', () => {
-  for (const status of ['triage', 'backlog', 'scheduled', 'ready', 'review']) {
+test('native workflow states retain their useful waiting and actionable meanings', () => {
+  for (const [status, stage] of Object.entries({
+    triage: 'orchestration',
+    backlog: 'held',
+    scheduled: 'held',
+    ready: 'todoUndelegated',
+    review: 'pending-verification',
+  })) {
     const card = { ...item(7), status };
-    assert.equal(classifyCards([parent, card]).get(card.id).stage, 'status-reconciliation');
+    assert.equal(classifyCards([parent, card], evidence()).get(card.id).stage, stage);
   }
 });
 

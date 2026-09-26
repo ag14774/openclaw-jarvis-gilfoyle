@@ -410,6 +410,22 @@ test(
       assert.equal(final.metadata.comments.length, 4);
       assert.deepEqual(final.metadata.automation, feature.metadata.automation);
       assert.match(final.notes, /Scope: original requested outcome/);
+      const { amendFeature } = await import('../src/helpers/amend-feature.ts');
+      await amendFeature(
+        {
+          boardId: 'isolated-handoff',
+          id: feature.id,
+          expectedUpdatedAt: final.updatedAt,
+          scope: 'Changed requested outcome',
+          reason: 'Explicit revised request',
+          source: 'channel=internal-ui;message=amend-1',
+        },
+        rpc,
+      );
+      const amended = await store.get(feature.id);
+      assert.match(amended.notes, /Current scope: Changed requested outcome/);
+      assert.equal(amended.metadata.comments.length, 5);
+      assert(amended.metadata.comments.some((c) => c.body.includes('amend-1')));
       t.diagnostic(`Only isolated SQLite store mutated: ${root}`);
     } finally {
       await store.close();

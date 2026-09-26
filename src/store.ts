@@ -44,20 +44,20 @@ export class Store {
     );
     const version = this.get('PRAGMA user_version').user_version;
     assert(
-      [0, 2, 3].includes(version),
-      'Unsupported registry schema; create a fresh current registry',
+      [0, 4].includes(version),
+      'Fresh v4 project registry required; older project records are not migrated',
     );
     this.db
       .exec(`CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,purpose TEXT NOT NULL,context TEXT NOT NULL DEFAULT '',state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','draining','inactive')),priority INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 1,created INTEGER NOT NULL,product_conversation TEXT NOT NULL,engineering_conversation TEXT,product_fallback TEXT NOT NULL,engineering_fallback TEXT);
       CREATE TABLE IF NOT EXISTS boards(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),repository TEXT);
       CREATE TABLE IF NOT EXISTS receipts(key TEXT PRIMARY KEY,input TEXT NOT NULL,result TEXT NOT NULL,created INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,kind TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL,route TEXT,status TEXT NOT NULL DEFAULT 'pending',due INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,receipt TEXT,error TEXT,created INTEGER NOT NULL,UNIQUE(project,event,role));
+      CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,kind TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL,fallback_text TEXT,route TEXT,status TEXT NOT NULL DEFAULT 'pending',due INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,receipt TEXT,error TEXT,created INTEGER NOT NULL,UNIQUE(project,event,role));
       CREATE TABLE IF NOT EXISTS copies(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,role TEXT NOT NULL,route TEXT NOT NULL,consumed TEXT,recurring INTEGER NOT NULL DEFAULT 0,UNIQUE(project,event,role,route));
       CREATE TABLE IF NOT EXISTS exchanges(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),scope TEXT NOT NULL,role TEXT NOT NULL,session TEXT NOT NULL UNIQUE,attempts INTEGER NOT NULL DEFAULT 0,lastDispatch INTEGER NOT NULL DEFAULT 0,runId TEXT,conclusion TEXT,closed INTEGER,observed TEXT,UNIQUE(project,scope,role));
       CREATE TABLE IF NOT EXISTS communication_intents(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),event TEXT NOT NULL,scope TEXT NOT NULL,kind TEXT NOT NULL,facts TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','composed','dismissed')),reason TEXT,created INTEGER NOT NULL,updated INTEGER NOT NULL,UNIQUE(project,event));
       CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,project TEXT NOT NULL REFERENCES projects(id),spec TEXT NOT NULL,next INTEGER NOT NULL,intervalMs INTEGER,enabled INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS sources(session TEXT PRIMARY KEY,source TEXT NOT NULL,updated INTEGER NOT NULL);
-      PRAGMA user_version=3;`);
+      PRAGMA user_version=4;`);
   }
   close() {
     this.db.close();
@@ -206,12 +206,14 @@ export class Store {
     kind = 'milestone',
     managerRole = 'product',
     message,
+    fallbackMessage,
     route = null,
     due = this.now(),
   }) {
     role(managerRole);
     text(event, 240);
     text(message, 6000);
+    if (fallbackMessage !== undefined) text(fallbackMessage, 6000);
     this.project(project);
     if (route) route = conversation(route);
     const id = hash([project, event, managerRole]).slice(0, 40),
@@ -226,13 +228,14 @@ export class Store {
       return old;
     }
     this.run(
-      'INSERT INTO deliveries(id,project,event,kind,role,text,route,due,created) VALUES(?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO deliveries(id,project,event,kind,role,text,fallback_text,route,due,created) VALUES(?,?,?,?,?,?,?,?,?,?)',
       id,
       project,
       event,
       kind,
       managerRole,
       message,
+      fallbackMessage ?? null,
       route ? JSON.stringify(route) : null,
       due,
       this.now(),

@@ -48,11 +48,9 @@ test('project survives reopen without repository or model session; declaration i
     path = join(root, 'db');
   let s = new Store(path);
   const p = s.declare({ key: '1', name: 'Alpha', purpose: 'Idea', route: a, productFallback: a });
-  s.run('DROP TABLE communication_intents');
-  s.run('PRAGMA user_version=2');
   s.close();
   s = new Store(path);
-  assert.equal(s.get('PRAGMA user_version').user_version, 3);
+  assert.equal(s.get('PRAGMA user_version').user_version, 4);
   assert.equal(s.all('SELECT * FROM communication_intents').length, 0);
   assert.equal(s.project(p.id).purpose, 'Idea');
   assert.deepEqual(s.project(p.id).boards, []);
@@ -119,6 +117,7 @@ test('bounded failure refreshes one exact address-based owner fallback without r
     event: 'question',
     kind: 'question',
     message: 'Which repository?',
+    fallbackMessage: 'I could not reach the project chat. Which repository should I use?',
   });
   for (let i = 0; i < 4; i++) {
     await rt.deliver(store.get('SELECT * FROM deliveries WHERE id=?', d.id));
@@ -127,7 +126,7 @@ test('bounded failure refreshes one exact address-based owner fallback without r
   assert.equal(calls.filter((c) => c.conversationRef === fresh.conversationRef).length, 1);
   assert.equal(
     calls.find((c) => c.conversationRef === fresh.conversationRef).message,
-    'Which repository?',
+    'I could not reach the project chat. Which repository should I use?',
   );
   assert.equal(store.project(p.id).productFallback.conversationRef, fresh.conversationRef);
   assert.equal(store.project(p.id).productConversation.conversationRef, b.conversationRef);
@@ -803,6 +802,11 @@ test('supported hooks suppress internal transport and outbound projections witho
     ),
     ['jarvis_project', 'gilfoyle_engineering'],
   );
+  const reader = factories[1]({ agentId: 'main', sessionKey: 'agent:main:direct:test' });
+  const profiles = await reader.execute('read', { operation: 'profiles', input: {} });
+  assert(!profiles.isError && profiles.details.profiles.length > 0);
+  const denied = await reader.execute('write', { operation: 'finalize', input: {} });
+  assert(denied.isError, 'Direct read access must not grant mutation authority');
   const internal = { sessionKey: 'agent:gilfoyle:jarvis-gilfoyle:feature' },
     user = { sessionKey: 'agent:main:telegram:direct:100' };
   assert(

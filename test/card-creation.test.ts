@@ -690,6 +690,7 @@ test('same key rejects changed payload while valid claimed or transferred progre
         actor: 'agent:gilfoyle:main',
         data: {
           reason: 'retained-user-decision',
+          decisionBy: 'user',
           question: 'Which scope?',
           resolution: 'Owner confirms.',
           source,
@@ -1092,8 +1093,12 @@ test('stop rejects completed or malformed canonical Feature targets without muta
   }
 });
 
-test('exceptional intervention permits only the two enumerated urgent kinds', async () => {
-  for (const kind of ['cancellation-uncertain', 'communication-urgent']) {
+test('intervention identities are bounded keys, not semantic categories', async () => {
+  for (const kind of [
+    'cancellation-uncertain',
+    'communication-urgent',
+    'unexpected-external-condition',
+  ]) {
     const f = fixture(),
       parent = await feature(f);
     const result = await createProductCard(
@@ -1123,13 +1128,13 @@ test('exceptional intervention permits only the two enumerated urgent kinds', as
       {
         boardId: 'project',
         featureId: parent.id,
-        kind: 'ordinary-blocker',
+        kind: 'invalid/key',
         title: 'No',
         reason: 'No.',
       },
       f.rpc,
     ),
-    /Unsupported/,
+    /identity/,
   );
   assert.equal(f.calls.length, writes);
 });

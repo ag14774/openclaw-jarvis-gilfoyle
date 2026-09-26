@@ -244,9 +244,8 @@ export async function handoffCard(operation, p, rpc) {
       'handoff-answer',
       'handoff-correlated-answer',
       'handoff-confirm',
-      'handoff-product-decision',
+      'handoff-decision',
       'handoff-apply',
-      'handoff-resolve-internal',
     ].includes(operation),
   );
   const allowed = [
@@ -255,7 +254,7 @@ export async function handoffCard(operation, p, rpc) {
     'checkpoint',
     'actor',
     ...(operation === 'handoff'
-      ? ['reason', 'question', 'resolution']
+      ? ['reason', 'question', 'resolution', 'decisionBy']
       : operation === 'handoff-receipt'
         ? ['delivery', 'channel', 'message']
         : operation === 'handoff-answer'
@@ -264,7 +263,7 @@ export async function handoffCard(operation, p, rpc) {
             ? ['channel', 'questionMessage', 'message', 'answer']
             : operation === 'handoff-confirm'
               ? ['channel', 'previousMessage', 'message', 'answer', 'decision']
-              : operation === 'handoff-product-decision'
+              : operation === 'handoff-decision'
                 ? ['decision', 'evidence']
                 : ['application', 'replacementRequired']),
   ];
@@ -299,9 +298,12 @@ export async function handoffCard(operation, p, rpc) {
     return { cards: s.cards, c };
   };
   let { cards, c } = await read();
-  const engineering = ['handoff', 'handoff-apply', 'handoff-resolve-internal'].includes(operation);
+  const engineering = ['handoff', 'handoff-apply'].includes(operation);
   assert(
-    engineering ? p.actor === controllerKey(cards, c) : isManagerActor(p.actor, productAgentId),
+    engineering
+      ? p.actor === controllerKey(cards, c)
+      : isManagerActor(p.actor, productAgentId) ||
+          (operation === 'handoff-decision' && p.actor === controllerKey(cards, c)),
     'Correct manager context required',
   );
   let h = handoffMarker(c);
@@ -362,18 +364,14 @@ export async function handoffCard(operation, p, rpc) {
   let data, next;
   if (operation === 'handoff') {
     assert(
-      [
-        'product-question',
-        'product-suggestion',
-        'engineering-question',
-        'retained-user-decision',
-        'operational-blocker',
-      ].includes(p.reason) &&
+      bounded(p.reason) &&
+        ['user', 'agent'].includes(p.decisionBy ?? 'user') &&
         bounded(p.question) &&
         bounded(p.resolution),
     );
     data = {
       reason: p.reason,
+      decisionBy: p.decisionBy ?? 'user',
       question: p.question,
       resolution: p.resolution,
       source: deliverySource(cards, c),
@@ -391,10 +389,7 @@ export async function handoffCard(operation, p, rpc) {
         sendRequired: h.phase === 'needs-message' && !pending,
       };
     }
-    assert(
-      !h || ['applied', 'resolved-internally'].includes(h.phase),
-      'Unresolved previous handoff',
-    );
+    assert(!h || h.phase === 'applied', 'Unresolved previous handoff');
     assert(c.agentId === engineeringAgentId, 'Engineering owner required');
     const recoveredQuestions = (c.metadata.comments ?? []).filter((x) => {
       const e = handoffComment(c, x);
@@ -435,10 +430,7 @@ export async function handoffCard(operation, p, rpc) {
     next = { checkpoint: p.checkpoint, phase: 'needs-message' };
   } else {
     assert(h?.checkpoint === p.checkpoint, 'Stale or missing checkpoint');
-    if (
-      (operation === 'handoff-apply' && h.phase === 'applied') ||
-      (operation === 'handoff-resolve-internal' && h.phase === 'resolved-internally')
-    ) {
+    if (operation === 'handoff-apply' && h.phase === 'applied') {
       assert(c.agentId === engineeringAgentId);
       assert.deepEqual(
         JSON.parse(c.metadata.comments.find((x) => x.id === h.application).body).data,
@@ -453,10 +445,10 @@ export async function handoffCard(operation, p, rpc) {
         executionAuthorized: false,
       };
     }
-    if (operation === 'handoff-product-decision' && h.phase === 'answer-ready') {
-      assert(c.agentId === engineeringAgentId && !h.receipt);
+    if (operation === 'handoff-decision' && h.phase === 'answer-ready') {
+      assert(c.agentId === engineeringAgentId);
       assert.deepEqual(JSON.parse(c.metadata.comments.find((x) => x.id === h.answer).body).data, {
-        correlation: 'product-agent-decision',
+        correlation: 'agent-decision',
         decision: p.decision,
         evidence: p.evidence,
       });
@@ -470,59 +462,20 @@ export async function handoffCard(operation, p, rpc) {
       };
     }
     assert(c.status === 'blocked', 'Handoff must remain blocked');
-    if (operation === 'handoff-resolve-internal') {
+    if (operation === 'handoff-decision') {
       const question = JSON.parse(c.metadata.comments.find((x) => x.id === h.question).body).data;
       assert(
-        question.reason === 'operational-blocker' &&
-          !h.answer &&
-          ['needs-message', 'uncertain', 'sent'].includes(h.phase) &&
-          c.agentId === productAgentId,
-        'Only an operational blocker can resolve without a product answer',
-      );
-      assert(
-        bounded(p.application) && typeof p.replacementRequired === 'boolean',
-        'Concrete internal resolution evidence required',
-      );
-      const affected =
-        kind(c) === 'feature'
-          ? [
-              c,
-              ...cards.filter(
-                (x) =>
-                  x.metadata?.automation?.tenant === c.id &&
-                  /^Type: work[ -]item$/im.test(x.notes ?? ''),
-              ),
-            ]
-          : [c];
-      await settledWorkers(
-        cards,
-        affected.map((x) => ({ ...x, agentId: engineeringAgentId })),
-        rpc,
-      );
-      if (p.replacementRequired) {
-        const a = currentAttempt(c);
-        assert(
-          kind(c) !== 'feature' && a && !a.uncertain && a.taskId && a.wrapperTaskId,
-          'Replacement requires exact accepted execution',
-        );
-      }
-      data = { application: p.application, replacementRequired: p.replacementRequired };
-      next = { ...h, phase: 'resolved-internally' };
-    } else if (operation === 'handoff-product-decision') {
-      const question = JSON.parse(c.metadata.comments.find((x) => x.id === h.question).body).data;
-      assert(
-        ['product-question', 'product-suggestion'].includes(question.reason) &&
-          h.phase === 'needs-message' &&
+        question.decisionBy === 'agent' &&
+          ['needs-message', 'sent'].includes(h.phase) &&
           c.agentId === productAgentId &&
-          !h.receipt &&
           !h.answer,
-        'Only an undelivered product question or suggestion can use a product-agent decision',
+        'Only an agent-authorized decision may be resolved by a manager',
       );
       assert(
         bounded(p.decision) && bounded(p.evidence),
         'Jarvis decision and durable evidence required',
       );
-      data = { correlation: 'product-agent-decision', decision: p.decision, evidence: p.evidence };
+      data = { correlation: 'agent-decision', decision: p.decision, evidence: p.evidence };
       next = { ...h, phase: 'answer-ready' };
     } else if (operation === 'handoff-receipt') {
       assert(
@@ -647,13 +600,13 @@ export async function handoffCard(operation, p, rpc) {
   const evidenceKind =
     operation === 'handoff'
       ? 'question'
-      : ['handoff-apply', 'handoff-resolve-internal'].includes(operation)
+      : operation === 'handoff-apply'
         ? 'application'
         : [
               'handoff-answer',
               'handoff-correlated-answer',
               'handoff-confirm',
-              'handoff-product-decision',
+              'handoff-decision',
             ].includes(operation)
           ? 'answer'
           : 'receipt';
@@ -720,7 +673,7 @@ export async function handoffCard(operation, p, rpc) {
       textLimit,
     });
   const source = deliverySource(cards, c);
-  if (!sent && !['handoff-resolve-internal', 'handoff-product-decision'].includes(operation)) {
+  if (!sent && operation !== 'handoff-decision') {
     // An uncertainty receipt needs no invented message ID. Reserve that valid
     // minimal branch; a supplied optional ID is checked at its own write.
     if (!uncertain) reserve('receipt', { delivery: 'uncertain', channel: source }, 0);
@@ -730,10 +683,7 @@ export async function handoffCard(operation, p, rpc) {
       uncertain?.data.message === undefined ? 1400 : 0,
     );
   }
-  if (
-    !['handoff-resolve-internal', 'handoff-product-decision'].includes(operation) &&
-    !evidence.some((e) => e.kind === 'answer')
-  )
+  if (operation !== 'handoff-decision' && !evidence.some((e) => e.kind === 'answer'))
     reserve(
       'answer',
       {
@@ -789,10 +739,8 @@ export async function handoffCard(operation, p, rpc) {
   const notes = `${preserved}\nHandoff: ${JSON.stringify(next)}`;
   const patch = {
     notes,
-    status: ['applied', 'resolved-internally'].includes(next.phase) ? 'todo' : 'blocked',
-    agentId: ['answer-ready', 'applied', 'resolved-internally'].includes(next.phase)
-      ? engineeringAgentId
-      : productAgentId,
+    status: next.phase === 'applied' ? 'todo' : 'blocked',
+    agentId: ['answer-ready', 'applied'].includes(next.phase) ? engineeringAgentId : productAgentId,
   };
   if (notes !== c.notes || patch.agentId !== c.agentId || patch.status !== c.status)
     await rpc('workboard.cards.update', { id: c.id, expectedUpdatedAt: c.updatedAt, patch });
@@ -823,8 +771,7 @@ export async function handoffCard(operation, p, rpc) {
     id: c.id,
     ...next,
     sendRequired: next.phase === 'needs-message',
-    replacementPreparationRequired:
-      ['handoff-apply', 'handoff-resolve-internal'].includes(operation) && p.replacementRequired,
+    replacementPreparationRequired: operation === 'handoff-apply' && p.replacementRequired,
     executionAuthorized: false,
   };
 }

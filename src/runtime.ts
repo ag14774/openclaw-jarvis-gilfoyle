@@ -9,6 +9,7 @@ import {
 } from './helpers/create-card.js';
 import { readView, pageCards } from './helpers/workboard-page.js';
 import { finalizeFeature } from './helpers/finalize-feature.js';
+import { amendFeature } from './helpers/amend-feature.js';
 import { handoffCard, assertCommentCapacity } from './helpers/handoff-card.js';
 import { handoffMarker, controllerKey, currentAttempt } from './helpers/record-contracts.js';
 import { topology, isProjectSessionKey, roleForAgent, agentForRole } from './topology.js';
@@ -40,7 +41,9 @@ const fallbackDestination = (value) => {
   };
 };
 const type = (c) => /^Type: ([a-z-]+)$/im.exec(c.notes ?? '')?.[1];
-const field = (c, n) => new RegExp(`^${n}: (.+)$`, 'm').exec(c.notes ?? '')?.[1];
+const field = (c, n) =>
+  (n === 'Scope' ? /^Current scope: (.+)$/m.exec(c.notes ?? '')?.[1] : undefined) ??
+  new RegExp(`^${n}: (.+)$`, 'm').exec(c.notes ?? '')?.[1];
 const quiet = new Set([
   'settled',
   'held',
@@ -306,11 +309,7 @@ export class ProjectRuntime {
             ) ?? null,
         })),
       decisions: cards
-        .filter(
-          (c) =>
-            handoffMarker(c) &&
-            !['applied', 'resolved-internally'].includes(handoffMarker(c).phase),
-        )
+        .filter((c) => handoffMarker(c) && handoffMarker(c).phase !== 'applied')
         .map((c) => ({
           id: c.id,
           checkpoint: handoffMarker(c),
@@ -324,11 +323,9 @@ export class ProjectRuntime {
             c.metadata.comments.find((m) => m.id === handoffMarker(c).question)?.body ?? '{}',
           ).data?.resolution,
         })),
-      nextSteps: cards.some((c) => handoffMarker(c)?.phase === 'sent')
-        ? 'Await the outstanding product answer, then resume the same Feature.'
-        : cards.some((c) => type(c) === 'feature' && c.status !== 'done')
-          ? 'Continue the accepted Feature through its current native checkpoint.'
-          : 'Discuss the next desired outcome; no unrequested implementation.',
+      openRecords: cards
+        .filter((c) => type(c) !== 'project-info' && c.status !== 'done')
+        .map((c) => ({ id: c.id, title: c.title, owner: c.agentId, status: c.status })),
       schedules: this.store.all(
         'SELECT id,next,intervalMs,enabled FROM schedules WHERE project=?',
         id,
@@ -443,7 +440,8 @@ export class ProjectRuntime {
       const b = p.boards.find((b) => b.id === boardId);
       assert(b, 'Repository is not associated with project');
       assert(this.store.project(p.id).state === 'active', 'Project became inactive during intake');
-      const sourceKey = hash([source.route, source.messageId]).slice(0, 40),
+      if (input.requestKey !== undefined) text(input.requestKey, 80);
+      const sourceKey = hash([source.route, source.messageId, input.requestKey ?? '']).slice(0, 40),
         delivery = sourceString(source.route);
       const expected = sealCreationPayload({
         boardId,
@@ -519,8 +517,8 @@ export class ProjectRuntime {
       const r = input.conversationRef
         ? await this.route(productAgentId, input.conversationRef)
         : source.route;
-      const productFallback = await this.fallbackRoute('product'),
-        engineeringFallback = await this.fallbackRoute('engineering');
+      const productFallback = r,
+        engineeringFallback = null;
       const created = this.store.declare({
         key: hash([source.route, source.messageId]),
         name: input.name,
@@ -583,13 +581,38 @@ export class ProjectRuntime {
     }
     if (operation === 'intake') {
       assert(
-        agentId === productAgentId && input.implementationIntent === true,
-        'Only explicit implementation intent through the product agent starts work',
+        agentId === productAgentId && input.authorized === true,
+        'Explicit authorization for this work through the product agent is required',
       );
       const source = ctx.operator && input.source ? input.source : await this.current(ctx);
       const r = await this.intake(p, input, source);
       this.requestTick();
       return r;
+    }
+    if (operation === 'amend') {
+      assert(
+        agentId === productAgentId && input.authorized === true,
+        'Explicit scope amendment required',
+      );
+      assert(
+        p.boards.some((b) => b.id === input.boardId),
+        'Board belongs to another project',
+      );
+      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
+      assert(source.messageId, 'Actual amendment source required');
+      const result = await amendFeature(
+        {
+          boardId: input.boardId,
+          id: input.id,
+          expectedUpdatedAt: input.expectedUpdatedAt,
+          scope: input.scope,
+          reason: input.reason,
+          source: `${sourceString(source.route)};message=${source.messageId}`,
+        },
+        this.rpc,
+      );
+      this.requestTick();
+      return result;
     }
     if (operation === 'notify') {
       assert(internal, 'Proactive notification composition belongs to an internal purpose context');
@@ -615,6 +638,7 @@ export class ProjectRuntime {
           event: input.event,
           kind: input.kind ?? 'milestone',
           message: text(input.message, 6000),
+          fallbackMessage: input.fallbackMessage,
           due: this.now() + (input.kind === 'milestone' ? 45000 : 0),
         });
       this.requestTick();
@@ -657,6 +681,7 @@ export class ProjectRuntime {
             event: intent.event,
             kind: intent.kind,
             message: text(input.message, 6000),
+            fallbackMessage: input.fallbackMessage,
           })
         : null;
       this.store.run(
@@ -784,6 +809,7 @@ export class ProjectRuntime {
           event: `question:${h.checkpoint}`,
           kind: 'question',
           message: text(input.message, 6000),
+          fallbackMessage: input.fallbackMessage,
         });
       await this.deliver(d);
       const sent = this.store.get('SELECT * FROM deliveries WHERE id=?', d.id);
@@ -854,7 +880,7 @@ export class ProjectRuntime {
     }
     if (operation === 'schedule') {
       assert(
-        agentId === productAgentId && input.implementationIntent === true,
+        agentId === productAgentId && input.authorized === true,
         'Schedule requires explicit work authorization',
       );
       assert(p.state === 'active', 'Reactivate project before new scheduled work');
@@ -1217,8 +1243,9 @@ export class ProjectRuntime {
       return;
     let length = 0;
     const batch = pending.filter((d) => {
-      if (length + d.text.length + 2 > 5800) return false;
-      length += d.text.length + 2;
+      const size = Math.max(d.text.length, (d.fallback_text ?? d.text).length) + 2;
+      if (length + size > 5800) return false;
+      length += size;
       return true;
     });
     if (batch.length < 2) return;
@@ -1228,6 +1255,7 @@ export class ProjectRuntime {
         event: `milestones:${hash(batch.map((d) => d.id)).slice(0, 32)}`,
         kind: 'milestone-batch',
         message: batch.map((d) => d.text).join('\n\n'),
+        fallbackMessage: batch.map((d) => d.fallback_text ?? d.text).join('\n\n'),
       });
       for (const d of batch)
         this.store.run(
@@ -1266,7 +1294,7 @@ export class ProjectRuntime {
       event: `fallback:${d.id}`,
       kind: 'fallback',
       managerRole: d.role,
-      message: d.text,
+      message: d.fallback_text ?? d.text,
       route,
     });
     await this.deliver(fallback);
@@ -1512,6 +1540,17 @@ export class ProjectRuntime {
       assert(!sessions.hasMore);
       const s = sessions.sessions.find((s) => s.key === e.session);
       if (s?.hasActiveRun || s?.hasActiveSubagentRun) continue;
+      if (e.runId) {
+        const tasks = await this.rpc('tasks.list', { sessionKey: e.session, limit: 100 });
+        if (
+          !Array.isArray(tasks.tasks) ||
+          tasks.nextCursor ||
+          tasks.tasks.some(
+            (task) => task.runId === e.runId && ['queued', 'running'].includes(task.status),
+          )
+        )
+          continue;
+      }
       const conclusion =
         e.conclusion ??
         scoped
