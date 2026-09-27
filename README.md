@@ -40,7 +40,7 @@ Use this to validate the same package boundary used by a registry release:
 ```bash
 npm ci
 npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-4.0.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-4.1.0.tgz --force --accept-capabilities
 ```
 
 The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.
@@ -111,6 +111,8 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
 ```
 
 Grant `jarvis_project` and `gilfoyle_engineering` to both configured manager agents. The plugin enforces their different authorities internally.
+
+The plugin bundles the shared `project-coordination` skill through its manifest. It uses role-neutral product-manager/engineering-manager language; runtime prompt context tells each manager its role and its counterpart's display name and ID, without repeating its own identity. Names come from native `agents.entries[id].identity.name`, then `name`, then the ID. Display names do not change routing, authority or personas. No install-time generation is needed. Remove any manually installed copy of this procedure when adopting the bundled skill, because managed/workspace skills take precedence over plugin skills.
 
 Worker profiles are ordered from lowest to highest capability and are limited to five. Gilfoyle selects the lowest adequate `profileId` during `prepare`; arbitrary model overrides are rejected. Each attempt retains its concrete profile ID, model, and thinking level, so later configuration changes do not rewrite execution evidence.
 

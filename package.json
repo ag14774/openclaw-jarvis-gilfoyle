@@ -1,6 +1,6 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Role-configurable product and engineering project coordination for OpenClaw",
   "license": "UNLICENSED",
   "type": "module",
@@ -11,6 +11,7 @@
   "files": [
     "dist/",
     "src/",
+    "skills/",
     "openclaw.plugin.json",
     "README.md",
     "TESTING.md",

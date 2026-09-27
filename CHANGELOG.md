@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.1.0 - 2026-09-27
+
+- Bundle the role-neutral `project-coordination` skill with the plugin and load it through native manifest skill discovery.
+- Tell each manager its project role and only its counterpart's configured display name and agent ID, with configured-name/ID fallbacks; do not repeat the agent's own identity or alter personas or permissions.
+
 ## 4.0.0 - 2026-09-27
 
 - Replace the legacy card-note protocol with a fresh-only v9 registry for requests, Features, recoverable creation payloads, scope revisions, obligations, dependencies, attempts, decisions, publication/terminal checkpoints, stop controls, explicit inactivation plans and source-idempotent schedules.

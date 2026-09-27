@@ -1428,7 +1428,7 @@ export class ProjectRuntime {
         deliver: false,
         idempotencyKey: runId,
         timeout: 600,
-        message: `PROJECT CONTINUATION\nProject: ${project.id}\nScope: ${scope}\nRegistered obligations: ${recordIds.join(', ')}\nAttention: ${JSON.stringify(attention)}\nLoad jarvis-gilfoyle-protocol and use registry-backed project tools. Workboard notes are human context only. End with NO_REPLY.`,
+        message: `PROJECT CONTINUATION\nProject: ${project.id}\nScope: ${scope}\nRegistered obligations: ${recordIds.join(', ')}\nAttention: ${JSON.stringify(attention)}\nLoad project-coordination and use registry-backed project tools. Workboard notes are human context only. End with NO_REPLY.`,
       });
     } catch (error) {
       this.health.lastDispatchFailure = {
