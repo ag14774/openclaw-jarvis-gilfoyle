@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import './support/setup.ts';
-import { githubEvidence, hostedSpec } from '../src/helpers/github-evidence.ts';
-import { classifyCards, pageCards } from '../src/helpers/workboard-page.ts';
+import {
+  githubEvidence,
+  githubPassedGateEvidence,
+  githubStopEvidence,
+  hostedSpec,
+} from '../src/helpers/github-evidence.ts';
 import { githubFixture } from './github-fixture.ts';
 
 async function assertIncomplete(f, promise) {
@@ -27,6 +31,32 @@ test('GitHub evidence uses exact fixed GET requests and returns bounded identiti
   assert.equal(
     (await githubEvidence(f.spec, f.candidate, 'finish', f.request)).mergeSha,
     f.mergeSha,
+  );
+});
+
+test('hosted stop settlement requires the exact pull request to be closed', async () => {
+  const f = githubFixture();
+  await assert.rejects(githubStopEvidence(f.spec, f.candidate, f.request), /not reconciled/);
+  f.pr.state = 'closed';
+  f.pr.merged = false;
+  assert.deepEqual(await githubStopEvidence(f.spec, f.candidate, f.request), {
+    state: 'closed',
+    merged: false,
+    mergeSha: f.pr.merge_commit_sha ?? null,
+  });
+});
+
+test('hosted finish revalidates the exact retained successful run and jobs', async () => {
+  const f = githubFixture();
+  const gate = await githubEvidence(f.spec, f.candidate, 'gate', f.request);
+  assert.deepEqual(await githubPassedGateEvidence(f.spec, f.candidate, gate.runs, f.request), {
+    status: 'passed',
+    runs: gate.runs,
+  });
+  f.run.conclusion = 'failure';
+  await assert.rejects(
+    githubPassedGateEvidence(f.spec, f.candidate, gate.runs, f.request),
+    /could not be revalidated/,
   );
 });
 
@@ -367,99 +397,4 @@ test('every configured workflow and job must pass, and response bounds fail sani
     })),
     /^Error: GitHub evidence incomplete/,
   );
-});
-
-test('CI wait classification is pure, future quiet, due actionable, malformed uncertain and stops visible', () => {
-  const now = Date.parse('2026-09-12T12:00:00.000Z');
-  const card = {
-    id: '00000000-0000-4000-8000-000000000001',
-    agentId: 'gilfoyle',
-    status: 'todo',
-    updatedAt: 1,
-    notes:
-      'Type: feature\nWait: hosted-ci\nCI observed at: 2026-09-12T11:50:00.000Z\nCI recheck at: 2026-09-12T12:20:00.000Z',
-    metadata: { automation: { boardId: 'test' } },
-  };
-  const f = githubFixture();
-  const candidate = {
-    ...f.spec,
-    sha: f.candidate,
-    reviewId: '00000000-0000-4000-8000-000000000003',
-    summary: 'Verified candidate.',
-  };
-  const prefix = card.notes;
-  card.notes += `\nHosted candidate: ${JSON.stringify(candidate)}`;
-  const stage = (c, time = now, cards = [c]) => classifyCards(cards, {}, time).get(c.id).stage;
-  assert.equal(stage(card), 'hosted-ci-wait');
-  const response = { cards: [card], boards: [{ id: 'test', total: 1 }] };
-  assert.equal(
-    pageCards(response, { boardId: 'test', includeArchived: false, view: 'attention' }, {}, now)
-      .total,
-    0,
-  );
-  assert.equal(stage(card, now + 20 * 60 * 1000), 'hosted-ci-due');
-  for (const notes of [
-    card.notes.replace('12:20:00', '13:20:00'),
-    card.notes.replace('12:20:00', '11:40:00'),
-    card.notes + '\nCI recheck at: bad',
-    card.notes.replace('2026-09-12T12:20:00.000Z', 'invalid'),
-    card.notes + '\nWait: human',
-  ])
-    assert.equal(stage({ ...card, notes }), 'hosted-ci-uncertain');
-  const stop = {
-    ...card,
-    id: '00000000-0000-4000-8000-000000000002',
-    notes: 'Type: action',
-    metadata: { automation: { boardId: 'test', tenant: card.id } },
-  };
-  assert.equal(stage(card, now, [card, stop]), 'hosted-ci-due');
-  assert.equal(
-    stage({
-      ...card,
-      status: 'running',
-      metadata: { ...card.metadata, claim: { ownerId: 'gilfoyle' } },
-    }),
-    'hosted-ci-uncertain',
-  );
-  const invalidNotes = [
-    prefix,
-    `${prefix}\nHosted candidate: {bad`,
-    `${prefix}\nHosted candidate: null`,
-    card.notes + `\nHosted candidate: ${JSON.stringify(candidate)}`,
-    card.notes + '\nHosted candidate:malformed',
-  ];
-  for (const field of Object.keys(candidate)) {
-    const changed = { ...candidate };
-    delete changed[field];
-    invalidNotes.push(`${prefix}\nHosted candidate: ${JSON.stringify(changed)}`);
-  }
-  for (const patch of [
-    { sha: 'wrong' },
-    { baseSha: 'b'.repeat(40) + '\n' },
-    { reviewId: card.id },
-    { reviewId: 'invalid' },
-    { prNumber: 0 },
-    { prNumber: '7' },
-    { headRef: 'main' },
-    { headRef: 'wrong?ref' },
-    { summary: '' },
-    { summary: 'x'.repeat(1401) },
-    { workflows: [] },
-    { repo: 'wrong' },
-    { extra: 'unknown' },
-  ])
-    invalidNotes.push(`${prefix}\nHosted candidate: ${JSON.stringify({ ...candidate, ...patch })}`);
-  for (const notes of invalidNotes) {
-    const invalid = { ...card, notes };
-    assert.equal(stage(invalid), 'hosted-ci-uncertain');
-    assert.equal(
-      pageCards(
-        { ...response, cards: [invalid] },
-        { boardId: 'test', includeArchived: false, view: 'attention' },
-        {},
-        now,
-      ).total,
-      1,
-    );
-  }
 });

@@ -1,62 +1,66 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
-import { hash, text, conversation } from './store.js';
-import {
-  ensureCreatedCard,
-  sealCreationPayload,
-  createProductCard,
-} from './helpers/create-card.js';
-import { readView, pageCards } from './helpers/workboard-page.js';
-import { finalizeFeature } from './helpers/finalize-feature.js';
+import { conversation, hash, text } from './store.js';
+import { createFeatureCard, ensureNativeCard } from './helpers/create-card.js';
+import { pageCards, readView } from './helpers/workboard-page.js';
 import { amendFeature } from './helpers/amend-feature.js';
-import { handoffCard, assertCommentCapacity } from './helpers/handoff-card.js';
-import { handoffMarker, controllerKey, currentAttempt } from './helpers/record-contracts.js';
+import { reconcileExecutionBindings } from './helpers/execution-bindings.js';
+import { projectAnsweredDecision, scopedDecision } from './helpers/handoff-card.js';
 import { topology, isProjectSessionKey, roleForAgent, agentForRole } from './topology.js';
 
-const sourcePart = (value) =>
-  String(value).replace(/[^A-Za-z0-9._:@+-]+/g, (s) =>
-    encodeURIComponent(s).replace(
-      /[!'()*]/g,
-      (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
-    ),
-  );
-export const sourceString = (r) =>
-  `channel=${sourcePart(r.channel)};account=${sourcePart(r.accountId)};recipient=${sourcePart(r.target)};thread=${sourcePart(r.threadId ?? 'none')}`;
-export const isProjectSession = isProjectSessionKey;
-const fallbackDestination = (value) => {
-  assert(value && typeof value === 'object' && !Array.isArray(value));
-  const keys = Object.keys(value).sort().join(',');
-  assert(
-    ['accountId,channel,kind,to', 'accountId,channel,kind,threadId,to'].includes(keys),
-    'Invalid fallback destination fields',
-  );
-  assert(value.kind === 'direct', 'Fallback destination must be direct');
-  return {
-    channel: text(value.channel, 60),
-    accountId: text(value.accountId, 100),
-    to: text(value.to, 240),
-    kind: 'direct',
-    ...(value.threadId ? { threadId: String(value.threadId) } : {}),
-  };
-};
-const type = (c) => /^Type: ([a-z-]+)$/im.exec(c.notes ?? '')?.[1];
-const field = (c, n) =>
-  (n === 'Scope' ? /^Current scope: (.+)$/m.exec(c.notes ?? '')?.[1] : undefined) ??
-  new RegExp(`^${n}: (.+)$`, 'm').exec(c.notes ?? '')?.[1];
+const terminal = new Set(['completed', 'succeeded', 'failed', 'lost', 'timed_out', 'cancelled']);
 const quiet = new Set([
   'settled',
-  'held',
-  'awaiting-product-answer',
-  'handoff-waiting-answer',
+  'decision-wait',
   'running',
   'queued',
   'children-wait',
   'dependency-wait',
-  'parent-wait',
   'capacity-wait',
-  'hosted-ci-wait',
+  'publication-wait',
 ]);
+const productOperations = new Set([
+  'declare',
+  'context',
+  'priority',
+  'associate',
+  'intake',
+  'amend',
+  'control',
+  'notify',
+  'communication-decision',
+  'milestone-decision',
+  'also-notify',
+  'question-delivery',
+  'answer',
+  'schedule',
+  'schedule-disable',
+  'inactivate',
+  'reactivate',
+]);
+const mainConversationOperations = new Set([
+  'declare',
+  'move',
+  'context',
+  'priority',
+  'associate',
+  'intake',
+  'schedule',
+  'schedule-disable',
+  'inactivate',
+  'reactivate',
+]);
+const sourcePart = (value) =>
+  String(value).replace(/[^A-Za-z0-9._:@+-]+/g, (part) =>
+    encodeURIComponent(part).replace(
+      /[!'()*]/g,
+      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+    ),
+  );
+export const sourceString = (route) =>
+  `channel=${sourcePart(route.channel)};account=${sourcePart(route.accountId)};recipient=${sourcePart(route.target)};thread=${sourcePart(route.threadId ?? 'none')}`;
+export const isProjectSession = isProjectSessionKey;
 export const orderReady = (requests) =>
   [...requests].sort(
     (a, b) =>
@@ -66,6 +70,19 @@ export const orderReady = (requests) =>
       a.created - b.created ||
       a.feature.localeCompare(b.feature),
   );
+
+const fallbackDestination = (value) => {
+  assert(value && typeof value === 'object' && !Array.isArray(value));
+  assert(value.kind === 'direct', 'Fallback destination must be direct');
+  return {
+    channel: text(value.channel, 60),
+    accountId: text(value.accountId, 100),
+    to: text(value.to, 240),
+    kind: 'direct',
+    ...(value.threadId ? { threadId: String(value.threadId) } : {}),
+  };
+};
+
 export class ProjectRuntime {
   constructor(
     store,
@@ -75,10 +92,10 @@ export class ProjectRuntime {
     this.store = store;
     this.rpc = rpc;
     this.fallbackDestinations = Object.fromEntries(
-      Object.entries(fallbackDestinations).map(([role, value]) => {
-        assert(['product', 'engineering'].includes(role), 'Invalid fallback role');
-        return [role, fallbackDestination(value)];
-      }),
+      Object.entries(fallbackDestinations).map(([managerRole, value]) => [
+        managerRole,
+        fallbackDestination(value),
+      ]),
     );
     this.now = now;
     this.log = log;
@@ -86,30 +103,24 @@ export class ProjectRuntime {
     this.running = new Set();
     this.roleAdmission = new Set();
     this.stopped = false;
-    this.health = { lastScan: null, lastDispatchFailure: null };
+    this.health = { lastScan: null, lastDispatchFailure: null, bindingDiagnostics: [] };
   }
   async conversations(agentId, query, channel) {
-    const r = await this.rpc('conversations.list', {
+    const result = await this.rpc('conversations.list', {
       agentId,
       ...(query ? { query } : {}),
       ...(channel ? { channel } : {}),
       limit: 100,
     });
-    assert(
-      Array.isArray(r.conversations) && r.conversations.length < 100,
-      'Conversation discovery incomplete; narrow the query',
-    );
-    return r.conversations;
+    assert(Array.isArray(result.conversations) && result.conversations.length < 100);
+    return result.conversations;
   }
   async fallbackRoute(managerRole) {
     const destination = this.fallbackDestinations[managerRole];
     assert(destination, 'Fallback destination is not configured');
-    const routes = await this.conversations(
-      agentForRole(managerRole),
-      destination.to,
-      destination.channel,
-    );
-    const matches = routes.filter(
+    const matches = (
+      await this.conversations(agentForRole(managerRole), destination.to, destination.channel)
+    ).filter(
       (route) =>
         route.channel === destination.channel &&
         route.accountId === destination.accountId &&
@@ -121,31 +132,30 @@ export class ProjectRuntime {
     return conversation(matches[0]);
   }
   async route(agentId, ref) {
-    const routes = await this.conversations(agentId, ref);
-    const found = routes.filter((r) => r.conversationRef === ref);
-    assert.equal(found.length, 1, 'Conversation not available for this manager');
-    return conversation(found[0]);
+    const matches = (await this.conversations(agentId, ref)).filter(
+      (route) => route.conversationRef === ref,
+    );
+    assert.equal(matches.length, 1, 'Conversation not available for this manager');
+    return conversation(matches[0]);
   }
   visibleContext(agentId, ref) {
     const managerRole = roleForAgent(agentId);
-    assert(managerRole, 'Manager role required');
-    const seen = new Set(),
-      messages = [];
-    for (const d of this.store.all(
-      "SELECT id,text,receipt,due FROM deliveries WHERE role=? AND status='sent' AND json_extract(route,'$.conversationRef')=? ORDER BY due DESC LIMIT 12",
-      managerRole,
-      ref,
-    )) {
-      const receipt = JSON.parse(d.receipt);
-      if (!receipt.messageId || seen.has(receipt.messageId)) continue;
-      seen.add(receipt.messageId);
-      messages.push({ messageId: receipt.messageId, text: d.text, deliveryId: d.id });
-      if (messages.length === 3) break;
-    }
+    assert(managerRole);
     return {
-      messages,
+      messages: this.store
+        .all(
+          "SELECT id,text,receipt FROM deliveries WHERE role=? AND status='sent' AND json_extract(route,'$.conversationRef')=? ORDER BY due DESC LIMIT 3",
+          managerRole,
+          ref,
+        )
+        .flatMap((delivery) => {
+          const receipt = JSON.parse(delivery.receipt);
+          return receipt.messageId
+            ? [{ messageId: receipt.messageId, text: delivery.text, deliveryId: delivery.id }]
+            : [];
+        }),
       coverage:
-        'Verified project deliveries only. Combine with native channel-visible dialogue; this is not complete channel history.',
+        'Verified project deliveries only; native conversation history remains authoritative.',
     };
   }
   async current(ctx) {
@@ -153,21 +163,9 @@ export class ProjectRuntime {
       ctx.sourceToken ? `token:${ctx.sourceToken}` : ctx.sessionKey,
     );
     if (ctx.sourceToken)
-      assert(
-        saved?.sessionKey === ctx.sessionKey,
-        'Source token belongs to a different conversation',
-      );
+      assert(saved?.sessionKey === ctx.sessionKey, 'Source token belongs to another conversation');
     if (saved?.sourceToken)
-      assert(
-        ctx.sourceToken === saved.sourceToken,
-        'Use the injected current-turn sourceToken; do not substitute the most recent queued message',
-      );
-    if (saved?.senderId && ctx.requesterSenderId && !saved.testing)
-      assert.equal(
-        String(saved.senderId),
-        String(ctx.requesterSenderId),
-        'Source token belongs to a different sender',
-      );
+      assert.equal(ctx.sourceToken, saved.sourceToken, 'Use the current-turn sourceToken');
     if (saved?.route)
       return {
         route: await this.route(ctx.agentId, saved.route.conversationRef),
@@ -176,28 +174,18 @@ export class ProjectRuntime {
         replyTo: saved.replyTo,
         sessionKey: ctx.sessionKey,
       };
-    const d = ctx.deliveryContext ?? {};
-    const channel = d.channel ?? ctx.messageChannel ?? saved?.raw?.channel;
-    const normalize = (s) => {
-      let v = String(s ?? '');
-      if (v.startsWith(`${channel}:`)) v = v.slice(channel.length + 1);
-      if (channel === 'discord') v = v.replace(/^(channel|user):/, '');
-      return v.replace(/:topic:.+$/, '');
-    };
-    const target = d.to ?? ctx.nativeChannelId ?? saved?.raw?.conversationId;
-    const routes = await this.conversations(ctx.agentId, normalize(target));
-    const matches = routes.filter(
-      (r) =>
-        r.channel === channel &&
-        r.accountId === (d.accountId ?? ctx.agentAccountId ?? saved?.raw?.accountId ?? 'default') &&
-        normalize(r.target) === normalize(target) &&
-        String(r.threadId ?? '') === String(d.threadId ?? saved?.raw?.threadId ?? ''),
+    const delivery = ctx.deliveryContext ?? {};
+    const channel = delivery.channel ?? ctx.messageChannel ?? saved?.raw?.channel;
+    const target = delivery.to ?? ctx.nativeChannelId ?? saved?.raw?.conversationId;
+    const matches = (await this.conversations(ctx.agentId, target)).filter(
+      (route) =>
+        route.channel === channel &&
+        route.accountId ===
+          (delivery.accountId ?? ctx.agentAccountId ?? saved?.raw?.accountId ?? 'default') &&
+        route.target === target &&
+        String(route.threadId ?? '') === String(delivery.threadId ?? saved?.raw?.threadId ?? ''),
     );
-    assert.equal(
-      matches.length,
-      1,
-      'Current channel route unavailable; use an explicit native conversation reference',
-    );
+    assert.equal(matches.length, 1, 'Current channel route unavailable');
     return {
       route: conversation(matches[0]),
       messageId: saved?.messageId,
@@ -206,126 +194,82 @@ export class ProjectRuntime {
     };
   }
   async cards(project) {
-    let result = [];
+    const cards = [];
     for (const board of project.boards) {
-      const r = await this.rpc('workboard.cards.list', { boardId: board.id });
-      pageCards(r, { boardId: board.id, includeArchived: true });
-      result.push(...r.cards);
+      const response = await this.rpc('workboard.cards.list', { boardId: board.id });
+      pageCards(response, { boardId: board.id, includeArchived: true });
+      cards.push(...response.cards);
     }
-    return result;
+    return cards;
   }
-  milestoneCandidates(p, cards, includeTerminal = false) {
-    if (p.state !== 'active' && !includeTerminal) return [];
-    const candidates = [];
-    for (const f of cards.filter(
-      (c) =>
-        type(c) === 'feature' &&
-        (includeTerminal || c.status !== 'done') &&
-        !c.metadata?.archivedAt,
-    )) {
-      const children = cards.filter(
-        (c) => c.metadata?.automation?.tenant === f.id && type(c) === 'work-item',
-      );
-      const started = children
-        .filter((c) => !c.labels?.includes('review') && currentAttempt(c)?.taskId)
-        .sort((a, b) => a.createdAt - b.createdAt)[0];
-      if (started) {
-        const a = currentAttempt(started);
-        candidates.push({
-          event: `start:${f.id}`,
-          featureId: f.id,
-          kind: 'engineering-start',
-          created: started.createdAt,
-          evidence: { workItem: started.id, taskId: a.taskId, runId: a.runId },
-          terminal: f.status === 'done',
-        });
-      }
-      for (const review of children.filter(
-        (c) => c.status === 'done' && c.labels?.includes('review'),
-      )) {
-        const proof = review.metadata?.proof?.find(
-          (p) =>
-            p.status === 'passed' &&
-            p.label === 'Independent review' &&
-            /^Candidate: [0-9a-f]{40}(?:$|\n|\. )/.test(p.note ?? ''),
-        );
-        if (proof) {
-          const candidate = proof.note.slice(11, 51);
-          candidates.push({
-            event: `review:${f.id}:${candidate}`,
-            featureId: f.id,
-            kind: 'review-passed',
-            created: proof.createdAt ?? review.updatedAt,
-            evidence: { workItem: review.id, candidate, proofId: proof.id },
-            terminal: f.status === 'done',
-          });
-        }
-      }
-    }
-    return [...new Map(candidates.map((c) => [c.event, c])).values()].filter(
-      (c) =>
-        !this.store.get(
-          'SELECT key FROM receipts WHERE key=?',
-          `milestone-decision:${p.id}:${c.event}`,
-        ),
-    );
+  registryContext(projectId, boardId) {
+    const project = this.store.project(projectId);
+    const board = project.boards.find((candidate) => candidate.id === boardId);
+    assert(board, 'Board belongs to another project');
+    return { store: this.store, project: project.id, repository: board.metadata };
   }
   async summary(id) {
-    const p = this.store.project(id),
-      cards = await this.cards(p);
+    const project = this.store.project(id);
+    const records = this.store.records(id);
+    const cards = await this.cards(project);
+    const byId = new Map(cards.map((card) => [card.id, card]));
     return {
-      id: p.id,
-      name: p.name,
-      purpose: p.purpose,
-      context: p.context,
-      state: p.state,
-      revision: p.revision,
-      priority: p.priority,
-      productConversation: p.productConversation,
-      engineeringConversation: p.engineeringConversation,
-      repositories: p.boards.map((b) => ({
-        ...b,
-        metadata:
-          cards.find((c) => type(c) === 'project-info' && c.metadata.automation.boardId === b.id)
-            ?.notes ?? null,
+      id: project.id,
+      name: project.name,
+      purpose: project.purpose,
+      context: project.context,
+      state: project.state,
+      revision: project.revision,
+      priority: project.priority,
+      productConversation: project.productConversation,
+      engineeringConversation: project.engineeringConversation,
+      repositories: project.boards,
+      requests: records.requests.map((request) => ({
+        id: request.id,
+        title: request.title,
+        scope: request.scope,
+        features: records.features
+          .filter((feature) => feature.request === request.id)
+          .map((feature) => feature.id),
       })),
-      features: cards
-        .filter((c) => type(c) === 'feature')
-        .map((c) => ({
-          id: c.id,
-          title: c.title,
-          status: c.status,
-          boardId: c.metadata.automation.boardId,
-          scope: field(c, 'Scope'),
-          authorization:
-            'This is an accepted request. Its current scope, stops and handoffs govern execution; declaration-time brainstorming language is historical.',
-          outcome: c.metadata.automation.summary ?? null,
+      features: records.features.map((feature) => {
+        const card = byId.get(feature.card);
+        return {
+          id: feature.id,
+          cardId: feature.card,
+          requestId: feature.request,
+          boardId: feature.board,
+          scope: feature.scope,
+          scopeRevision: feature.scope_revision,
+          title: card?.title ?? null,
+          status: card?.status ?? 'missing',
+          outcome: card?.metadata?.automation?.summary ?? null,
           notification:
             this.store.get(
               'SELECT id,event,status FROM deliveries WHERE project=? AND event=? AND role=?',
               id,
-              `result:${c.id}`,
+              `result:${feature.id}`,
               'product',
             ) ?? null,
-        })),
-      decisions: cards
-        .filter((c) => handoffMarker(c) && handoffMarker(c).phase !== 'applied')
-        .map((c) => ({
-          id: c.id,
-          checkpoint: handoffMarker(c),
-          question: JSON.parse(
-            c.metadata.comments.find((m) => m.id === handoffMarker(c).question)?.body ?? '{}',
-          ).data?.question,
-          reason: JSON.parse(
-            c.metadata.comments.find((m) => m.id === handoffMarker(c).question)?.body ?? '{}',
-          ).data?.reason,
-          suggestedResolution: JSON.parse(
-            c.metadata.comments.find((m) => m.id === handoffMarker(c).question)?.body ?? '{}',
-          ).data?.resolution,
-        })),
-      openRecords: cards
-        .filter((c) => type(c) !== 'project-info' && c.status !== 'done')
-        .map((c) => ({ id: c.id, title: c.title, owner: c.agentId, status: c.status })),
+        };
+      }),
+      decisions: records.decisions.filter((decision) => decision.phase !== 'applied'),
+      controls: records.controls.filter((control) => control.state === 'pending'),
+      publications: records.publications,
+      openRecords: records.obligations.flatMap((obligation) => {
+        const card = byId.get(obligation.card);
+        return card && card.status !== 'done'
+          ? [
+              {
+                id: obligation.id,
+                cardId: card.id,
+                title: card.title,
+                owner: card.agentId,
+                status: card.status,
+              },
+            ]
+          : [];
+      }),
       schedules: this.store.all(
         'SELECT id,next,intervalMs,enabled FROM schedules WHERE project=?',
         id,
@@ -334,135 +278,222 @@ export class ProjectRuntime {
         "SELECT id,event,status FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent')",
         id,
       ),
-      communicationIntents: this.store
-        .all(
-          "SELECT id,event,scope,kind,facts,status FROM communication_intents WHERE project=? AND status='pending' ORDER BY created",
-          id,
-        )
-        .map((intent) => ({ ...intent, facts: JSON.parse(intent.facts) })),
-      milestoneCandidates: this.milestoneCandidates(p, cards),
+      bindingDiagnostics: this.health.bindingDiagnostics.filter(
+        (diagnostic) => diagnostic.project === id,
+      ),
     };
   }
   async inventory(id) {
-    const p = this.store.project(id),
-      cards = await this.cards(p);
+    const project = this.store.project(id);
+    const records = this.store.records(id);
+    const cards = new Map((await this.cards(project)).map((card) => [card.id, card]));
     return {
-      revision: p.revision,
-      cards: cards
-        .filter((c) => type(c) !== 'project-info' && c.status !== 'done' && !c.metadata?.archivedAt)
-        .map((c) => ({
-          id: c.id,
-          title: c.title,
-          status: c.status,
-          feature: type(c) === 'feature' ? c.id : c.metadata.automation.tenant,
+      revision: project.revision,
+      obligations: records.obligations.flatMap((obligation) => {
+        const card = cards.get(obligation.card);
+        return !card || card.status !== 'done'
+          ? [
+              {
+                id: `obligation:${obligation.id}`,
+                recordId: obligation.id,
+                cardId: card?.id ?? null,
+                status: card?.status ?? 'projection-pending',
+                feature: obligation.feature,
+              },
+            ]
+          : [];
+      }),
+      controls: records.controls
+        .filter((control) => control.state === 'pending')
+        .map((control) => ({ ...control, recordId: control.id, id: `control:${control.id}` })),
+      notifications: this.store
+        .all(
+          "SELECT id,event,status FROM deliveries WHERE project=? AND kind<>'milestone-batch' AND status NOT IN ('sent','cancelled','fallback-sent')",
+          id,
+        )
+        .map((delivery) => ({
+          ...delivery,
+          recordId: delivery.id,
+          id: `delivery:${delivery.id}`,
         })),
-      notifications: this.store.all(
-        "SELECT id,event,status FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent')",
-        id,
-      ),
-      communicationIntents: this.store.all(
-        "SELECT id,event,scope,kind,status FROM communication_intents WHERE project=? AND status='pending'",
-        id,
-      ),
-      schedules: this.store.all(
-        'SELECT id,next,intervalMs FROM schedules WHERE project=? AND enabled=1',
-        id,
-      ),
+      communicationIntents: this.store
+        .all(
+          "SELECT id,event,scope,kind,status FROM communication_intents WHERE project=? AND status='pending'",
+          id,
+        )
+        .map((intent) => ({
+          ...intent,
+          recordId: intent.id,
+          id: `communication:${intent.id}`,
+        })),
+      schedules: this.store
+        .all('SELECT id,next,intervalMs FROM schedules WHERE project=? AND enabled=1', id)
+        .map((schedule) => ({
+          ...schedule,
+          recordId: schedule.id,
+          id: `schedule:${schedule.id}`,
+        })),
     };
   }
-  async hasActiveExecution(p, cards) {
-    if (cards.some((c) => c.metadata?.claim)) return true;
-    for (const c of cards.filter((c) => c.status !== 'done' && type(c) === 'work-item')) {
-      const a = currentAttempt(c);
-      if (!a) continue;
-      if (a.uncertain || !a.taskId) return true;
-      const t = (await this.rpc('tasks.get', { taskId: a.taskId })).task;
-      if (
-        !t ||
-        !['completed', 'succeeded', 'failed', 'lost', 'timed_out', 'cancelled'].includes(t.status)
-      )
-        return true;
+  async hasActiveExecution(project) {
+    const records = this.store.records(project.id);
+    for (const attempt of records.attempts.filter((row) => row.bound)) {
+      const task = (await this.rpc('tasks.get', { taskId: attempt.task_id })).task;
+      if (!task || !terminal.has(task.status)) return true;
       const sessions = await this.rpc('sessions.list', {
         agentId: topology().workerAgentId,
-        search: a.childSessionKey,
+        search: attempt.child_session,
         archived: 'all',
         limit: 10,
       });
       if (
         sessions.hasMore ||
-        sessions.sessions.length !== 1 ||
-        sessions.sessions[0].hasActiveRun !== false
+        sessions.sessions.some(
+          (session) => session.key === attempt.child_session && session.hasActiveRun,
+        )
       )
         return true;
-    }
-    for (const e of this.store.all(
-      'SELECT * FROM exchanges WHERE project=? AND closed IS NULL',
-      p.id,
-    )) {
-      const s = await this.rpc('sessions.list', {
-        agentId: agentForRole(e.role),
-        search: e.session,
-        archived: 'all',
-        limit: 10,
-      });
-      if (s.hasMore || s.sessions.some((s) => s.key === e.session && s.hasActiveRun)) return true;
     }
     return false;
   }
   async createBoard(id, name) {
-    const listed = await this.rpc('workboard.boards.list', {});
-    if (!listed.boards.some((b) => b.id === id))
+    const response = await this.rpc('workboard.boards.list', {});
+    if (!response.boards.some((board) => board.id === id))
       await this.rpc('workboard.boards.upsert', { id, name });
   }
-  async intake(p, input, source) {
-    const { engineeringAgentId } = topology();
-    p = this.store.project(p.id);
-    assert(
-      p.state === 'active',
-      'Project is inactive or draining; explicit reactivation is required',
-    );
-    assert(source.messageId, 'Actual source message identity required');
-    text(input.title, 180);
-    text(input.scope, 1400);
-    if (!p.boards.length) {
-      const board = `jg-${p.id}`;
-      await this.createBoard(board, p.name);
-      this.store.attach(p.id, board);
-      p = this.store.project(p.id);
+  async reconcileRegistryProjections(project) {
+    const diagnostics = [];
+    const allowed = (obligation) => {
+      if (project.state !== 'draining') return true;
+      return (
+        this.store.get(
+          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+          project.id,
+          'obligation',
+          obligation,
+        )?.disposition === 'finish'
+      );
+    };
+    for (const feature of this.store.all(
+      'SELECT * FROM features WHERE project=? AND card IS NULL ORDER BY created',
+      project.id,
+    )) {
+      if (!allowed(feature.id)) continue;
+      try {
+        const result = await ensureNativeCard(JSON.parse(feature.creation_payload), this.rpc);
+        this.store.bindFeatureCard(feature.id, result.card.id);
+      } catch (error) {
+        diagnostics.push({
+          type: 'feature-creation',
+          id: feature.id,
+          error: String(error.message),
+        });
+      }
     }
-    let boards = input.boards ?? (p.boards.length === 1 ? [p.boards[0].id] : []);
+    for (const obligation of this.store.all(
+      "SELECT o.* FROM obligations o JOIN features f ON f.id=o.feature WHERE f.project=? AND o.card IS NULL AND o.kind<>'feature' ORDER BY o.created",
+      project.id,
+    )) {
+      if (!allowed(obligation.id)) continue;
+      try {
+        const feature = this.store.feature(obligation.feature);
+        assert(feature.card, 'Feature projection must bind before child obligation');
+        const result = await ensureNativeCard(JSON.parse(obligation.creation_payload), this.rpc);
+        this.store.bindObligationCard(obligation.id, result.card.id);
+      } catch (error) {
+        diagnostics.push({
+          type: 'obligation-creation',
+          id: obligation.id,
+          error: String(error.message),
+        });
+      }
+    }
+    for (const revision of this.store.all(
+      'SELECT r.*,f.board,f.card FROM feature_scope_revisions r JOIN features f ON f.id=r.feature WHERE f.project=? AND r.projected IS NULL AND f.card IS NOT NULL ORDER BY r.created',
+      project.id,
+    )) {
+      if (!allowed(revision.feature)) continue;
+      try {
+        let response = await this.rpc('workboard.cards.list', { boardId: revision.board });
+        let card = response.cards?.find((candidate) => candidate.id === revision.card);
+        assert(card && !card.metadata?.archivedAt, 'Feature scope projection card missing');
+        if (card.notes !== revision.scope) {
+          await this.rpc('workboard.cards.update', {
+            id: card.id,
+            expectedUpdatedAt: card.updatedAt,
+            patch: { notes: revision.scope },
+          });
+          response = await this.rpc('workboard.cards.list', { boardId: revision.board });
+          card = response.cards?.find((candidate) => candidate.id === revision.card);
+          assert.equal(card?.notes, revision.scope, 'Feature scope projection not confirmed');
+        }
+        this.store.markFeatureRevisionProjected(revision.feature, revision.revision);
+      } catch (error) {
+        diagnostics.push({
+          type: 'feature-scope',
+          id: `${revision.feature}:${revision.revision}`,
+          error: String(error.message),
+        });
+      }
+    }
+    this.health.projectionDiagnostics = [
+      ...(this.health.projectionDiagnostics ?? []).filter(
+        (diagnostic) => diagnostic.project !== project.id,
+      ),
+      ...diagnostics.map((diagnostic) => ({ project: project.id, ...diagnostic })),
+    ];
+    return diagnostics;
+  }
+  async intake(project, input, source) {
+    project = this.store.project(project.id);
+    let drainingSchedule = null;
+    if (project.state === 'draining' && source.route?.channel === 'schedule') {
+      const match = /^([0-9a-f-]{36})-[0-9]+$/.exec(String(source.messageId ?? ''));
+      drainingSchedule =
+        match &&
+        this.store.get(
+          'SELECT * FROM inactivation_plans WHERE project=? AND kind=? AND item=? AND disposition=?',
+          project.id,
+          'schedule',
+          match[1],
+          'finish',
+        );
+    }
+    assert(project.state === 'active' || drainingSchedule, 'Project is inactive or draining');
+    assert(source.messageId, 'Actual source message identity required');
+    if (!project.boards.length) {
+      const board = `jg-${project.id}`;
+      await this.createBoard(board, project.name);
+      this.store.attach(project.id, board);
+      project = this.store.project(project.id);
+    }
+    const boards = input.boards ?? (project.boards.length === 1 ? [project.boards[0].id] : []);
     assert(
       boards.length > 0 && boards.length <= 8 && new Set(boards).size === boards.length,
       'Clarify intended repository scope',
     );
+    const request = this.store.createRequest({
+      project: project.id,
+      source: { route: source.route, messageId: source.messageId },
+      title: input.title,
+      scope: input.scope,
+      requestKey: input.requestKey ?? null,
+    });
     const features = [];
     for (const boardId of boards) {
-      const b = p.boards.find((b) => b.id === boardId);
-      assert(b, 'Repository is not associated with project');
-      assert(this.store.project(p.id).state === 'active', 'Project became inactive during intake');
-      if (input.requestKey !== undefined) text(input.requestKey, 80);
-      const sourceKey = hash([source.route, source.messageId, input.requestKey ?? '']).slice(0, 40),
-        delivery = sourceString(source.route);
-      const expected = sealCreationPayload({
-        boardId,
-        tenant: boardId,
-        idempotencyKey: `feature:${boardId}:source-${sourceKey}`,
-        title: input.title,
-        agentId: engineeringAgentId,
-        status: 'todo',
-        priority: 'normal',
-        labels: ['type:feature'],
-        workspace: { kind: 'scratch' },
-        maxRuntimeSeconds: 1,
-        maxRetries: 1,
-        notes: `Type: feature\nRequest: source-${sourceKey}\nSource message: ${source.messageId}\nScope: ${input.scope}\nDelivery: ${delivery}\nDelivery source: ${delivery}\nProject identity: ${p.id}\nRepository scope: ${b.repository ? 'selected' : 'pending'}`,
-      });
-      const result = await ensureCreatedCard(expected, this.rpc);
-      features.push(result.card.id);
-      this.store.exchange(p.id, result.card.id, 'engineering');
+      const board = project.boards.find((candidate) => candidate.id === boardId);
+      assert(board, 'Repository is not associated with project');
+      const result = await createFeatureCard(
+        { boardId, title: input.title, scope: input.scope },
+        this.rpc,
+        { store: this.store, project: project.id, request: request.id },
+      );
+      features.push(result.featureId);
+      this.store.exchange(project.id, result.featureId, 'engineering');
     }
     return {
       durable: true,
+      requestId: request.id,
       features,
       acknowledgementReady: true,
       engineeringStarted: false,
@@ -470,171 +501,173 @@ export class ProjectRuntime {
     };
   }
   async operation(operation, input, ctx = {}) {
-    const { productAgentId, engineeringAgentId } = topology();
+    const { productAgentId } = topology();
     ctx = { ...ctx, sourceToken: input.sourceToken };
-    const agentId = ctx.agentId ?? productAgentId,
-      managerRole = roleForAgent(agentId);
+    const agentId = ctx.agentId ?? productAgentId;
+    const managerRole = roleForAgent(agentId);
     assert(managerRole, 'Manager role required');
     const internal = Boolean(ctx.operator || isProjectSession(ctx.sessionKey));
-    const p = input.projectId ? this.store.project(input.projectId) : null;
+    const project = input.projectId ? this.store.project(input.projectId) : null;
     const exchange =
       !ctx.operator && isProjectSession(ctx.sessionKey)
         ? this.store.get('SELECT * FROM exchanges WHERE session=?', ctx.sessionKey)
         : null;
     if (!ctx.operator && isProjectSession(ctx.sessionKey))
       assert(exchange, 'Registered purpose context required');
-    if (exchange && p)
-      assert.equal(p.id, exchange.project, 'Internal context cannot cross project boundaries');
+    if (exchange && project)
+      assert.equal(project.id, exchange.project, 'Internal context cannot cross projects');
+    if (productOperations.has(operation))
+      assert(agentId === productAgentId, 'This project operation belongs to the product agent');
+    if (exchange && mainConversationOperations.has(operation))
+      throw new Error('Project-wide operation is unavailable inside a Feature context');
+    const assertExchangeScope = (feature) => {
+      const row = this.store.feature(feature);
+      assert.equal(row.project, project.id, 'Feature belongs to another project');
+      const id = row.id;
+      if (exchange)
+        assert.equal(exchange.scope, id, 'Internal context cannot mutate another Feature');
+      return id;
+    };
     if (operation === 'list')
       return this.store
         .list()
-        .filter((p) => !exchange || p.id === exchange.project)
-        .map((p) => ({
-          id: p.id,
-          name: p.name,
-          purpose: p.purpose,
-          state: p.state,
-          revision: p.revision,
-          repositories: p.boards,
+        .filter((candidate) => !exchange || candidate.id === exchange.project)
+        .map((candidate) => ({
+          id: candidate.id,
+          name: candidate.name,
+          purpose: candidate.purpose,
+          state: candidate.state,
+          revision: candidate.revision,
+          repositories: candidate.boards,
         }));
     if (operation === 'conversations') return this.conversations(agentId, input.query);
     if (operation === 'current') return this.current(ctx);
-    if (operation === 'visible-context') {
-      await this.route(agentId, input.conversationRef);
-      return this.visibleContext(agentId, input.conversationRef);
-    }
-    if (operation === 'summary') return this.summary(p.id);
-    if (operation === 'inventory') return this.inventory(p.id);
-    if (operation === 'guard') {
-      assert(p.state !== 'inactive', 'Project inactive');
-      return { active: true, state: p.state };
-    }
+    if (operation === 'visible-context') return this.visibleContext(agentId, input.conversationRef);
+    if (operation === 'summary') return this.summary(project.id);
+    if (operation === 'inventory') return this.inventory(project.id);
+    if (operation === 'guard')
+      return { active: project.state !== 'inactive', state: project.state };
     if (operation === 'declare') {
-      assert(agentId === productAgentId, 'Project declaration belongs to the product agent');
-      assert(input.explicit === true, 'User must explicitly declare a project');
+      assert(
+        agentId === productAgentId && input.explicit === true,
+        'Explicit product declaration required',
+      );
       const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      assert(source.messageId, 'Actual declaration message identity required');
-      const r = input.conversationRef
+      assert(source.messageId);
+      const route = input.conversationRef
         ? await this.route(productAgentId, input.conversationRef)
         : source.route;
-      const productFallback = r,
-        engineeringFallback = null;
       const created = this.store.declare({
         key: hash([source.route, source.messageId]),
         name: input.name,
         purpose: input.purpose,
-        route: r,
-        productFallback,
-        engineeringFallback,
+        route,
+        productFallback: route,
       });
       return this.summary(created.id);
     }
     if (operation === 'move') {
-      assert(input.explicit === true, 'Only explicit user intent changes a preferred conversation');
+      assert(input.explicit === true);
       const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      assert(source.messageId, 'Actual move message required');
       const route = input.conversationRef
         ? await this.route(agentId, input.conversationRef)
         : source.route;
       this.store.move({
         key: hash([source.route, source.messageId, managerRole]),
-        id: p.id,
+        id: project.id,
         managerRole,
         route,
         revision: input.revision,
       });
-      return {
-        ...(await this.summary(p.id)),
-        confirmInNewConversation: true,
-        continuityFields: ['purpose', 'repositories', 'features', 'decisions', 'nextSteps'],
-      };
+      return this.summary(project.id);
     }
-    if (operation === 'context') {
-      assert(agentId === productAgentId, 'Product context belongs to the product agent');
-      return this.store.context(p.id, input.context, input.revision);
-    }
+    if (operation === 'context')
+      return this.store.context(project.id, input.context, input.revision);
     if (operation === 'priority') {
-      assert(
-        agentId === productAgentId &&
-          Number.isSafeInteger(input.priority) &&
-          Math.abs(input.priority) <= 100,
-      );
+      assert(Number.isSafeInteger(input.priority) && Math.abs(input.priority) <= 100);
       this.store.run(
         'UPDATE projects SET priority=?,revision=revision+1 WHERE id=?',
         input.priority,
-        p.id,
+        project.id,
       );
-      return this.store.project(p.id);
+      return this.store.project(project.id);
     }
     if (operation === 'associate') {
-      assert(input.explicit === true, 'Explicit repository association required');
-      const info = input.repository;
-      assert(info && typeof info.repository === 'string', 'Repository setup fields required');
-      const existing = p.boards.find((b) => b.repository === info.repository),
-        empty = p.boards.find((b) => !b.repository);
+      assert(input.explicit === true && input.repository);
+      const existing = project.boards.find(
+        (board) => board.repository === input.repository.repository,
+      );
+      const empty = project.boards.find((board) => !board.repository);
       const boardId =
-        existing?.id ?? empty?.id ?? `jg-${hash([p.id, info.repository]).slice(0, 32)}`;
-      await this.createBoard(boardId, `${p.name} repository`);
-      const result = await createProductCard('project-info', { ...info, boardId }, this.rpc);
-      this.store.attach(p.id, boardId, info.repository);
-      return { boardId, project: await this.summary(p.id), metadataId: result.card.id };
+        existing?.id ??
+        empty?.id ??
+        `jg-${hash([project.id, input.repository.repository]).slice(0, 32)}`;
+      await this.createBoard(boardId, `${project.name} repository`);
+      this.store.attach(project.id, boardId, input.repository);
+      return { boardId, project: await this.summary(project.id) };
     }
     if (operation === 'intake') {
       assert(
         agentId === productAgentId && input.authorized === true,
-        'Explicit authorization for this work through the product agent is required',
+        'Explicit work authorization required',
       );
       const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      const r = await this.intake(p, input, source);
+      const result = await this.intake(project, input, source);
       this.requestTick();
-      return r;
+      return result;
     }
     if (operation === 'amend') {
-      assert(
-        agentId === productAgentId && input.authorized === true,
-        'Explicit scope amendment required',
-      );
-      assert(
-        p.boards.some((b) => b.id === input.boardId),
-        'Board belongs to another project',
-      );
+      assert(agentId === productAgentId && input.authorized === true);
+      assertExchangeScope(input.featureId ?? input.id);
       const source = ctx.operator && input.source ? input.source : await this.current(ctx);
       assert(source.messageId, 'Actual amendment source required');
       const result = await amendFeature(
         {
-          boardId: input.boardId,
-          id: input.id,
-          expectedUpdatedAt: input.expectedUpdatedAt,
-          scope: input.scope,
-          reason: input.reason,
-          source: `${sourceString(source.route)};message=${source.messageId}`,
+          ...input,
+          source: JSON.stringify({ route: source.route, messageId: source.messageId }),
         },
         this.rpc,
+        this.registryContext(project.id, input.boardId),
       );
       this.requestTick();
       return result;
     }
-    if (operation === 'notify') {
-      assert(internal, 'Proactive notification composition belongs to an internal purpose context');
+    if (operation === 'control') {
       assert(
-        agentId === productAgentId,
-        'Normal project notifications belong to the product agent',
+        agentId === productAgentId && input.explicit === true,
+        'Explicit control intent required',
       );
-      if (exchange)
-        assert(
-          String(input.event).split(':').includes(exchange.scope),
-          'Notification event belongs to another topic',
-        );
+      assertExchangeScope(input.featureId);
+      const feature = this.store.feature(input.featureId);
+      const card = (await this.cards(project)).find((candidate) => candidate.id === feature.card);
+      assert(card && card.status !== 'done', 'Cannot stop a completed Feature');
+      const result = this.store.control({
+        project: project.id,
+        request: input.requestId ?? null,
+        feature: input.featureId ?? null,
+        kind: 'stop',
+        reason: input.reason,
+      });
+      this.requestTick();
+      return result;
+    }
+    if (operation === 'notify') {
+      assert(internal && agentId === productAgentId);
+      assertExchangeScope(input.featureId);
+      assert(
+        !String(input.event).startsWith('result:'),
+        'Terminal results require communication-decision',
+      );
       const prior = this.store.get(
         'SELECT * FROM deliveries WHERE project=? AND event=? AND role=?',
-        p.id,
+        project.id,
         input.event,
         'product',
       );
-      const d =
+      const delivery =
         prior ??
         this.store.enqueue({
-          project: p.id,
+          project: project.id,
           event: input.event,
           kind: input.kind ?? 'milestone',
           message: text(input.message, 6000),
@@ -644,40 +677,38 @@ export class ProjectRuntime {
       this.requestTick();
       return {
         durable: true,
-        id: d.id,
-        status: d.status,
+        id: delivery.id,
+        status: delivery.status,
         reused: Boolean(prior),
-        retainedMessage: d.text,
-        receipt: d.receipt ? JSON.parse(d.receipt) : null,
+        receipt: delivery.receipt ? JSON.parse(delivery.receipt) : null,
       };
     }
     if (operation === 'communication-decision') {
-      assert(
-        agentId === productAgentId && internal && typeof input.notify === 'boolean',
-        'The product agent decides project communication',
-      );
+      assert(internal && agentId === productAgentId && typeof input.notify === 'boolean');
       const intent = this.store.get(
-        'SELECT * FROM communication_intents WHERE project=? AND event=?',
-        p.id,
+        'SELECT * FROM communication_intents WHERE project=? AND event=? AND eligible=1',
+        project.id,
         input.event,
       );
-      assert(intent, 'Unknown communication intent');
+      assert(intent);
       if (exchange)
-        assert.equal(intent.scope, exchange.scope, 'Communication belongs to another topic');
+        assert.equal(exchange.scope, intent.scope, 'Communication belongs to another scope');
+      if (intent.kind === 'result')
+        assert(input.notify === true, 'Terminal result communication must be composed');
       if (intent.status !== 'pending')
         return {
           event: intent.event,
           status: intent.status,
-          delivery: this.store.get(
-            'SELECT id,status FROM deliveries WHERE project=? AND event=? AND role=?',
-            p.id,
+          deliveryId: this.store.get(
+            'SELECT id FROM deliveries WHERE project=? AND event=? AND role=?',
+            project.id,
             intent.event,
             'product',
-          ),
+          )?.id,
         };
       const delivery = input.notify
         ? this.store.enqueue({
-            project: p.id,
+            project: project.id,
             event: intent.event,
             kind: intent.kind,
             message: text(input.message, 6000),
@@ -687,11 +718,10 @@ export class ProjectRuntime {
       this.store.run(
         'UPDATE communication_intents SET status=?,reason=?,updated=? WHERE id=?',
         input.notify ? 'composed' : 'dismissed',
-        text(input.reason ?? 'Jarvis communication judgment', 1000),
+        text(input.reason ?? 'Product communication judgment', 1000),
         this.now(),
         intent.id,
       );
-      this.requestTick();
       return {
         event: intent.event,
         status: input.notify ? 'composed' : 'dismissed',
@@ -699,320 +729,302 @@ export class ProjectRuntime {
       };
     }
     if (operation === 'milestone-decision') {
+      assert(internal && agentId === productAgentId && typeof input.notify === 'boolean');
+      assertExchangeScope(input.featureId);
       assert(
-        agentId === productAgentId && internal && typeof input.notify === 'boolean',
-        'The product agent decides milestone visibility',
+        !String(input.event).startsWith('result:'),
+        'Terminal results require communication-decision',
       );
-      const key = `milestone-decision:${p.id}:${input.event}`,
-        old = this.store.get('SELECT result FROM receipts WHERE key=?', key);
-      if (old) return JSON.parse(old.result);
-      const candidate = this.milestoneCandidates(p, await this.cards(p), true).find(
-        (c) => c.event === input.event,
-      );
-      assert(candidate, 'Native milestone evidence required');
-      if (exchange)
-        assert.equal(candidate.featureId, exchange.scope, 'Milestone belongs to another topic');
-      const shouldNotify = input.notify && !candidate.terminal && p.state === 'active';
-      const prior = this.store.get(
-        'SELECT * FROM deliveries WHERE project=? AND event=? AND role=?',
-        p.id,
-        input.event,
-        'product',
-      );
-      const delivery =
-        prior ??
-        (shouldNotify
+      const key = `milestone-decision:${project.id}:${text(input.event, 240)}`;
+      return this.store.once(key, { notify: input.notify, reason: input.reason }, () => {
+        const delivery = input.notify
           ? this.store.enqueue({
-              project: p.id,
+              project: project.id,
               event: input.event,
               kind: 'milestone',
               message: text(input.message, 6000),
               due: this.now() + 45000,
             })
-          : null);
-      const result = {
-        event: input.event,
-        notified: Boolean(delivery),
-        deliveryId: delivery?.id ?? null,
-        reason: prior
-          ? 'retained prior notification'
-          : candidate.terminal
-            ? 'superseded by terminal result'
-            : text(input.reason ?? 'Jarvis milestone judgment', 1000),
-      };
-      this.store.once(key, { event: input.event, evidence: candidate.evidence }, () => result);
-      this.requestTick();
-      return result;
+          : null;
+        return {
+          event: input.event,
+          notified: Boolean(delivery),
+          deliveryId: delivery?.id ?? null,
+          reason: text(input.reason ?? 'Product milestone judgment', 1000),
+        };
+      });
     }
     if (operation === 'delivery') {
-      const d = this.store.get('SELECT * FROM deliveries WHERE project=? AND id=?', p.id, input.id);
-      assert(d);
-      const actual =
-        d.status === 'fallback-sent'
-          ? this.store.get(
-              'SELECT * FROM deliveries WHERE project=? AND event=?',
-              p.id,
-              `fallback:${d.id}`,
-            )
-          : d;
+      const delivery = this.store.get(
+        'SELECT * FROM deliveries WHERE project=? AND id=?',
+        project.id,
+        input.id,
+      );
+      assert(delivery);
       return {
-        ...d,
-        delivered: actual?.status === 'sent',
-        receipt: actual?.receipt ? JSON.parse(actual.receipt) : null,
-        actualRoute: actual?.route ? JSON.parse(actual.route) : null,
+        ...delivery,
+        delivered: ['sent', 'fallback-sent'].includes(delivery.status),
+        receipt: delivery.receipt ? JSON.parse(delivery.receipt) : null,
       };
     }
     if (operation === 'also-notify') {
-      assert(input.explicit === true, 'Additional copies need explicit event-scoped request');
+      assert(input.explicit === true);
+      if (exchange) assertExchangeScope(input.featureId);
       const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      const r = input.conversationRef
-        ? await this.route(agentId, input.conversationRef)
-        : source.route;
-      const result = this.store.copy({
-        project: p.id,
+      return this.store.copy({
+        project: project.id,
         event: input.event,
         managerRole,
-        route: r,
+        route: input.conversationRef
+          ? await this.route(agentId, input.conversationRef)
+          : source.route,
         recurring: input.recurring ?? false,
       });
-      const prior = this.store.get(
-        "SELECT * FROM deliveries WHERE project=? AND event=? AND role=? AND status='sent'",
-        p.id,
-        input.event,
-        'product',
-      );
-      if (prior) await this.processCopies(prior);
-      this.requestTick();
-      return result;
     }
     if (operation === 'question-delivery') {
-      assert(agentId === productAgentId && internal);
-      const cards = await this.cards(p),
-        c = cards.find((c) => c.id === input.cardId),
-        h = c && handoffMarker(c);
-      assert(h && !h.uncertain);
-      if (exchange)
-        assert(
-          c.id === exchange.scope || c.metadata?.automation?.tenant === exchange.scope,
-          'Question belongs to another topic',
-        );
-      const existing = this.store.get(
-        'SELECT * FROM deliveries WHERE project=? AND event=? AND role=?',
-        p.id,
-        `question:${h.checkpoint}`,
-        'product',
-      );
-      const d =
+      assert(internal && agentId === productAgentId);
+      const decision = scopedDecision(this.store, project.id, input.checkpoint);
+      assertExchangeScope(decision.feature);
+      assert(['open', 'sent'].includes(decision.phase), 'Open decision required');
+      const existing = decision.question_delivery
+        ? this.store.get(
+            'SELECT * FROM deliveries WHERE id=? AND project=?',
+            decision.question_delivery,
+            project.id,
+          )
+        : null;
+      const delivery =
         existing ??
         this.store.enqueue({
-          project: p.id,
-          event: `question:${h.checkpoint}`,
+          project: project.id,
+          event: `question:${decision.id}`,
           kind: 'question',
           message: text(input.message, 6000),
           fallbackMessage: input.fallbackMessage,
         });
-      await this.deliver(d);
-      const sent = this.store.get('SELECT * FROM deliveries WHERE id=?', d.id);
-      const actual =
-        sent.status === 'fallback-sent'
-          ? this.store.get(
-              'SELECT * FROM deliveries WHERE project=? AND event=?',
-              p.id,
-              `fallback:${sent.id}`,
-            )
-          : sent;
-      if (actual?.status === 'sent') {
-        const receipt = JSON.parse(actual.receipt);
-        await handoffCard(
-          'handoff-receipt',
-          {
-            boardId: c.metadata.automation.boardId,
-            id: c.id,
-            checkpoint: h.checkpoint,
-            actor: ctx.sessionKey,
-            delivery: 'sent',
-            channel: sourceString(JSON.parse(actual.route)),
-            message: receipt.messageId,
-          },
-          this.rpc,
+      await this.deliver(delivery);
+      const sent = this.store.get('SELECT * FROM deliveries WHERE id=?', delivery.id);
+      if (['sent', 'fallback-sent'].includes(sent.status))
+        this.store.run(
+          "UPDATE decisions SET phase='sent',question_delivery=?,updated=? WHERE id=?",
+          delivery.id,
+          this.now(),
+          decision.id,
         );
-      }
-      return { status: sent.status, deliveryId: d.id };
+      return { checkpoint: decision.id, deliveryId: delivery.id, status: sent.status };
     }
     if (operation === 'answer') {
-      assert(
-        agentId === productAgentId && input.correlated === true,
-        'Clarify ambiguous answers before recording',
-      );
+      assert(agentId === productAgentId && input.correlated === true);
       const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      assert(source.messageId, 'Actual user answer message required');
-      const cards = await this.cards(p),
-        c = cards.find((c) => c.id === input.cardId),
-        h = c && handoffMarker(c);
-      assert(
-        h && !h.uncertain && h.checkpoint === input.checkpoint,
-        'Exact open question required',
-      );
-      const receipt = JSON.parse(
-        c.metadata.comments.find((x) => x.id === h.receipt)?.body ?? '{}',
-      ).data;
-      assert(receipt?.delivery === 'sent');
-      const result = await handoffCard(
-        'handoff-correlated-answer',
-        {
-          boardId: c.metadata.automation.boardId,
-          id: c.id,
-          checkpoint: h.checkpoint,
-          actor: ctx.sessionKey ?? `agent:${productAgentId}:main`,
-          channel: sourceString(source.route),
-          questionMessage: receipt.message,
-          message: String(source.messageId),
-          answer: text(input.answer, 1400),
-        },
-        this.rpc,
-      );
-      this.store.run(
-        'UPDATE exchanges SET attempts=0,lastDispatch=0 WHERE project=? AND closed IS NULL',
-        p.id,
-      );
+      assert(source.messageId, 'Actual answer message required');
+      const decision = scopedDecision(this.store, project.id, input.checkpoint);
+      assertExchangeScope(decision.feature);
+      assert(['sent', 'answered'].includes(decision.phase), 'Sent decision required');
+      const answer = text(input.answer, 1400);
+      if (decision?.phase === 'answered') {
+        assert.equal(decision.answer, answer, 'Decision answer changed');
+        assert.equal(decision.answer_message, String(source.messageId), 'Answer source changed');
+      } else {
+        assert(decision?.authority === 'user', 'Exact sent user decision required');
+        this.store.run(
+          "UPDATE decisions SET phase='answered',answer=?,answer_message=?,source=?,updated=? WHERE id=?",
+          answer,
+          String(source.messageId),
+          JSON.stringify(source.route),
+          this.now(),
+          decision.id,
+        );
+      }
       this.requestTick();
-      return result;
+      await projectAnsweredDecision(
+        this.store,
+        project.id,
+        decision.id,
+        this.rpc,
+        input.expectedUpdatedAt,
+      );
+      return this.store.get('SELECT * FROM decisions WHERE id=?', decision.id);
     }
     if (operation === 'schedule') {
+      assert(agentId === productAgentId && input.authorized === true && project.state === 'active');
+      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
+      assert(source.messageId, 'Actual schedule source required');
+      const boards = input.boards ?? project.boards.map((board) => board.id);
       assert(
-        agentId === productAgentId && input.authorized === true,
-        'Schedule requires explicit work authorization',
+        Array.isArray(boards) &&
+          boards.length > 0 &&
+          boards.length <= 8 &&
+          new Set(boards).size === boards.length &&
+          boards.every((id) => project.boards.some((board) => board.id === id)),
+        'Schedule boards must be unique associated repositories',
       );
-      assert(p.state === 'active', 'Reactivate project before new scheduled work');
       const spec = {
         title: text(input.title, 180),
         scope: text(input.scope, 1400),
-        boards: input.boards ?? p.boards.map((b) => b.id),
+        boards,
       };
-      assert(spec.boards.length && spec.boards.every((id) => p.boards.some((b) => b.id === id)));
       return this.store.schedule({
-        project: p.id,
+        project: project.id,
         spec,
         next: input.next,
         intervalMs: input.intervalMs ?? null,
+        sourceKey: hash([source.route, source.messageId]),
       });
     }
     if (operation === 'schedule-disable') {
-      const s = this.store.get('SELECT * FROM schedules WHERE id=? AND project=?', input.id, p.id);
-      assert(s);
-      this.store.run('UPDATE schedules SET enabled=0 WHERE id=?', s.id);
+      const schedule = this.store.get(
+        'SELECT * FROM schedules WHERE id=? AND project=?',
+        input.id,
+        project.id,
+      );
+      assert(schedule);
+      this.store.run('UPDATE schedules SET enabled=0 WHERE id=?', schedule.id);
       return { disabled: true };
     }
     if (operation === 'inactivate') {
-      assert(
-        agentId === productAgentId && input.confirmed === true,
-        'Discuss each unfinished obligation before inactivation',
-      );
-      const inventory = await this.inventory(p.id);
+      assert(agentId === productAgentId && input.confirmed === true);
+      const inventory = await this.inventory(project.id);
       assert.equal(input.revision, inventory.revision, 'Project changed; show refreshed inventory');
-      const expected = [
-        ...inventory.cards,
-        ...inventory.notifications,
-        ...inventory.communicationIntents,
-        ...inventory.schedules,
-      ]
-        .map((x) => x.id)
-        .sort();
-      const choices = input.dispositions ?? {};
+      const items = [
+        ...inventory.obligations.map((item) => ({ ...item, kind: 'obligation' })),
+        ...inventory.notifications.map((item) => ({ ...item, kind: 'delivery' })),
+        ...inventory.communicationIntents.map((item) => ({ ...item, kind: 'communication' })),
+        ...inventory.controls.map((item) => ({ ...item, kind: 'control' })),
+        ...inventory.schedules.map((item) => ({ ...item, kind: 'schedule' })),
+      ];
+      const dispositions = input.dispositions ?? {};
       assert.deepEqual(
-        Object.keys(choices).sort(),
-        expected,
-        'Every unfinished card, delivery and schedule needs an explicit disposition',
+        Object.keys(dispositions).sort(),
+        items.map((item) => item.id).sort(),
+        'Every unfinished item needs an explicit disposition',
       );
       assert(
-        Object.values(choices).every((c) => ['finish', 'stop', 'pending'].includes(c)),
+        Object.values(dispositions).every((value) => ['finish', 'stop', 'pending'].includes(value)),
         'Disposition must be finish, stop, or pending',
       );
-      for (const item of inventory.cards.filter((x) => choices[x.id] === 'stop')) {
-        const all = await this.cards(p),
-          feature = all.find((c) => c.id === item.feature);
-        if (feature && feature.status !== 'done')
-          await createProductCard(
-            'stop',
-            {
-              boardId: feature.metadata.automation.boardId,
-              featureId: feature.id,
-              title: 'Stop before project inactivation',
-              reason: 'Explicit user stop disposition before inactivation',
-            },
-            this.rpc,
+      for (const item of inventory.notifications.filter((item) => item.status === 'batched')) {
+        const member = this.store.get('SELECT * FROM deliveries WHERE id=?', item.recordId);
+        const leaderId = JSON.parse(member.receipt).batch;
+        const leader = this.store.get('SELECT * FROM deliveries WHERE id=?', leaderId);
+        if (leader.status !== 'pending' || leader.route)
+          assert(
+            inventory.notifications
+              .filter((candidate) => {
+                const row = this.store.get(
+                  'SELECT receipt FROM deliveries WHERE id=?',
+                  candidate.recordId,
+                );
+                return row?.receipt && JSON.parse(row.receipt).batch === leaderId;
+              })
+              .every((candidate) => dispositions[candidate.id] === 'finish'),
+            'In-flight batch members must all finish before inactivation',
           );
       }
-      // Active execution cannot be parked: finish/stop must first reconcile through Gilfoyle.
-      const cards = await this.cards(p);
-      const live = await this.hasActiveExecution(p, cards);
-      const drain =
-        live ||
-        inventory.cards.some((c) => choices[c.id] !== 'pending') ||
-        inventory.notifications.some((n) => choices[n.id] === 'finish') ||
-        inventory.communicationIntents.some((intent) => choices[intent.id] === 'finish');
-      for (const n of inventory.notifications.filter((n) => choices[n.id] === 'stop')) {
-        const d = this.store.get('SELECT * FROM deliveries WHERE id=?', n.id);
-        assert(!d.route, 'In-flight delivery must reconcile before cancellation');
-        this.store.run("UPDATE deliveries SET status='cancelled' WHERE id=?", n.id);
-      }
-      for (const intent of inventory.communicationIntents.filter(
-        (intent) => choices[intent.id] === 'stop',
-      ))
+      this.store.tx(() => {
+        this.store.run('DELETE FROM inactivation_plans WHERE project=?', project.id);
+        for (const item of items)
+          this.store.run(
+            'INSERT INTO inactivation_plans VALUES(?,?,?,?,?)',
+            project.id,
+            item.recordId,
+            item.kind,
+            dispositions[item.id],
+            this.now(),
+          );
+        for (const item of inventory.obligations.filter(
+          (item) => dispositions[item.id] === 'stop',
+        )) {
+          const obligation = this.store.obligation(item.recordId);
+          if (!this.store.pendingStop(obligation.feature))
+            this.store.control({
+              project: project.id,
+              feature: obligation.feature,
+              reason: 'Explicit stop disposition during project inactivation',
+            });
+        }
+        for (const leader of this.store.all(
+          "SELECT * FROM deliveries WHERE project=? AND kind='milestone-batch' AND status='pending' AND route IS NULL",
+          project.id,
+        )) {
+          const members = this.store.all(
+            "SELECT * FROM deliveries WHERE project=? AND status='batched' AND json_extract(receipt,'$.batch')=?",
+            project.id,
+            leader.id,
+          );
+          if (!members.length) continue;
+          this.store.run("UPDATE deliveries SET status='cancelled' WHERE id=?", leader.id);
+          for (const member of members)
+            this.store.run(
+              'UPDATE deliveries SET status=?,receipt=NULL WHERE id=?',
+              dispositions[`delivery:${member.id}`] === 'stop' ? 'cancelled' : 'pending',
+              member.id,
+            );
+        }
+        for (const item of inventory.notifications.filter(
+          (item) => dispositions[item.id] === 'stop',
+        )) {
+          const delivery = this.store.get('SELECT * FROM deliveries WHERE id=?', item.recordId);
+          if (delivery.status === 'cancelled') continue;
+          assert(
+            delivery.status === 'pending' && !delivery.route,
+            'In-flight delivery must reconcile before stop',
+          );
+          this.store.run("UPDATE deliveries SET status='cancelled' WHERE id=?", item.recordId);
+        }
+        for (const item of inventory.communicationIntents.filter(
+          (item) => dispositions[item.id] === 'stop',
+        ))
+          this.store.run(
+            "UPDATE communication_intents SET status='dismissed',reason=?,updated=? WHERE id=?",
+            'Explicit stop disposition during project inactivation',
+            this.now(),
+            item.recordId,
+          );
+        for (const item of inventory.controls.filter((item) => dispositions[item.id] === 'stop'))
+          this.store.run(
+            "UPDATE control_intents SET state='dismissed',updated=? WHERE id=?",
+            this.now(),
+            item.recordId,
+          );
+        for (const item of inventory.schedules.filter((item) => dispositions[item.id] === 'stop'))
+          this.store.run('UPDATE schedules SET enabled=0 WHERE id=?', item.recordId);
         this.store.run(
-          "UPDATE communication_intents SET status='dismissed',reason=?,updated=? WHERE id=?",
-          'Explicit user stop disposition before inactivation',
-          this.now(),
-          intent.id,
+          "UPDATE projects SET state='draining',revision=revision+1 WHERE id=? AND revision=?",
+          project.id,
+          input.revision,
         );
-      for (const s of inventory.schedules.filter((s) => choices[s.id] === 'stop'))
-        this.store.run('UPDATE schedules SET enabled=0 WHERE id=?', s.id);
-      const updated = this.store.run(
-        'UPDATE projects SET state=?,revision=revision+1 WHERE id=? AND revision=?',
-        drain ? 'draining' : 'inactive',
-        p.id,
-        input.revision,
-      );
-      assert.equal(updated.changes, 1, 'Project changed; show refreshed inventory');
-      this.store.run(
-        'INSERT OR REPLACE INTO receipts VALUES(?,?,?,?)',
-        `inactivate:${p.id}`,
-        hash(choices),
-        JSON.stringify(choices),
-        this.now(),
-      );
+      });
+      const safe = (await this.inactivationReady(this.store.project(project.id))) === true;
+      if (safe)
+        this.store.run(
+          "UPDATE projects SET state='inactive',revision=revision+1 WHERE id=?",
+          project.id,
+        );
       this.requestTick();
-      return { state: drain ? 'draining' : 'inactive', inventory };
+      return { state: safe ? 'inactive' : 'draining', inventory };
     }
     if (operation === 'reactivate') {
-      assert(
-        agentId === productAgentId && input.explicit === true,
-        'Explicit reactivation required',
-      );
-      const result = this.store.reactivate(p.id, this.now());
-      this.requestTick();
-      return result;
+      assert(agentId === productAgentId && input.explicit === true);
+      return this.store.reactivate(project.id, this.now());
     }
     if (operation === 'recover') {
-      assert(
-        agentId === productAgentId && p.state !== 'inactive',
-        'Recovery cannot reactivate an inactive project',
-      );
-      this.store.run('UPDATE exchanges SET attempts=0,lastDispatch=0 WHERE project=?', p.id);
+      assert(project.state !== 'inactive');
+      if (ctx.operator)
+        this.store.run(
+          'UPDATE exchanges SET attempts=0,lastDispatch=0 WHERE project=?',
+          project.id,
+        );
       this.requestTick();
-      return { reconciliationRequested: true, executionRestarted: false };
+      return {
+        reconciliationRequested: true,
+        executionRestarted: false,
+        retryBudgetReset: Boolean(ctx.operator),
+      };
     }
     if (operation === 'conclude') {
-      assert(internal);
-      const e = this.store.get('SELECT * FROM exchanges WHERE session=?', ctx.sessionKey);
-      assert(e && e.project === p.id);
+      assert(internal && exchange);
       text(input.conclusion, 2000);
-      this.store.once(
-        `conclusion:${e.id}:${hash(input.conclusion).slice(0, 24)}`,
-        { scope: e.scope, role: e.role, conclusion: input.conclusion },
-        () => ({ scope: e.scope, role: e.role, conclusion: input.conclusion }),
-      );
-      this.store.run('UPDATE exchanges SET conclusion=? WHERE id=?', input.conclusion, e.id);
+      this.store.run('UPDATE exchanges SET conclusion=? WHERE id=?', input.conclusion, exchange.id);
       return { durable: true, cleanup: 'after native obligations settle' };
     }
     throw new Error('Unknown project operation');
@@ -1025,99 +1037,166 @@ export class ProjectRuntime {
         100,
       ).unref();
   }
-  async deliver(d) {
-    const { productAgentId } = topology();
-    const p = this.store.project(d.project);
+  async deliver(delivery) {
+    const project = this.store.project(delivery.project);
     if (
-      p.state === 'inactive' ||
-      ['sent', 'cancelled', 'fallback-sent', 'batched'].includes(d.status) ||
-      d.due > this.now()
+      project.state === 'inactive' ||
+      ['sent', 'cancelled', 'fallback-sent', 'batched'].includes(delivery.status) ||
+      delivery.due > this.now()
     )
       return;
-    // Resolve at the first real send, never at Feature creation or event enqueue.
-    let route = d.route
-      ? JSON.parse(d.route)
-      : d.role === 'product'
-        ? p.productConversation
-        : p.engineeringConversation;
-    assert(route, 'Notification route missing');
-    if (!d.route) {
-      this.store.run(
-        'UPDATE deliveries SET route=?,status=? WHERE id=? AND route IS NULL',
-        JSON.stringify(route),
-        'sending',
-        d.id,
-      );
-      d = this.store.get('SELECT * FROM deliveries WHERE id=?', d.id);
-      route = JSON.parse(d.route);
-    }
-    let receipt;
+    let route;
     try {
-      receipt = await this.rpc('conversations.send', {
-        agentId: agentForRole(d.role),
-        operationId: `jarvis-gilfoyle-${d.id}`,
-        conversationRef: route.conversationRef,
-        message: d.text,
-      });
-      assert(
-        ['sent', 'queued', 'suppressed', 'unknown'].includes(receipt.status),
-        'Unrecognized native delivery state',
-      );
+      route =
+        delivery.kind === 'fallback'
+          ? await this.fallbackRoute(delivery.role)
+          : delivery.route
+            ? JSON.parse(delivery.route)
+            : delivery.role === 'product'
+              ? project.productConversation
+              : project.engineeringConversation;
     } catch {
-      await this.failure(d, 'Preferred conversation delivery failed or could not be reconciled');
+      await this.failure(delivery, 'Fallback destination unavailable');
       return;
     }
-    this.store.run(
-      'UPDATE deliveries SET status=?,receipt=?,attempts=attempts+1,error=NULL,due=? WHERE id=?',
-      receipt.status,
-      JSON.stringify(receipt),
-      this.now() + 60000,
-      d.id,
-    );
-    if (receipt.status === 'sent') {
-      const members = this.store.all(
-        "SELECT * FROM deliveries WHERE project=? AND status='batched' AND receipt=?",
-        p.id,
-        JSON.stringify({ batch: d.id }),
+    assert(route, 'Notification route missing');
+    if (!delivery.route || delivery.kind === 'fallback') {
+      this.store.run(
+        "UPDATE deliveries SET route=?,status='sending' WHERE id=?",
+        JSON.stringify(route),
+        delivery.id,
       );
-      for (const member of members)
-        this.store.run(
-          "UPDATE deliveries SET status='sent',receipt=?,route=? WHERE id=?",
-          JSON.stringify(receipt),
-          JSON.stringify(route),
-          member.id,
-        );
-      for (const member of [d, ...members])
-        await this.processCopies(member).catch(() =>
-          this.log('Additional notification enqueue pending; original delivery is already sent'),
-        );
-    } else if (receipt.status === 'suppressed')
-      await this.failure(d, 'Preferred conversation rejected delivery');
+      delivery = this.store.get('SELECT * FROM deliveries WHERE id=?', delivery.id);
+    }
+    try {
+      const receipt = await this.rpc('conversations.send', {
+        agentId: agentForRole(delivery.role),
+        operationId: `jarvis-gilfoyle-${delivery.id}`,
+        conversationRef: route.conversationRef,
+        message: delivery.text,
+      });
+      assert(['sent', 'queued', 'suppressed', 'unknown'].includes(receipt.status));
+      this.store.run(
+        'UPDATE deliveries SET status=?,receipt=?,attempts=attempts+1,error=NULL,due=? WHERE id=?',
+        receipt.status,
+        JSON.stringify(receipt),
+        this.now() + 60000,
+        delivery.id,
+      );
+      if (receipt.status === 'sent')
+        await this.settleBatch({
+          ...delivery,
+          status: 'sent',
+          receipt: JSON.stringify(receipt),
+          route: JSON.stringify(route),
+        });
+      else if (receipt.status === 'suppressed')
+        await this.failure(delivery, 'Preferred conversation rejected delivery');
+    } catch {
+      await this.failure(
+        delivery,
+        'Preferred conversation delivery failed or could not be reconciled',
+      );
+    }
   }
-  async processCopies(d) {
-    if (d.role !== 'product' || ['copy', 'fallback'].includes(d.kind)) return;
-    const events = [d.event];
-    if (d.event.startsWith('result:')) {
-      const cards = await this.cards(this.store.project(d.project)),
-        f = cards.find((c) => c.id === d.event.slice(7)),
-        source = f && field(f, 'Source message'),
-        match = /^([0-9a-f-]{36})-[0-9]+$/.exec(source ?? '');
+  async failure(delivery, error) {
+    const attempts = delivery.attempts + 1;
+    this.store.run(
+      "UPDATE deliveries SET status='retry',attempts=?,error=?,due=? WHERE id=?",
+      attempts,
+      error,
+      this.now() + 60000,
+      delivery.id,
+    );
+    if (attempts < 3 || delivery.kind === 'fallback') return;
+    let route;
+    try {
+      route = await this.fallbackRoute(delivery.role);
+    } catch {
+      this.log('Role fallback unavailable; delivery remains durable');
+      return;
+    }
+    const fallback = this.store.enqueue({
+      project: delivery.project,
+      event: `fallback:${delivery.id}`,
+      kind: 'fallback',
+      managerRole: delivery.role,
+      message: delivery.fallback_text ?? delivery.text,
+      route,
+    });
+    await this.deliver(fallback);
+    if (this.store.get('SELECT status FROM deliveries WHERE id=?', fallback.id).status === 'sent')
+      await this.settleBatch(
+        {
+          ...delivery,
+          status: 'fallback-sent',
+          receipt: this.store.get('SELECT receipt FROM deliveries WHERE id=?', fallback.id).receipt,
+          route: this.store.get('SELECT route FROM deliveries WHERE id=?', fallback.id).route,
+        },
+        true,
+      );
+  }
+  async settleBatch(delivery, fallback = false) {
+    this.store.run(
+      'UPDATE deliveries SET status=?,receipt=?,route=? WHERE id=?',
+      delivery.status,
+      delivery.receipt,
+      delivery.route,
+      delivery.id,
+    );
+    const members = this.store.all(
+      "SELECT * FROM deliveries WHERE project=? AND status='batched' AND json_extract(receipt,'$.batch')=?",
+      delivery.project,
+      delivery.id,
+    );
+    for (const member of members) {
+      this.store.run(
+        'UPDATE deliveries SET status=?,receipt=?,route=? WHERE id=?',
+        fallback ? 'fallback-sent' : 'sent',
+        delivery.receipt,
+        delivery.route,
+        member.id,
+      );
+      await this.processCopies({
+        ...member,
+        status: fallback ? 'fallback-sent' : 'sent',
+        receipt: delivery.receipt,
+        route: delivery.route,
+      });
+    }
+    await this.processCopies(delivery);
+  }
+  async processCopies(delivery) {
+    if (delivery.role !== 'product' || ['copy', 'fallback'].includes(delivery.kind)) return;
+    const events = [delivery.event];
+    if (delivery.event.startsWith('result:')) {
+      const feature = this.store.get('SELECT * FROM features WHERE id=?', delivery.event.slice(7));
+      const request =
+        feature && this.store.get('SELECT * FROM requests WHERE id=?', feature.request);
+      const source = request ? JSON.parse(request.source) : null;
+      const match = /^([0-9a-f-]{36})-[0-9]+$/.exec(String(source?.messageId ?? ''));
       if (
         match &&
-        this.store.get('SELECT id FROM schedules WHERE id=? AND project=?', match[1], d.project)
+        this.store.get(
+          'SELECT id FROM schedules WHERE id=? AND project=?',
+          match[1],
+          delivery.project,
+        )
       )
         events.push(`schedule:${match[1]}:result`);
     }
     for (const copy of this.store
-      .all('SELECT * FROM copies WHERE project=? AND (consumed IS NULL OR recurring=1)', d.project)
-      .filter((c) => events.includes(c.event))) {
-      const event = copy.recurring ? `copy:${copy.id}:${d.id}` : `copy:${copy.id}`;
+      .all(
+        'SELECT * FROM copies WHERE project=? AND (consumed IS NULL OR recurring=1)',
+        delivery.project,
+      )
+      .filter((copy) => events.includes(copy.event))) {
       const extra = this.store.enqueue({
-        project: d.project,
-        event,
+        project: delivery.project,
+        event: copy.recurring ? `copy:${copy.id}:${delivery.id}` : `copy:${copy.id}`,
         kind: 'copy',
         managerRole: copy.role,
-        message: d.text,
+        message: delivery.text,
         route: JSON.parse(copy.route),
       });
       if (!copy.recurring)
@@ -1125,709 +1204,520 @@ export class ProjectRuntime {
     }
     this.store.run(
       'INSERT OR REPLACE INTO receipts VALUES(?,?,?,?)',
-      `copies:${d.id}`,
-      hash(d.text),
+      `copies:${delivery.id}`,
+      hash(delivery.text),
       JSON.stringify({ complete: true }),
       this.now(),
     );
   }
-  async settleNotice(d) {
-    const { productAgentId } = topology();
-    if (
-      d.role !== 'product' ||
-      !d.event.startsWith('result:') ||
-      !['sent', 'fallback-sent'].includes(d.status)
-    )
-      return;
-    const p = this.store.project(d.project),
-      cards = await this.cards(p),
-      feature = cards.find((c) => c.id === d.event.slice(7));
-    assert(
-      feature?.status === 'done' &&
-        typeof feature.metadata?.automation?.summary === 'string' &&
-        feature.metadata.automation.summary.trim() &&
-        feature.metadata?.proof?.some((p) => p.status === 'passed'),
-      'Terminal Feature proof required',
-    );
-    const notices = cards.filter(
-      (c) => c.metadata?.automation?.idempotencyKey === `action:${feature.id}:owner-notification`,
-    );
-    assert.equal(notices.length, 1, 'Canonical notification required');
-    let notice = notices[0];
-    assert(
-      notice.agentId === productAgentId &&
-        notice.metadata.automation.tenant === feature.id &&
-        field(notice, 'Feature') === feature.id &&
-        type(notice) === 'action' &&
-        !notice.metadata?.archivedAt,
-      'Notification identity mismatch',
-    );
-    const actual =
-      d.status === 'fallback-sent'
-        ? this.store.get(
-            'SELECT * FROM deliveries WHERE project=? AND event=?',
-            p.id,
-            `fallback:${d.id}`,
-          )
-        : d;
-    const receipt = JSON.parse(actual.receipt),
-      route = JSON.parse(actual.route);
-    assert(
-      receipt.status === 'sent' &&
-        receipt.messageId &&
-        receipt.conversationRef === route.conversationRef,
-      'Actual sent native receipt required',
-    );
-    const summary = `Native delivery receipt recorded: ${receipt.messageId}.`;
-    const note = `Native ${receipt.channel ?? route.channel} receipt messageId: ${receipt.messageId}; conversation: ${route.conversationRef}; delivery: ${d.id}; event: ${d.event}.${d.status === 'fallback-sent' ? ' Preferred route failed; actual fallback receipt retained.' : ''}`;
-    const proof = { status: 'passed', label: 'Native project notification receipt', note };
-    const priorFailures = notice.metadata.failureCount;
-    if (notice.status !== 'done') {
-      assert((notice.metadata.proof ?? []).length < 40, 'Proof capacity exhausted');
-      assertCommentCapacity(notice, [summary, note]);
-      if (!notice.metadata.claim) {
-        await this.rpc('workboard.cards.claim', {
-          id: notice.id,
-          ownerId: productAgentId,
-          ttlSeconds: 60,
-        });
-        notice = (await this.cards(p)).find((c) => c.id === notice.id);
-      }
-      assert(
-        notice.metadata?.claim?.ownerId === productAgentId,
-        'Notification claim belongs to another owner',
-      );
-      await this.rpc('workboard.cards.complete', { id: notice.id, summary, proof });
-    } else if (!notice.metadata.proof?.some((p) => p.status === 'passed' && p.note === note)) {
-      assert((notice.metadata.proof ?? []).length < 40, 'Proof capacity exhausted');
-      assertCommentCapacity(notice, [note]);
-      await this.rpc('workboard.cards.proof', { id: notice.id, ...proof });
-    }
-    notice = (await this.cards(p)).find((c) => c.id === notice.id);
-    const metadata = {};
-    if (notice.metadata.automation.summary !== summary) metadata.automation = { summary };
-    if (priorFailures !== undefined && notice.metadata.failureCount !== priorFailures)
-      metadata.failureCount = priorFailures;
-    if (Object.keys(metadata).length)
-      await this.rpc('workboard.cards.update', {
-        id: notice.id,
-        expectedUpdatedAt: notice.updatedAt,
-        patch: { metadata },
-      });
-    const settled = (await this.cards(p)).find((c) => c.id === notice.id);
-    assert(
-      settled.status === 'done' &&
-        settled.metadata.automation.summary === summary &&
-        settled.metadata.proof.some((p) => p.note === note && p.status === 'passed'),
-      'Receipt-backed settlement readback failed',
-    );
-    this.store.run(
-      'INSERT OR REPLACE INTO receipts VALUES(?,?,?,?)',
-      `settled:${d.id}`,
-      hash([feature.id, notice.id, receipt.messageId]),
-      JSON.stringify({ noticeId: notice.id }),
-      this.now(),
-    );
-  }
-  batchMilestones(p) {
+  batchMilestones(project) {
     const pending = this.store.all(
-      "SELECT * FROM deliveries WHERE project=? AND role=? AND kind IN ('milestone','result') AND status='pending' AND route IS NULL ORDER BY created",
-      p.id,
-      'product',
+      "SELECT * FROM deliveries WHERE project=? AND role='product' AND kind IN ('milestone','result') AND status='pending' AND route IS NULL ORDER BY created",
+      project.id,
     );
-    if (
-      pending.length < 2 ||
-      !pending.some((d) => d.kind === 'milestone') ||
-      !pending.some((d) => d.due <= this.now())
-    )
-      return;
-    let length = 0;
-    const batch = pending.filter((d) => {
-      const size = Math.max(d.text.length, (d.fallback_text ?? d.text).length) + 2;
-      if (length + size > 5800) return false;
-      length += size;
-      return true;
+    if (pending.length < 2 || !pending.some((delivery) => delivery.due <= this.now())) return;
+    const leader = this.store.enqueue({
+      project: project.id,
+      event: `milestones:${hash(pending.map((delivery) => delivery.id)).slice(0, 32)}`,
+      kind: 'milestone-batch',
+      message: pending.map((delivery) => delivery.text).join('\n\n'),
     });
-    if (batch.length < 2) return;
-    this.store.tx(() => {
-      const leader = this.store.enqueue({
-        project: p.id,
-        event: `milestones:${hash(batch.map((d) => d.id)).slice(0, 32)}`,
-        kind: 'milestone-batch',
-        message: batch.map((d) => d.text).join('\n\n'),
-        fallbackMessage: batch.map((d) => d.fallback_text ?? d.text).join('\n\n'),
-      });
-      for (const d of batch)
-        this.store.run(
-          "UPDATE deliveries SET status='batched',receipt=? WHERE id=?",
-          JSON.stringify({ batch: leader.id }),
-          d.id,
-        );
-    });
-  }
-  async failure(d, error) {
-    const attempts = d.attempts + 1;
-    this.store.run(
-      "UPDATE deliveries SET status='retry',attempts=?,error=?,due=? WHERE id=?",
-      attempts,
-      error,
-      this.now() + 60000,
-      d.id,
-    );
-    if (attempts < 3) return;
-    const p = this.store.project(d.project);
-    if (d.kind === 'fallback') {
-      this.log('Owner fallback is unavailable; delivery remains durable');
-      return;
-    }
-    let route;
-    try {
-      route = await this.fallbackRoute(d.role);
-    } catch {
-      this.log('Role fallback is unavailable or ambiguous; delivery remains durable');
-      return;
-    }
-    const column = d.role === 'product' ? 'product_fallback' : 'engineering_fallback';
-    this.store.run(`UPDATE projects SET ${column}=? WHERE id=?`, JSON.stringify(route), p.id);
-    const fallback = this.store.enqueue({
-      project: p.id,
-      event: `fallback:${d.id}`,
-      kind: 'fallback',
-      managerRole: d.role,
-      message: d.fallback_text ?? d.text,
-      route,
-    });
-    await this.deliver(fallback);
-    const sent = this.store.get('SELECT status FROM deliveries WHERE id=?', fallback.id);
-    if (sent.status === 'sent') {
-      this.store.run("UPDATE deliveries SET status='fallback-sent' WHERE id=?", d.id);
-      await this.processCopies(d).catch(() =>
-        this.log('Additional notification remains pending after fallback'),
+    for (const delivery of pending)
+      this.store.run(
+        "UPDATE deliveries SET status='batched',receipt=? WHERE id=?",
+        JSON.stringify({ batch: leader.id }),
+        delivery.id,
       );
-    }
   }
-  async runSchedules(p) {
-    if (p.state !== 'active') return;
-    for (const s of this.store.all(
+  async runSchedules(project) {
+    if (project.state === 'inactive') return;
+    for (const schedule of this.store.all(
       'SELECT * FROM schedules WHERE project=? AND enabled=1 AND next<=? ORDER BY next LIMIT 8',
-      p.id,
+      project.id,
       this.now(),
     )) {
-      const spec = JSON.parse(s.spec),
-        occurrence = `${s.id}-${s.next}`;
-      await this.intake(p, spec, {
-        route: { channel: 'schedule', accountId: 'project', target: p.id },
-        messageId: occurrence,
-      });
-      this.store.run(
-        'UPDATE schedules SET next=?,enabled=? WHERE id=? AND next=?',
-        s.intervalMs
-          ? s.next + (Math.floor((this.now() - s.next) / s.intervalMs) + 1) * s.intervalMs
-          : s.next,
-        s.intervalMs ? 1 : 0,
-        s.id,
-        s.next,
-      );
+      if (
+        project.state === 'draining' &&
+        this.store.get(
+          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+          project.id,
+          'schedule',
+          schedule.id,
+        )?.disposition !== 'finish'
+      )
+        continue;
+      try {
+        const spec = JSON.parse(schedule.spec);
+        const result = await this.intake(project, spec, {
+          route: { channel: 'schedule', accountId: 'project', target: project.id },
+          messageId: `${schedule.id}-${schedule.next}`,
+        });
+        if (project.state === 'draining')
+          for (const feature of result.features)
+            this.store.run(
+              "INSERT OR REPLACE INTO inactivation_plans(project,item,kind,disposition,created) VALUES(?,?,'obligation','finish',?)",
+              project.id,
+              feature,
+              this.now(),
+            );
+        this.store.run(
+          'UPDATE schedules SET next=?,enabled=? WHERE id=?',
+          schedule.intervalMs
+            ? schedule.next +
+                (Math.floor((this.now() - schedule.next) / schedule.intervalMs) + 1) *
+                  schedule.intervalMs
+            : schedule.next,
+          project.state === 'draining' ? 0 : schedule.intervalMs ? 1 : 0,
+          schedule.id,
+        );
+      } catch {
+        this.store.requestCommunication({
+          project: project.id,
+          event: `schedule-failure:${schedule.id}:${schedule.next}`,
+          scope: `schedule:${schedule.id}`,
+          kind: 'blocker',
+          facts: {
+            condition: 'schedule-occurrence-failed',
+            scheduleId: schedule.id,
+            occurrence: schedule.next,
+            obligationRetained: true,
+          },
+        });
+      }
     }
   }
-  async dispatch(project, scope, managerRole, cardIds, attention = {}) {
+  async inactivationReady(project, cards = null) {
+    const plans = this.store.all('SELECT * FROM inactivation_plans WHERE project=?', project.id);
+    if (!plans.length) return false;
+    cards ??= await this.cards(project);
+    const byId = new Map(cards.map((card) => [card.id, card]));
+    for (const plan of plans.filter((row) => row.disposition !== 'pending')) {
+      if (plan.kind === 'obligation') {
+        const obligation = this.store.obligation(plan.item);
+        if (plan.disposition === 'finish') {
+          if (byId.get(obligation.card)?.status !== 'done') return false;
+        } else if (this.store.pendingStop(obligation.feature)) return false;
+      } else if (plan.kind === 'delivery') {
+        const status = this.store.get(
+          'SELECT status FROM deliveries WHERE id=?',
+          plan.item,
+        )?.status;
+        if (!['sent', 'cancelled', 'fallback-sent'].includes(status)) return false;
+      } else if (plan.kind === 'communication') {
+        if (
+          this.store.get('SELECT status FROM communication_intents WHERE id=?', plan.item)
+            ?.status === 'pending'
+        )
+          return false;
+      } else if (plan.kind === 'control') {
+        if (
+          this.store.get('SELECT state FROM control_intents WHERE id=?', plan.item)?.state ===
+          'pending'
+        )
+          return false;
+      } else if (plan.kind === 'schedule') {
+        if (this.store.get('SELECT enabled FROM schedules WHERE id=?', plan.item)?.enabled)
+          return false;
+      }
+    }
+    return !(await this.hasActiveExecution(project));
+  }
+  allowedDuringDrain(project, item, records) {
+    if (project.state !== 'draining') return true;
+    if (String(item.id).startsWith('communication:')) {
+      const id = String(item.id).slice('communication:'.length);
+      return (
+        this.store.get(
+          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+          project.id,
+          'communication',
+          id,
+        )?.disposition === 'finish'
+      );
+    }
+    if (String(item.id).startsWith('decision:')) {
+      const decision = records.decisions.find(
+        (row) => row.id === String(item.id).slice('decision:'.length),
+      );
+      if (!decision?.obligation) return false;
+      return (
+        this.store.get(
+          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+          project.id,
+          'obligation',
+          decision.obligation,
+        )?.disposition === 'finish'
+      );
+    }
+    const obligation = records.obligations.find((row) => row.id === item.id);
+    if (!obligation) return false;
+    const direct = this.store.get(
+      'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+      project.id,
+      'obligation',
+      obligation.id,
+    )?.disposition;
+    if (direct && direct !== 'pending') return true;
+    const featurePlan = this.store.get(
+      'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+      project.id,
+      'obligation',
+      obligation.feature,
+    )?.disposition;
+    if (featurePlan === 'finish') return true;
+    return records.controls
+      .filter((control) => control.feature === obligation.feature && control.state === 'pending')
+      .some(
+        (control) =>
+          this.store.get(
+            'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+            project.id,
+            'control',
+            control.id,
+          )?.disposition === 'finish',
+      );
+  }
+  async dispatch(project, scope, managerRole, recordIds, attention = {}) {
     if (this.roleAdmission.has(managerRole)) return;
     this.roleAdmission.add(managerRole);
-    const before = this.store.exchange(project.id, scope, managerRole),
-      agentId = agentForRole(managerRole);
-    this.running.add(before.session);
+    const exchange = this.store.exchange(project.id, scope, managerRole);
     try {
-      return await this.dispatchAttempt(project, scope, managerRole, cardIds, attention);
+      if (this.now() - exchange.lastDispatch < 120000) return;
+      if (exchange.attempts >= 3) {
+        if (managerRole === 'engineering')
+          this.store.requestCommunication({
+            project: project.id,
+            event: `coordination:${exchange.id}:${String(exchange.observed).slice(0, 24)}`,
+            scope,
+            kind: 'blocker',
+            facts: {
+              condition: 'unchanged-attention-exhausted',
+              attentionVersion: exchange.observed,
+              attempts: exchange.attempts,
+              obligationRetained: true,
+            },
+          });
+        return;
+      }
+      const agentId = agentForRole(managerRole);
+      const sessions = await this.rpc('sessions.list', { agentId, limit: 500 });
+      assert(!sessions.hasMore);
+      if (
+        sessions.sessions.some(
+          (session) =>
+            isProjectSession(session.key) && (session.status === 'queued' || session.hasActiveRun),
+        )
+      )
+        return;
+      await this.rpc('sessions.create', {
+        key: exchange.session,
+        agentId,
+        label: `Project ${scope}`,
+        category: 'project-internal',
+      });
+      const runId = randomUUID();
+      this.store.run(
+        'UPDATE exchanges SET runId=?,attempts=attempts+1,lastDispatch=? WHERE id=?',
+        runId,
+        this.now(),
+        exchange.id,
+      );
+      await this.rpc('agent', {
+        agentId,
+        sessionKey: exchange.session,
+        deliver: false,
+        idempotencyKey: runId,
+        timeout: 600,
+        message: `PROJECT CONTINUATION\nProject: ${project.id}\nScope: ${scope}\nRegistered obligations: ${recordIds.join(', ')}\nAttention: ${JSON.stringify(attention)}\nLoad jarvis-gilfoyle-protocol and use registry-backed project tools. Workboard notes are human context only. End with NO_REPLY.`,
+      });
     } catch (error) {
       this.health.lastDispatchFailure = {
         project: project.id,
         scope,
-        agentId,
-        at: this.now(),
         code: error.code ?? error.name,
+        at: this.now(),
       };
-      const current = this.store.get('SELECT * FROM exchanges WHERE id=?', before.id);
-      if (current.lastDispatch === before.lastDispatch)
-        this.store.run(
-          'UPDATE exchanges SET attempts=attempts+1,lastDispatch=? WHERE id=?',
-          this.now(),
-          before.id,
-        );
-      const failed = this.store.get('SELECT * FROM exchanges WHERE id=?', before.id);
-      if (failed.attempts >= 3 && managerRole === 'engineering') {
-        this.store.requestCommunication({
-          project: project.id,
-          event: `coordination:${failed.id}:${String(failed.observed ?? 'unknown').slice(0, 16)}`,
-          kind: 'blocker',
-          scope,
-          facts: {
-            condition: 'coordination-stalled',
-            managerRole,
-            attemptsAtLeast: 3,
-            obligationRetained: true,
-            replacementAuthorized: false,
-          },
-        });
-        this.requestTick();
-      }
       throw error;
     } finally {
-      this.running.delete(before.session);
       this.roleAdmission.delete(managerRole);
     }
   }
-  async dispatchAttempt(project, scope, managerRole, cardIds, attention = {}) {
-    const agentId = agentForRole(managerRole);
-    if (this.store.project(project.id).state === 'inactive') return;
-    let e = this.store.exchange(project.id, scope, managerRole);
-    const cards = await this.cards(project),
-      observed = hash([
-        ...cards
-          .filter((c) => c.id === scope || c.metadata?.automation?.tenant === scope)
-          .map((c) => [
-            c.id,
-            c.status,
-            c.agentId,
-            c.notes,
-            c.metadata?.automation?.summary,
-            c.metadata?.proof,
-          ]),
-        ...(managerRole === 'product'
-          ? this.store
-              .all(
-                "SELECT event,kind,facts,status FROM communication_intents WHERE project=? AND scope=? AND status='pending' ORDER BY created",
-                project.id,
-                scope,
-              )
-              .map((intent) => [intent.event, intent.kind, intent.facts, intent.status])
-          : []),
-      ]);
-    if (e.observed !== observed) {
-      this.store.run(
-        'UPDATE exchanges SET attempts=0,lastDispatch=0,observed=? WHERE id=?',
-        observed,
-        e.id,
-      );
-      e = this.store.get('SELECT * FROM exchanges WHERE id=?', e.id);
-    }
-    if (e.closed || this.now() - e.lastDispatch < 120000) return;
-    if (e.attempts >= 3) {
-      if (
-        managerRole === 'engineering' &&
-        !this.store.get(
-          "SELECT id FROM communication_intents WHERE project=? AND scope=? AND status='pending' LIMIT 1",
-          project.id,
-          scope,
-        )
-      )
-        this.store.requestCommunication({
-          project: project.id,
-          event: `coordination:${e.id}:${e.observed.slice(0, 16)}`,
-          kind: 'blocker',
-          scope,
-          facts: {
-            condition: 'coordination-stalled',
-            managerRole,
-            attemptsAtLeast: 3,
-            obligationRetained: true,
-            replacementAuthorized: false,
-          },
-        });
-      if (this.now() - e.lastDispatch < 1800000) return;
-      this.store.run('UPDATE exchanges SET attempts=0 WHERE id=?', e.id);
-    }
-    const sessions = await this.rpc('sessions.list', { agentId, limit: 500 });
-    assert(!sessions.hasMore, 'Manager activity enumeration incomplete');
-    if (
-      sessions.sessions.some(
-        (s) =>
-          isProjectSession(s.key) &&
-          (s.status === 'queued' || (s.status === 'running' && s.hasActiveRun)),
-      )
-    )
-      return;
-    const native = await this.rpc('workboard.cards.list', {});
-    pageCards(native, { agentId, includeArchived: true });
-    if (
-      native.cards.some(
-        (c) =>
-          c.agentId === agentId &&
-          c.metadata?.claim &&
-          c.metadata.claim.expiresAt > this.now() &&
-          controllerKey(native.cards, c, agentId) !== e.session,
-      )
-    )
-      return;
-    await this.rpc('sessions.create', {
-      key: e.session,
-      agentId,
-      label: `Jarvis-Gilfoyle ${agentId} ${scope}`,
-      category: 'project-internal',
+  attentionVersion(records, cards, feature, managerRole, attention) {
+    const obligations = records.obligations.filter((row) => row.feature === feature);
+    const cardState = obligations.map((obligation) => {
+      const card = cards.find((candidate) => candidate.id === obligation.card);
+      return [
+        obligation.id,
+        card?.status ?? 'missing',
+        card?.agentId ?? null,
+        card?.metadata?.automation?.summary ?? null,
+        card?.metadata?.proof ?? null,
+      ];
     });
-    if (this.store.project(project.id).state === 'inactive') return;
-    const runId = randomUUID();
-    this.store.run(
-      'UPDATE exchanges SET runId=?,attempts=attempts+1,lastDispatch=? WHERE id=?',
-      runId,
-      this.now(),
-      e.id,
-    );
-    let nativeReferences = [];
-    if (
-      cards.some(
-        (c) =>
-          c.metadata?.automation?.tenant === scope &&
-          type(c) === 'work-item' &&
-          c.notes?.includes('<!-- current-attempt -->') &&
-          !currentAttempt(c)?.taskId,
-      )
-    ) {
-      const candidates = await this.rpc('tasks.list', {
-        sessionKey: e.session,
-        sortBy: 'updatedAt',
-        limit: 100,
-      });
-      nativeReferences = candidates.tasks
-        .filter((t) => ['acp', 'subagent'].includes(t.runtime))
-        .slice(0, 40)
-        .map((t) => ({
-          taskId: t.taskId,
-          runtime: t.runtime,
-          runId: t.runId,
-          childSessionKey: t.childSessionKey,
-          status: t.status,
-        }));
-    }
-    this.running.add(e.session);
-    try {
-      await this.rpc('agent', {
-        agentId,
-        sessionKey: e.session,
-        deliver: false,
-        idempotencyKey: runId,
-        timeout: 600,
-        message: `PROJECT CONTINUATION\nProject: ${project.id}\nScope: ${scope}\nRelevant records: ${cardIds.join(', ')}\nAttention classifications: ${JSON.stringify(attention)}\nFeature scope: ${field(cards.find((c) => c.id === scope) ?? {}, 'Scope') ?? 'Read the scoped durable records.'}\nBounded native execution references: ${JSON.stringify(nativeReferences)}\nLoad jarvis-gilfoyle-protocol, read jarvis_project summary and the scoped native records, then perform the next safe action. Attention classifications are diagnostics, not authorization. This is an internal context, not a user chat. Preserve accepted evidence, use the product agent for user communication, record a durable conclusion, and end with NO_REPLY.`,
-      });
-      if (this.health.lastDispatchFailure?.scope === scope) this.health.lastDispatchFailure = null;
-    } finally {
-      this.running.delete(e.session);
-    }
+    return hash([
+      managerRole,
+      Object.entries(attention).sort(),
+      records.features.find((row) => row.id === feature),
+      cardState,
+      records.attempts.filter((row) => obligations.some((item) => item.id === row.obligation)),
+      records.decisions.filter((row) => row.feature === feature),
+      records.publications.filter((row) => row.feature === feature),
+      records.controls.filter((row) => row.feature === feature),
+      records.terminalCheckpoints.filter((row) => row.feature === feature),
+    ]);
   }
-  async cleanup(p, cards) {
-    for (const e of this.store.all(
-      'SELECT * FROM exchanges WHERE project=? AND closed IS NULL',
-      p.id,
-    )) {
-      const scoped = cards.filter(
-        (c) => c.id === e.scope || c.metadata?.automation?.tenant === e.scope,
+  syncAttention(project, feature, managerRole, version) {
+    const exchange = this.store.exchange(project, feature, managerRole);
+    if (exchange.observed !== version) {
+      this.store.run(
+        'UPDATE exchanges SET observed=?,attempts=0,lastDispatch=0 WHERE id=?',
+        version,
+        exchange.id,
       );
-      const concludedCheckpoint =
-        Boolean(e.conclusion) &&
-        !scoped.some((c) => c.metadata?.claim) &&
-        !(await this.hasActiveExecution(p, scoped));
+      return this.store.get('SELECT * FROM exchanges WHERE id=?', exchange.id);
+    }
+    return exchange;
+  }
+  async cleanup(project, cards) {
+    for (const exchange of this.store.all(
+      'SELECT * FROM exchanges WHERE project=? AND closed IS NULL',
+      project.id,
+    )) {
+      const feature = this.store
+        .records(project.id)
+        .features.find((row) => row.id === exchange.scope);
       if (
-        !scoped.length ||
-        (!concludedCheckpoint && scoped.some((c) => c.status !== 'done')) ||
-        this.running.has(e.session)
+        !exchange.conclusion ||
+        !feature ||
+        cards.find((card) => card.id === feature.card)?.status !== 'done'
       )
         continue;
       const sessions = await this.rpc('sessions.list', {
-        agentId: agentForRole(e.role),
-        search: e.session,
+        agentId: agentForRole(exchange.role),
+        search: exchange.session,
         archived: 'all',
         limit: 10,
       });
-      assert(!sessions.hasMore);
-      const s = sessions.sessions.find((s) => s.key === e.session);
-      if (s?.hasActiveRun || s?.hasActiveSubagentRun) continue;
-      if (e.runId) {
-        const tasks = await this.rpc('tasks.list', { sessionKey: e.session, limit: 100 });
-        if (
-          !Array.isArray(tasks.tasks) ||
-          tasks.nextCursor ||
-          tasks.tasks.some(
-            (task) => task.runId === e.runId && ['queued', 'running'].includes(task.status),
-          )
-        )
-          continue;
-      }
-      const conclusion =
-        e.conclusion ??
-        scoped
-          .filter((c) => type(c) === 'feature')
-          .map((c) => c.metadata.automation.summary)
-          .join('\n');
-      if (!conclusion) continue;
-      this.store.run('UPDATE exchanges SET conclusion=? WHERE id=?', conclusion, e.id);
-      const cleanupKey = `cleanup:${e.id}`;
-      if (s) {
-        const result = await this.rpc('jarvis-gilfoyle.session.cleanup', {
-          agentId: agentForRole(e.role),
-          sessionNamespace: topology().sessionNamespace,
-          sessionKey: e.session,
-          projectId: p.id,
-          expectedSessionId: s.sessionId,
+      const session = sessions.sessions.find((candidate) => candidate.key === exchange.session);
+      if (session?.hasActiveRun || session?.hasActiveSubagentRun) continue;
+      const result = await this.rpc('jarvis-gilfoyle.session.cleanup', {
+        agentId: agentForRole(exchange.role),
+        sessionNamespace: topology().sessionNamespace,
+        sessionKey: exchange.session,
+        projectId: project.id,
+        expectedSessionId: session?.sessionId,
+      });
+      assert(
+        result && result.archivedTranscriptArtifacts === 0,
+        'Temporary context cleanup not confirmed',
+      );
+      for (const path of result.exportedPaths ?? [])
+        await unlink(path).catch((error) => {
+          if (error.code !== 'ENOENT') throw error;
         });
-        assert.equal(
-          result.archivedTranscriptArtifacts,
-          0,
-          'Temporary context cleanup must not archive transcripts',
-        );
-      }
-      const exported = this.store.get('SELECT * FROM receipts WHERE key=?', cleanupKey);
-      if (exported) {
-        // Native deletion exports a recovery transcript. This purpose context has
-        // durable conclusions, so remove only the exact returned manager exports.
-        // Worker/reviewer sessions and their evidence are never targeted.
-        for (const path of JSON.parse(exported.result)) {
-          assert(
-            new RegExp(
-              `/agents/${agentForRole(e.role)}/sessions/[0-9a-f-]{36}\\.jsonl\\.deleted\\.[A-Za-z0-9.:_-]+$`,
-            ).test(path),
-            'Unexpected native transcript export path',
-          );
-          await unlink(path).catch((error) => {
-            if (error.code !== 'ENOENT') throw error;
-          });
-        }
-        this.store.run('DELETE FROM receipts WHERE key=?', cleanupKey);
-      }
-      this.store.run('UPDATE exchanges SET closed=? WHERE id=?', this.now(), e.id);
+      this.store.run('UPDATE exchanges SET closed=? WHERE id=?', this.now(), exchange.id);
     }
   }
   async tick() {
-    const { productAgentId, engineeringAgentId } = topology();
     if (this.busy || this.stopped) return { skipped: true, stopped: this.stopped };
     this.busy = true;
-    const scan = { at: this.now(), complete: true, checked: [], errors: [] },
-      dispatches = [];
+    const scan = { at: this.now(), complete: true, checked: [], errors: [] };
+    const dispatches = [];
     try {
       this.store.run('DELETE FROM sources WHERE updated<?', this.now() - 30 * 24 * 60 * 60 * 1000);
-      for (const p of this.store.list()) {
-        if (p.state === 'inactive') continue;
-        scan.checked.push(p.id);
+      for (const project of this.store.list()) {
+        if (project.state === 'inactive') continue;
+        scan.checked.push(project.id);
         try {
-          await this.runSchedules(p);
-          this.batchMilestones(p);
-          for (const d of this.store.all(
+          await this.runSchedules(project);
+          await this.reconcileRegistryProjections(project);
+          this.batchMilestones(project);
+          for (const delivery of this.store.all(
             "SELECT * FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent','batched') AND due<=? ORDER BY created LIMIT 20",
-            p.id,
+            project.id,
             this.now(),
-          ))
-            await this.deliver(d);
-          for (const d of this.store.all(
-            "SELECT d.* FROM deliveries d WHERE project=? AND role=? AND status IN ('sent','fallback-sent') AND kind NOT IN ('copy','fallback') AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.key='copies:'||d.id) ORDER BY created LIMIT 20",
-            p.id,
-            'product',
-          ))
-            await this.processCopies(d);
-          for (const d of this.store.all(
-            "SELECT d.* FROM deliveries d WHERE project=? AND role=? AND event LIKE 'result:%' AND status IN ('sent','fallback-sent') AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.key='settled:'||d.id) ORDER BY created LIMIT 20",
-            p.id,
-            'product',
-          ))
-            await this.settleNotice(d);
-          const cards = await this.cards(p),
-            ready = [];
+          )) {
+            if (
+              project.state === 'draining' &&
+              (delivery.kind === 'milestone-batch'
+                ? !this.store.get(
+                    "SELECT 1 AS allowed FROM deliveries d JOIN inactivation_plans p ON p.project=d.project AND p.kind='delivery' AND p.item=d.id WHERE d.project=? AND d.status='batched' AND json_extract(d.receipt,'$.batch')=? AND p.disposition='finish' LIMIT 1",
+                    project.id,
+                    delivery.id,
+                  )
+                : this.store.get(
+                    'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
+                    project.id,
+                    'delivery',
+                    delivery.id,
+                  )?.disposition !== 'finish')
+            )
+              continue;
+            await this.deliver(delivery);
+          }
+          let cards = await this.cards(project);
+          let records = this.store.records(project.id);
+          for (const checkpoint of records.terminalCheckpoints.filter(
+            (row) => row.state === 'staged',
+          )) {
+            const feature = records.features.find((row) => row.id === checkpoint.feature);
+            const card = feature && cards.find((candidate) => candidate.id === feature.card);
+            const evidence = JSON.parse(checkpoint.evidence);
+            if (
+              card?.status === 'done' &&
+              card.metadata?.automation?.summary === checkpoint.summary &&
+              card.metadata?.proof?.some(
+                (proof) =>
+                  proof.status === evidence.status &&
+                  proof.label === evidence.label &&
+                  proof.note === evidence.note,
+              )
+            )
+              this.store.completeTerminal(feature.id);
+          }
+          records = this.store.records(project.id);
+          const binding = await reconcileExecutionBindings(records, cards, this.store, this.rpc);
+          if (binding.bound.length) records = this.store.records(project.id);
+          this.health.bindingDiagnostics = [
+            ...this.health.bindingDiagnostics.filter(
+              (diagnostic) => diagnostic.project !== project.id,
+            ),
+            ...binding.pending.map((diagnostic) => ({ project: project.id, ...diagnostic })),
+          ];
+          const ready = [];
+          for (const decision of records.decisions.filter((row) => row.phase === 'answered')) {
+            try {
+              await projectAnsweredDecision(this.store, project.id, decision.id, this.rpc);
+            } catch (error) {
+              this.health.projectionDiagnostics = [
+                ...(this.health.projectionDiagnostics ?? []).filter(
+                  (diagnostic) =>
+                    !(
+                      diagnostic.project === project.id &&
+                      diagnostic.type === 'decision-answer' &&
+                      diagnostic.id === decision.id
+                    ),
+                ),
+                {
+                  project: project.id,
+                  type: 'decision-answer',
+                  id: decision.id,
+                  error: String(error.message),
+                },
+              ];
+            }
+            ready.push({
+              feature: decision.feature,
+              managerRole: 'engineering',
+              agentId: topology().engineeringAgentId,
+              id: `decision:${decision.id}`,
+              created: decision.updated,
+              priority: 1000,
+              ownsClaim: false,
+              stage: 'decision-answered',
+              project,
+            });
+          }
+          for (const board of project.boards) {
+            for (const [managerRole, agentId] of [
+              ['product', topology().productAgentId],
+              ['engineering', topology().engineeringAgentId],
+            ]) {
+              const page = await readView(
+                { agentId, boardId: board.id, includeArchived: false, view: 'attention' },
+                this.rpc,
+                records,
+              );
+              for (const row of page.cards) {
+                const item = Object.fromEntries(
+                  page.fields.map((field, index) => [field, row[index]]),
+                );
+                if (quiet.has(item.stage)) continue;
+                const obligation = records.obligations.find(
+                  (candidate) => candidate.id === item.obligation,
+                );
+                if (!obligation) continue;
+                if (
+                  managerRole === 'product' &&
+                  records.decisions.some(
+                    (decision) =>
+                      decision.obligation === obligation.id && decision.phase === 'answered',
+                  )
+                )
+                  continue;
+                ready.push({
+                  feature: obligation.feature,
+                  managerRole,
+                  agentId,
+                  id: obligation.id,
+                  created: records.features.find((feature) => feature.id === obligation.feature)
+                    .created,
+                  priority: item.priority === 'urgent' ? 1000 : 0,
+                  ownsClaim: Boolean(cards.find((card) => card.id === item.id)?.metadata?.claim),
+                  stage: item.stage,
+                  project,
+                });
+              }
+            }
+          }
           for (const intent of this.store.all(
-            "SELECT * FROM communication_intents WHERE project=? AND status='pending' ORDER BY created",
-            p.id,
+            "SELECT * FROM communication_intents WHERE project=? AND status='pending' AND eligible=1",
+            project.id,
           ))
             ready.push({
               feature: intent.scope,
               managerRole: 'product',
-              agentId: productAgentId,
               id: `communication:${intent.id}`,
               created: intent.created,
               priority: 1000,
               ownsClaim: false,
               stage: 'communication-intent',
+              project,
             });
-          for (const milestone of this.milestoneCandidates(p, cards))
-            ready.push({
-              feature: milestone.featureId,
-              managerRole: 'product',
-              agentId: productAgentId,
-              id: milestone.featureId,
-              created: milestone.created,
-              priority: 0,
-              ownsClaim: false,
-              stage: 'milestone-decision',
-            });
-          for (const board of p.boards) {
-            for (const [managerRole, agentId] of [
-              ['product', productAgentId],
-              ['engineering', engineeringAgentId],
-            ]) {
-              let q = { agentId, boardId: board.id, includeArchived: false, view: 'attention' },
-                pages = 0;
-              do {
-                const r = await readView(q, this.rpc);
-                for (const row of r.cards) {
-                  const item = Object.fromEntries(r.fields.map((k, i) => [k, row[i]]));
-                  const c = cards.find((c) => c.id === item.id);
-                  if (!c || type(c) === 'project-info' || quiet.has(item.stage)) continue;
-                  if (
-                    managerRole === 'engineering' &&
-                    item.stage === 'notification-repair' &&
-                    type(c) === 'feature' &&
-                    c.status === 'done' &&
-                    typeof c.metadata?.automation?.summary === 'string' &&
-                    c.metadata.proof?.some((proof) => proof.status === 'passed')
-                  ) {
-                    await finalizeFeature(
-                      {
-                        boardId: board.id,
-                        id: c.id,
-                        summary: c.metadata.automation.summary,
-                        evidence:
-                          'Retained terminal outcome and passed Feature proof verified for notification repair.',
-                      },
-                      this.rpc,
-                    );
-                    continue;
-                  }
-                  const feature = type(c) === 'feature' ? c.id : c.metadata.automation.tenant;
-                  const parent = cards.find((c) => c.id === feature);
-                  if (!parent) continue;
-                  ready.push({
-                    feature,
-                    managerRole,
-                    agentId,
-                    id: c.id,
-                    created: c.createdAt,
-                    priority: c.priority === 'urgent' ? 1000 : 0,
-                    ownsClaim: Boolean(c.metadata?.claim),
-                    stage: item.stage,
-                  });
-                }
-                q = r.hasMore ? { ...q, after: r.nextAfter, membership: r.membership } : null;
-                if (++pages > 64) throw Error('Bounded board scan incomplete');
-              } while (q);
-            }
-          }
-          if (p.state === 'draining') {
-            const choices = JSON.parse(
-              this.store.get('SELECT result FROM receipts WHERE key=?', `inactivate:${p.id}`)
-                ?.result ?? '{}',
-            );
-            const unfinished = cards.filter(
-              (c) => choices[c.id] && choices[c.id] !== 'pending' && c.status !== 'done',
-            );
-            const finishIntentEvents = new Set(
-              this.store
-                .all('SELECT id,event FROM communication_intents WHERE project=?', p.id)
-                .filter((intent) => choices[intent.id] === 'finish')
-                .map((intent) => intent.event),
-            );
-            const notices = this.store
-              .all(
-                "SELECT * FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent')",
-                p.id,
-              )
-              .filter((d) => choices[d.id] === 'finish' || finishIntentEvents.has(d.event));
-            const intents = this.store
-              .all("SELECT * FROM communication_intents WHERE project=? AND status='pending'", p.id)
-              .filter((intent) => choices[intent.id] === 'finish');
-            if (
-              !unfinished.length &&
-              !notices.length &&
-              !intents.length &&
-              !(await this.hasActiveExecution(p, cards))
-            ) {
-              this.store.run(
-                "UPDATE projects SET state='inactive',revision=revision+1 WHERE id=?",
-                p.id,
-              );
-              continue;
-            }
-            for (let i = ready.length - 1; i >= 0; i--)
-              if (choices[ready[i].id] === 'pending' && choices[ready[i].feature] === 'pending')
-                ready.splice(i, 1);
-          }
-          ready.sort((a, b) => b.priority - a.priority || a.created - b.created);
           const groups = new Map();
-          for (const r of ready) {
-            const k = `${r.managerRole}:${r.feature}`;
-            if (!groups.has(k)) groups.set(k, { ...r, ids: [], attention: {} });
-            if (!groups.get(k).ids.includes(r.id)) groups.get(k).ids.push(r.id);
-            groups.get(k).attention[r.id] = r.stage;
-            groups.get(k).ownsClaim ||= r.ownsClaim;
+          for (const item of ready) {
+            if (!this.allowedDuringDrain(project, item, records)) continue;
+            const key = `${item.managerRole}:${item.feature}`;
+            if (!groups.has(key)) groups.set(key, { ...item, ids: [], attention: {} });
+            groups.get(key).ids.push(item.id);
+            groups.get(key).attention[item.id] = item.stage;
           }
-          // Native one-owner claim and two-child capacity still govern engineering.
-          // Collect across projects before admission: project age must not outrank
-          // the age of a ready obligation in another project.
-          for (const g of groups.values()) {
-            const e = this.store.get(
-                'SELECT * FROM exchanges WHERE project=? AND scope=? AND role=?',
-                p.id,
-                g.feature,
-                g.managerRole,
-              ),
-              observed = hash([
-                ...cards
-                  .filter((c) => c.id === g.feature || c.metadata?.automation?.tenant === g.feature)
-                  .map((c) => [
-                    c.id,
-                    c.status,
-                    c.agentId,
-                    c.notes,
-                    c.metadata?.automation?.summary,
-                    c.metadata?.proof,
-                  ]),
-                ...(g.managerRole === 'product'
-                  ? this.store
-                      .all(
-                        "SELECT event,kind,facts,status FROM communication_intents WHERE project=? AND scope=? AND status='pending' ORDER BY created",
-                        p.id,
-                        g.feature,
-                      )
-                      .map((intent) => [intent.event, intent.kind, intent.facts, intent.status])
-                  : []),
-              ]);
-            if (e?.observed === observed) {
-              if (this.now() - e.lastDispatch < 120000) continue;
-              if (e.attempts >= 3 && this.now() - e.lastDispatch < 1800000) {
-                if (
-                  g.managerRole === 'engineering' &&
-                  !this.store.get(
-                    "SELECT id FROM communication_intents WHERE project=? AND scope=? AND status='pending' LIMIT 1",
-                    p.id,
-                    g.feature,
-                  )
-                )
-                  this.store.requestCommunication({
-                    project: p.id,
-                    event: `coordination:${e.id}:${e.observed.slice(0, 16)}`,
-                    kind: 'blocker',
-                    scope: g.feature,
-                    facts: {
-                      condition: 'coordination-stalled',
-                      managerRole: g.managerRole,
-                      attemptsAtLeast: 3,
-                      obligationRetained: true,
-                      replacementAuthorized: false,
-                    },
-                  });
-                continue;
-              }
-            }
-            dispatches.push({ ...g, project: p });
+          for (const group of groups.values()) {
+            const version = this.attentionVersion(
+              records,
+              cards,
+              group.feature,
+              group.managerRole,
+              group.attention,
+            );
+            this.syncAttention(project.id, group.feature, group.managerRole, version);
+            dispatches.push(group);
           }
-          await this.cleanup(p, cards);
+          if (project.state === 'draining' && (await this.inactivationReady(project, cards))) {
+            this.store.run(
+              "UPDATE projects SET state='inactive',revision=revision+1 WHERE id=?",
+              project.id,
+            );
+            continue;
+          }
+          await this.cleanup(project, cards);
         } catch (error) {
           scan.complete = false;
-          scan.errors.push({ project: p.id, code: error.code ?? error.name });
-          this.log(`Project ${p.id} reconciliation incomplete; retained for next scan`);
+          scan.errors.push({ project: project.id, code: error.code ?? error.name });
+          this.log(`Project ${project.id} reconciliation incomplete; retained for next scan`);
         }
       }
       const used = new Set();
-      for (const g of orderReady(dispatches)) {
-        if (used.has(g.managerRole)) continue;
-        used.add(g.managerRole);
-        this.dispatch(g.project, g.feature, g.managerRole, g.ids, g.attention).catch(() =>
-          this.log('Internal continuation failed; retry remains durable'),
-        );
+      for (const group of orderReady(dispatches)) {
+        if (used.has(group.managerRole)) continue;
+        used.add(group.managerRole);
+        this.dispatch(
+          group.project,
+          group.feature,
+          group.managerRole,
+          group.ids,
+          group.attention,
+        ).catch(() => this.log('Internal continuation failed; retry remains durable'));
       }
       return scan;
     } finally {

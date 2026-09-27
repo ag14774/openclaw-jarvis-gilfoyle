@@ -346,3 +346,145 @@ export async function githubEvidence(
     );
   }
 }
+
+// Fixed read used only to settle a stop after a hosted publication began.
+export async function githubStopEvidence(
+  spec,
+  candidate,
+  request = (args) =>
+    JSON.parse(
+      execFileSync('gh', args, {
+        encoding: 'utf8',
+        timeout: 5000,
+        maxBuffer: 2 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    ),
+) {
+  assert(integer(spec?.prNumber) && sha(candidate), 'Hosted stop identity required');
+  const normalized = hostedSpec(
+    `https://github.com/${spec.repo}.git`,
+    spec.branch,
+    spec.workflows,
+    { headRef: spec.headRef, baseSha: spec.baseSha, prNumber: spec.prNumber },
+    'gate',
+  );
+  const pr = await request([
+    'api',
+    '--hostname',
+    'github.com',
+    '--method',
+    'GET',
+    `repos/${normalized.repo}/pulls/${normalized.prNumber}`,
+  ]);
+  assert(
+    pr.number === normalized.prNumber &&
+      pr.state === 'closed' &&
+      pr.head?.repo?.full_name === normalized.repo &&
+      pr.base?.repo?.full_name === normalized.repo &&
+      pr.head.ref === normalized.headRef &&
+      pr.head.sha === candidate &&
+      pr.base.ref === normalized.branch,
+    'Hosted stop effect is not reconciled',
+  );
+  if (pr.merged === true) {
+    const merged = await githubEvidence(normalized, candidate, 'finish', request);
+    return { state: 'closed', merged: true, mergeSha: merged.mergeSha };
+  }
+  assert(pr.merged === false, 'Hosted stop merge state is uncertain');
+  return { state: 'closed', merged: false, mergeSha: null };
+}
+
+export async function githubPassedGateEvidence(
+  spec,
+  candidate,
+  expectedRuns,
+  request = (args) =>
+    JSON.parse(
+      execFileSync('gh', args, {
+        encoding: 'utf8',
+        timeout: 5000,
+        maxBuffer: 2 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    ),
+) {
+  try {
+    const normalized = hostedSpec(
+      `https://github.com/${spec.repo}.git`,
+      spec.branch,
+      spec.workflows,
+      { headRef: spec.headRef, baseSha: spec.baseSha, prNumber: spec.prNumber },
+      'finish',
+    );
+    assert(
+      Array.isArray(expectedRuns) &&
+        expectedRuns.length === normalized.workflows.length &&
+        new Set(expectedRuns.map((run) => run.id)).size === expectedRuns.length,
+    );
+    const get = (path) =>
+      request([
+        'api',
+        '--hostname',
+        'github.com',
+        '--method',
+        'GET',
+        `repos/${normalized.repo}/${path}`,
+      ]);
+    for (const workflow of normalized.workflows) {
+      const expected = expectedRuns.find((run) => run.workflow === workflow.path);
+      assert(
+        expected &&
+          integer(expected.id) &&
+          integer(expected.attempt) &&
+          JSON.stringify(expected.jobs) === JSON.stringify(workflow.jobs),
+      );
+      const workflowName = encodeURIComponent(workflow.path.slice('.github/workflows/'.length));
+      const listing = await get(
+        `actions/workflows/${workflowName}/runs?head_sha=${candidate}&branch=${encodeURIComponent(normalized.headRef)}&event=push&per_page=100`,
+      );
+      assert(
+        Array.isArray(listing.workflow_runs) &&
+          listing.total_count === listing.workflow_runs.length &&
+          listing.total_count > 0 &&
+          listing.total_count < 100,
+      );
+      const latest = [...listing.workflow_runs].sort((a, b) => b.run_number - a.run_number)[0];
+      assert(latest.id === expected.id && latest.run_attempt === expected.attempt);
+      const run = await get(`actions/runs/${expected.id}`);
+      assert(
+        run.id === expected.id &&
+          run.run_attempt === expected.attempt &&
+          run.status === 'completed' &&
+          run.conclusion === 'success' &&
+          String(run.path).split('@')[0] === workflow.path &&
+          run.event === 'push' &&
+          run.head_branch === normalized.headRef &&
+          run.head_sha === candidate &&
+          run.repository?.full_name === normalized.repo &&
+          run.head_repository?.full_name === normalized.repo,
+      );
+      const jobs = await get(
+        `actions/runs/${expected.id}/attempts/${expected.attempt}/jobs?per_page=100`,
+      );
+      assert(
+        Array.isArray(jobs.jobs) &&
+          jobs.total_count === jobs.jobs.length &&
+          jobs.total_count < 100 &&
+          workflow.jobs.every((name) => {
+            const matches = jobs.jobs.filter((job) => job.name === name);
+            return (
+              matches.length === 1 &&
+              matches[0].run_id === expected.id &&
+              matches[0].head_sha === candidate &&
+              matches[0].status === 'completed' &&
+              matches[0].conclusion === 'success'
+            );
+          }),
+      );
+    }
+    return { status: 'passed', runs: expectedRuns };
+  } catch {
+    throw new Error('Passed GitHub gate could not be revalidated');
+  }
+}

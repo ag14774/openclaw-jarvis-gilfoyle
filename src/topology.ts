@@ -34,7 +34,7 @@ export function configureTopology(input = {}) {
     'Topology agent IDs must be distinct',
   );
   assert(NAMESPACE.test(next.sessionNamespace), 'Invalid sessionNamespace');
-  assert(['acp', 'subagent'].includes(next.workerRuntime), 'Invalid workerRuntime');
+  assert.equal(next.workerRuntime, 'acp', 'workerRuntime must be acp');
   assert(
     Number.isSafeInteger(next.workerLimit) && next.workerLimit >= 1 && next.workerLimit <= 20,
     'Worker limit must be 1 to 20',

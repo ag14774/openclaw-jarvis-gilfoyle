@@ -11,7 +11,7 @@ The names are thematic. Runtime authority and persisted state use generic `produ
 ## Tools
 
 - `jarvis_project`: durable project identity, conversation routing, intake, lifecycle, schedules, answers, and receipt-backed notifications.
-- `gilfoyle_engineering`: validated Workboard records, ordered worker profiles, worker binding, handoffs, publication gates, and reports.
+- `gilfoyle_engineering`: registered Workboard obligations, ordered worker profiles, worker binding, decisions, publication gates, and reports.
 
 ## Installation
 
@@ -40,7 +40,7 @@ Use this to validate the same package boundary used by a registry release:
 ```bash
 npm ci
 npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-2.2.4.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-4.0.0.tgz --force --accept-capabilities
 ```
 
 The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.
@@ -118,11 +118,19 @@ Every implementation or review worktree must be created before `prepare`. The pl
 
 Fallback destinations use OpenClaw's native `channel`/`accountId`/`to` address format, with optional `threadId`. The plugin requires direct destinations, rediscovers one exact current conversation reference before every fallback send, and fails closed when the address is unavailable or ambiguous. Opaque `conversationRef` values do not belong in static configuration.
 
-Agents decide intent, scope, decomposition and conclusions. The plugin validates identity, authority, settled execution and delivery. `finalize` accepts any settled work, including failed/cancelled execution and findings. Publication adapters verify claimed external effects and call the same terminal handoff. Outcome text is not a protocol enum. Recovery records facts for the product manager to explain. Optional `fallbackMessage` preserves a manager-authored explanation when the preferred route fails.
+Agents decide intent, scope, decomposition and conclusions. The plugin validates identity, authority, settled execution and delivery. `finalize` accepts settled work without imposing an outcome taxonomy. Publication adapters verify claimed external effects and call the same terminal completion. Recovery records facts for the product manager to explain. Optional `fallbackMessage` preserves a manager-authored explanation when the preferred route fails.
+
+Accepted execution binding is bookkeeping, not a new permission grant. `prepare` and `record` retain attempt, worktree, profile and native task identities in registry rows after checking actual native task evidence. Spawn/completion hooks and shared scans recover uniquely matching native runs. Duplicate or incomplete evidence stays visible in `bindingDiagnostics`; the runtime never chooses between multiple executions or launches a replacement for a missing receipt. Independent-review findings remain free text while the registry binds the review obligation and publication candidate.
 
 Native Workboard states retain useful semantics: triage requires judgment, backlog/scheduled defer, todo/ready are open, review awaits verification, blocked retains a hold and done is settled. Worker liveness comes from task/session evidence, not card status. `worker.limit` configures cooperative capacity (default two); the native manager claim slot remains a platform constraint.
 
-`intake` and `schedule` require `authorized:true` for the requested work, without treating inspection as modification permission. Optional stable `requestKey` separates requests in one message. `amend` records a source-bound revision of open scope and invalidates publication checkpoints after affected execution settles. `handoff` carries free-form reason plus `decisionBy:user|agent`; `decide` records an evidence-backed manager decision, including after a question was sent. Only authentic user answers resolve user-reserved decisions. Read-only helper operations work outside execution contexts; private consultations may target registered open contexts of the same project and Feature.
+`intake` and `schedule` require `authorized:true` for requested work, without treating inspection as modification permission. Optional stable `requestKey` separates requests in one message. One request can own one board-local Feature per selected repository. `amend` appends a per-Feature scope revision, updates the human note projection, and invalidates that Feature's publication checkpoint without changing sibling Features or shared request scope. `handoff` and `decide` use registry decision rows; only correlated user answers resolve user-reserved decisions. `control` records a stop intent without creating a card. Actual exceptional intervention work remains an ordinary registered Workboard obligation.
+
+## Authority Model
+
+The fresh v9 registry owns projects, routes, requests, board-to-Feature associations, recoverable native creation payloads, per-Feature scope revisions, obligation relationships, immutable review candidates, dependencies, attempt bindings, decisions, publication and terminal checkpoints, stop controls, explicit inactivation plans, source-idempotent schedules, exchanges, communication intents, and delivery receipts. It deliberately does not store Workboard status or native task liveness. Workboard owns human-visible obligation status, owner, conclusion and proof; native tasks/sessions own execution liveness; Git and GitHub own repository and publication effects.
+
+Card notes are natural human scope and context. They are never parsed for project identity, source, delivery, type, Feature membership, dependencies, attempts, decisions, publication state, or creation seals. Marker-like words and snippets are valid prose and have no machine effect; validation is limited to size and unsafe control characters. Scans start from registered obligations and ignore unregistered cards. Result delivery rows and native conversation receipts are the sole notification authority; no owner-notification card is created.
 
 The managed install record locates the package. Do not also add the same checkout to `plugins.load.paths`. For an unmanaged development load instead, omit `plugins install` and set `plugins.load.paths` to the repository path.
 
@@ -143,7 +151,11 @@ Source entrypoints are declared in `package.json` under `openclaw.extensions`; m
 
 The behavioral suite under `test/` uses Node's built-in `node:test` runner with `tsx` against `src/**/*.ts`; tests never import `dist`. `npm run check` separately builds and verifies the compiled registration/store boundary through `scripts/verify-dist.mjs`, and package validation inspects the packed artifact. These checks work on any machine with the declared Node and OpenClaw versions. See `TESTING.md` for test-layer and Arrange/Act/Assert guidance.
 
-This release requires a fresh v4 project registry. Existing projects and schema versions are not migrated. Personal OpenClaw state is separate and must not be erased when resetting the plugin registry.
+Cross-authority writes reserve registry identity before native creation and retain recoverable staged checkpoints. Terminal completion stages facts for Jarvis before completing the Feature; only after native completion is confirmed can Jarvis compose the result delivery. Direct Feature completion requires that durable terminal checkpoint. Stops block new preparation, publication and finalization until engineering reconciles native tasks/sessions and any hosted effect.
+
+Worker execution currently requires the ACP runtime plus its native wrapper task; `worker.runtime` is therefore fixed to `acp` rather than advertising unsupported alternatives.
+
+Current state uses the fresh-only v9 project registry. Older plugin registries are rejected and are not migrated or parsed. Reset only the configured plugin `statePath`; personal OpenClaw state is separate and must not be erased.
 
 Internal control prompts use the semantic markers `PROJECT WAKE` and `PROJECT CONTINUATION`; the public brand is deliberately excluded from those markers.
 

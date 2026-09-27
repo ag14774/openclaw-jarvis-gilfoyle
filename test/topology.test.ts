@@ -41,13 +41,23 @@ test('configured topology controls agents, sessions, and ordered worker profiles
   const id = '10000000-0000-4000-8000-000000000001',
     feature = {
       id,
-      notes: `Type: feature\nProject identity: 20000000-0000-4000-8000-000000000002`,
+      notes: 'Natural Feature context.',
     };
   assert.equal(projectSessionKey('engineering', id), `agent:eng:project-flow:${id}`);
-  assert.equal(controllerKey([feature], feature), `agent:eng:project-flow:${id}`);
+  assert.equal(
+    controllerKey(
+      {
+        features: [{ id, card: id }],
+        obligations: [{ id, feature: id, card: id, kind: 'feature' }],
+      },
+      feature,
+    ),
+    `agent:eng:project-flow:${id}`,
+  );
   assert.deepEqual(workerProfiles(), profiles);
   assert.deepEqual(workerProfile('expert'), profiles[1]);
   assert.throws(() => workerProfile('missing'));
+  assert.throws(() => configureTopology({ workerRuntime: 'subagent' }), /must be acp/);
   assert.throws(() =>
     configureTopology({
       workerProfiles: Array.from({ length: 6 }, (_, i) => ({
@@ -80,7 +90,7 @@ test('fresh registry stores only generic roles and configured sessions', () => {
     scope = '20000000-0000-4000-8000-000000000002';
   store.enqueue({ project: project.id, event: 'result', message: 'done' });
   store.exchange(project.id, scope, 'engineering');
-  assert.equal(store.get('PRAGMA user_version').user_version, 4);
+  assert.equal(store.get('PRAGMA user_version').user_version, 9);
   assert.equal(store.get('PRAGMA quick_check').quick_check, 'ok');
   assert.equal(store.get('SELECT role FROM deliveries').role, 'product');
   const exchange = store.get('SELECT role,session FROM exchanges');

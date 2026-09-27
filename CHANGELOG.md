@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.0.0 - 2026-09-27
+
+- Replace the legacy card-note protocol with a fresh-only v9 registry for requests, Features, recoverable creation payloads, scope revisions, obligations, dependencies, attempts, decisions, publication/terminal checkpoints, stop controls, explicit inactivation plans and source-idempotent schedules.
+- Keep Workboard status and native task liveness out of SQLite; scans join registered obligations to native Workboard/task/session evidence and ignore unregistered cards.
+- Remove project-information and owner-notification cards, creation seals, machine note fields, attempt blocks, replacement comments, hosted note checkpoints and handoff JSON.
+- Give one multi-repository intake one request identity with board-local Features; represent stops as control intents and exceptional intervention work as normal obligations.
+- Retain conversation routing, delivery receipts, schedules, exchanges, worker profiles/capacity, GitHub effect validation and internal context cleanup.
+- Replace legacy compatibility tests with fresh-schema, natural-note invariance, unregistered-card exclusion, no-retired-marker and isolated-native coverage.
+- Reserve Feature/obligation identity before native creation, recover ambiguous writes, lock reviews to registry candidates, require exact passed publication gates, and guard direct Feature completion.
+- Stage held terminal communication before completion so restart reconciliation releases only Jarvis-authored result delivery after exact native proof.
+- Reconcile stop controls against terminal tasks, inactive sessions and closed hosted effects; reset dispatch retries only when durable attention versions change.
+- Settle batched members with actual receipts/routes and process copies by each original event.
+- Scope every decision read/write to its project and recover answered ownership back to engineering, including scanner attention when native projection is interrupted.
+- Restore exhaustive `finish|stop|pending` inactivation dispositions and prevent pending work from running while safely preserving it.
+- Use exact line-delimited worker identity and exact per-child session searches; exhausted unchanged attention creates one durable product blocker intent.
+- Accept marker-like human prose without special parsing or vocabulary restrictions.
+- Recover merged publication checkpoints through terminal completion, treat uncheckpointed done Features as actionable uncertainty, and guard every supported move-to-done tool.
+- Enforce exact Feature scope for engineering and internal product mutations, enforce product lifecycle authority, isolate failed schedule occurrences, and count only configured ACP worker capacity.
+- Confirm temporary-context cleanup before closure and rediscover fallback destinations on every fallback attempt without changing preferred routes.
+
+## 3.0.1 - 2026-09-26
+
+- Move validated repository configuration from permanent Workboard TODO cards into v5 registry board associations; v4 upgrades in place and historical cards are no longer runtime authority.
+- Bind accepted native execution without requiring a manager claim or reopening completed/blocked work; atomically store receipt and references.
+- Reconcile unique native task bindings after spawn and on recovery scans; unresolved or active execution cannot be hidden by completed card status.
+- Keep review findings and labels free-form while validating immutable candidate and independent execution identity.
+- Prevent substitute reviews while original execution is unresolved; expose query schema and actionable binding diagnostics.
+- Permit either manager to request active-project reconciliation, reserve retry-budget resets for operators, and guard native completion against unresolved execution.
+- Verify the exact reviewed GitHub candidate object without requiring local integration HEAD to advance before the PR; retain remote/base/review/CI/merge validation.
+- Compare hosted checkpoint state structurally so native response field ordering does not masquerade as concurrent modification; real state changes still reject.
+- Permit completion wording to describe the actual merge while verifying the retained gate's unchanged publication identity and receipt.
+
 ## 3.0.0 - 2026-09-26
 
 - Agents decide scope, work structure and conclusions; shared terminal handoff supports settled success, failure, cancellation and findings without an outcome taxonomy.

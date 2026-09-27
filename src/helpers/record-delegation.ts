@@ -25,5 +25,28 @@ export function delegationError(error) {
     )
   )
     code = 'state-conflict';
-  return { complete: false, code, error: ERRORS[code] };
+  const first = message.split('\n')[0];
+  const conditions = new Set([
+    'Prepared current attempt required',
+    'Invalid parent',
+    'Card missing',
+    'Execution binding conflicts with card ownership',
+    'Native execution task identity required',
+    'Native worker prompt does not bind this Work item/task name',
+    'Execution already belongs to another card',
+    'Prepared assignment changed before binding',
+    'Release a conflicting claim before recording execution',
+    'Task discovery window incomplete; use exact IDs',
+    'Immutable reference mismatch',
+    'Explicit task ID mismatch',
+    'Explicit wrapper ID mismatch',
+    'Ambiguous accepted delegation comments',
+    'Live engineering manager claim required',
+  ]);
+  return {
+    complete: false,
+    code,
+    error: ERRORS[code],
+    ...(conditions.has(first) ? { condition: first } : {}),
+  };
 }

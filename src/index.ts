@@ -9,6 +9,8 @@ import { finalizeFeature } from './helpers/finalize-feature.js';
 import { handoffCard, handoffError } from './helpers/handoff-card.js';
 import { readView } from './helpers/workboard-page.js';
 import { delegationError } from './helpers/record-delegation.js';
+import { validateRegisteredCompletion } from './helpers/completion-guard.js';
+import { assertEngineeringMutationScope } from './helpers/authority.js';
 import { configureTopology, topology, isManagerAgent, workerProfiles } from './topology.js';
 
 const inputSchema = {
@@ -30,6 +32,7 @@ const inputSchema = {
         'associate',
         'intake',
         'amend',
+        'control',
         'notify',
         'communication-decision',
         'milestone-decision',
@@ -53,7 +56,6 @@ const inputSchema = {
 const engineeringOperations = [
   'work-item',
   'review',
-  'stop',
   'exceptional-intervention',
   'profiles',
   'prepare',
@@ -61,6 +63,7 @@ const engineeringOperations = [
   'publish-gate',
   'gate',
   'finish',
+  'settle-control',
   'finalize',
   'handoff',
   'decide',
@@ -71,11 +74,64 @@ const engineeringSchema = {
   type: 'object',
   properties: {
     operation: { type: 'string', enum: engineeringOperations },
-    input: { type: 'object', additionalProperties: true },
+    input: {
+      type: 'object',
+      additionalProperties: true,
+      properties: {
+        reviewKey: {
+          type: 'string',
+          description:
+            'Stable review key. Reuse the returned reviewKey, not the full idempotencyKey or its review- prefix. Missing binding is not a reason for a new key.',
+        },
+        boardId: { type: 'string', description: 'Native repository board ID, not a project UUID.' },
+        id: {
+          type: 'string',
+          description: 'Target Workboard card UUID. For record, the original prepared Work item.',
+        },
+        agentId: { type: 'string', description: 'Manager ID for workboard-query.' },
+        tenant: {
+          type: 'string',
+          description: 'Feature UUID to list its child cards; omit to include the Feature itself.',
+        },
+        includeArchived: {
+          type: 'boolean',
+          description:
+            'Required for workboard-query. Include archived evidence for reconciliation.',
+        },
+        view: {
+          type: 'string',
+          enum: ['queue', 'todoUndelegated', 'delegated', 'attention'],
+          description:
+            'Optional query filter. Omit for all scoped records; there is no native view.',
+        },
+        after: { type: 'string', description: 'Returned nextAfter pagination cursor only.' },
+        membership: {
+          type: 'string',
+          description: 'Returned opaque membership token, only with after. Not a Feature ID.',
+        },
+        runId: { type: 'string', description: 'Actual sessions_spawn runId for record.' },
+        childSessionKey: {
+          type: 'string',
+          description: 'Actual accepted worker session key for record.',
+        },
+        taskId: {
+          type: 'string',
+          description: 'Native ACP task UUID; optional when uniquely discoverable.',
+        },
+        wrapperTaskId: {
+          type: 'string',
+          description: 'Native wrapper task UUID, distinct from the ACP task.',
+        },
+      },
+    },
   },
   required: ['operation'],
   additionalProperties: false,
 };
+export const isCompletionMutation = (event) =>
+  event.toolName === 'workboard_complete' ||
+  (['workboard_move', 'workboard_release'].includes(event.toolName) &&
+    event.params?.status === 'done');
 export default {
   id: 'jarvis-gilfoyle',
   name: 'Jarvis-Gilfoyle project runtime',
@@ -149,17 +205,30 @@ export default {
               const operation = args.operation,
                 input = args.input ?? {};
               const readOnly = ['profiles', 'workboard-query'].includes(operation);
-              if (!exchange && !readOnly)
-                throw Error('Registered project context required for mutations');
-              if (Object.hasOwn(input, 'actor')) throw Error('Actor is supplied by the runtime');
-              if (ctx.agentId === configured.productAgentId && operation !== 'decide' && !readOnly)
-                throw Error(
-                  'The product agent engineering authority is limited to product decisions',
+              assert(exchange || readOnly, 'Registered project context required for mutations');
+              assert(!Object.hasOwn(input, 'actor'), 'Actor is supplied by the runtime');
+              assert(
+                ctx.agentId !== configured.productAgentId || operation === 'decide' || readOnly,
+                'Engineering operations belong to the engineering manager; the product agent owns communication and decisions',
+              );
+              let repository = null;
+              let registryProject = exchange?.project ?? null;
+              if (input.boardId) {
+                const matches = r.store
+                  .list()
+                  .flatMap((project) =>
+                    project.boards
+                      .filter((board) => board.id === input.boardId)
+                      .map((board) => ({ project, board })),
+                  );
+                assert.equal(matches.length, 1, 'Board is not uniquely registered');
+                const { project, board } = matches[0];
+                assert(
+                  !exchange || project.id === exchange.project,
+                  'Board belongs to another project',
                 );
-              if (input.boardId && exchange) {
-                const board = r.store.get('SELECT project FROM boards WHERE id=?', input.boardId);
-                if (!board || board.project !== exchange.project)
-                  throw Error('Board belongs to another project');
+                registryProject = project.id;
+                repository = board.metadata;
               }
               let calls = 0,
                 bytes = 0;
@@ -171,22 +240,54 @@ export default {
                 return value;
               };
               let result;
-              if (['work-item', 'review', 'stop', 'exceptional-intervention'].includes(operation))
-                result = await createProductCard(operation, input, rpc);
+              const registry = exchange
+                ? {
+                    store: r.store,
+                    project: registryProject,
+                    repository,
+                  }
+                : registryProject
+                  ? { store: r.store, project: registryProject, repository }
+                  : null;
+              if (!readOnly) {
+                assertEngineeringMutationScope(
+                  r.store,
+                  exchange,
+                  registryProject,
+                  operation,
+                  input,
+                );
+              }
+              if (['work-item', 'review', 'exceptional-intervention'].includes(operation))
+                result = await createProductCard(operation, input, rpc, registry);
               else if (operation === 'profiles') result = { profiles: workerProfiles() };
-              else if (['prepare', 'record', 'publish-gate', 'gate', 'finish'].includes(operation))
-                result = await operate(operation, input, rpc);
-              else if (operation === 'finalize') result = await finalizeFeature(input, rpc);
+              else if (
+                ['prepare', 'record', 'publish-gate', 'gate', 'finish', 'settle-control'].includes(
+                  operation,
+                )
+              )
+                result = await operate(operation, input, rpc, undefined, undefined, registry);
+              else if (operation === 'finalize')
+                result = await finalizeFeature(input, rpc, undefined, registry);
               else if (operation === 'decide')
                 result = await handoffCard(
                   'handoff-decision',
                   { ...input, actor: ctx.sessionKey },
                   rpc,
+                  registry,
                 );
               else if (['handoff', 'handoff-apply'].includes(operation))
-                result = await handoffCard(operation, { ...input, actor: ctx.sessionKey }, rpc);
-              else if (operation === 'workboard-query') result = await readView(input, rpc);
-              else throw Error('Unsupported engineering operation');
+                result = await handoffCard(
+                  operation,
+                  { ...input, actor: ctx.sessionKey },
+                  rpc,
+                  registry,
+                );
+              else if (operation === 'workboard-query') {
+                assert(registryProject, 'Registered board required for registry-backed queries');
+                result = await readView(input, rpc, r.store.records(registryProject));
+              } else throw Error('Unsupported engineering operation');
+              if (result?.communicationIntent) r.requestTick();
               assert(
                 Buffer.byteLength(JSON.stringify(result)) <= 12000,
                 'Engineering operation output exceeds bound',
@@ -194,10 +295,23 @@ export default {
               return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
             } catch (error) {
               const operation = args.operation;
-              if (['work-item', 'review', 'stop', 'exceptional-intervention'].includes(operation))
+              if (['work-item', 'review', 'exceptional-intervention'].includes(operation))
                 return fail(creationError(error));
               if (['prepare', 'record'].includes(operation)) return fail(delegationError(error));
               if (operation.startsWith('handoff')) return fail(handoffError(error));
+              if (
+                operation === 'workboard-query' &&
+                /^(Expected query object|Unknown query field|Invalid (manager|boardId|tenant|view|after|membership)|Explicit (scope|includeArchived) required|Continuation requires after and membership together)$/.test(
+                  error.message ?? '',
+                )
+              )
+                return fail({
+                  complete: false,
+                  code: 'invalid-query',
+                  error: error.message,
+                  guidance:
+                    'Use boardId and includeArchived. Omit view for all records. Use tenant for a Feature UUID; after/membership are returned pagination tokens.',
+                });
               return fail({
                 complete: false,
                 code: 'validation-failed',
@@ -236,15 +350,12 @@ export default {
         try {
           const r = get(),
             p = r.store.project(params.projectId),
-            choices = JSON.parse(
-              r.store.get('SELECT result FROM receipts WHERE key=?', `inactivate:${p.id}`)
-                ?.result ?? '{}',
-            );
+            feature = r.store.feature(params.featureId);
+          assert.equal(feature.project, p.id);
           respond(true, {
-            active:
-              p.state !== 'inactive' &&
-              !(p.state === 'draining' && choices[params.featureId] === 'pending'),
+            active: p.state === 'active' && !r.store.pendingStop(feature.id),
             state: p.state,
+            stopped: Boolean(r.store.pendingStop(feature.id)),
           });
         } catch {
           respond(false, undefined, {
@@ -395,6 +506,35 @@ export default {
           'SELECT project FROM exchanges WHERE session=?',
           ctx.sessionKey ?? '',
         );
+      const completesCard = isCompletionMutation(event);
+      if (completesCard) {
+        try {
+          const matches = r.store
+            .list()
+            .filter((project) =>
+              r.store.records(project.id).obligations.some((row) => row.card === event.params?.id),
+            );
+          if (!matches.length) return;
+          assert.equal(matches.length, 1, 'Registered card project is ambiguous');
+          const project = matches[0];
+          if (exchange)
+            assert.equal(
+              exchange.project,
+              project.id,
+              'Registered card belongs to another project',
+            );
+          const cards = await r.cards(project);
+          await validateRegisteredCompletion(r.store, project, cards, event.params?.id, r.rpc);
+        } catch (error) {
+          return {
+            block: true,
+            blockReason:
+              error instanceof assert.AssertionError
+                ? String(error.message).split('\n')[0].slice(0, 300)
+                : 'Execution evidence is not reconciled; inspect the existing card and native tasks before completion.',
+          };
+        }
+      }
       if (
         exchange &&
         r.store.project(exchange.project).state === 'inactive' &&
@@ -430,6 +570,10 @@ export default {
     });
     api.on('agent_end', async (_event, ctx) => {
       if (isProjectSession(ctx.sessionKey) || ctx.agentId === configured.workerAgentId)
+        get().requestTick();
+    });
+    api.on('after_tool_call', (event, ctx) => {
+      if (event.toolName === 'sessions_spawn' && isProjectSession(ctx.sessionKey))
         get().requestTick();
     });
     api.registerService({
