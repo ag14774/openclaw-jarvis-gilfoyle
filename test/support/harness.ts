@@ -31,6 +31,7 @@ export async function harness({ config = {} } = {}) {
     runs: [],
     aborted: [],
     cleaned: [],
+    patches: [],
     calls: [],
     fail: new Set(),
     sendStatus: () => 'sent',
@@ -89,6 +90,9 @@ export async function harness({ config = {} } = {}) {
           row.updatedAt = clock;
           return { runId: `run-${native.runs.length}` };
         }
+        case 'sessions.patch':
+          native.patches.push(params);
+          return { ok: true };
         case 'sessions.abort':
           native.aborted.push(params.key);
           native.session(params.key).hasActiveRun = false;

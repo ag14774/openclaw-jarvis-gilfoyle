@@ -31,7 +31,7 @@ lines.on('line', async (line) => {
         nowMs: Date.now(),
       });
     } else {
-      if (!companionMethodAllowed(q.method)) throw Error('Unsupported companion method');
+      if (!companionMethodAllowed(q.method, q.params)) throw Error('Unsupported companion method');
       result = await callGatewayFromCli(q.method, { timeout: '20000', json: true }, q.params, {
         scopes: ['operator.read', 'operator.write', 'operator.admin'],
       });

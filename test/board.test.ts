@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness, JARVIS_DM, JARVIS_GROUP, MINUTE, ref } from './support/harness.ts';
 import { taskSessionKey } from '../src/topology.ts';
+import { companionMethodAllowed } from '../src/bridge-methods.ts';
 import { Store } from '../src/store.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -283,6 +284,48 @@ test('a task is handed over only by its holder and from its latest state', async
     note: 'Taking it back to check the wording',
   });
   assert.equal(current.waitingOn, 'product');
+});
+
+test('private task sessions follow the model chosen in the project chat', async () => {
+  const h = await harness();
+  await project(h);
+  const chat = h.native.session(JARVIS_GROUP);
+  Object.assign(chat, {
+    model: 'gpt-5.6-sol',
+    modelProvider: 'openai',
+    modelOverrideSource: 'user',
+    thinkingLevel: 'high',
+  });
+  await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
+  const { task } = await h.call('main', JARVIS_GROUP, { operation: 'add_task', title: 'Totals' });
+  h.endTurn('main', JARVIS_GROUP);
+  await h.tick();
+  const gKey = key(h, 'engineering', task);
+  assert.deepEqual(h.native.patches.at(-1), {
+    key: gKey,
+    agentId: 'gilfoyle',
+    model: 'openai/gpt-5.6-sol',
+    thinkingLevel: 'high',
+  });
+
+  // Without a choice in the chat the session goes back to the agent's defaults.
+  Object.assign(chat, { modelOverrideSource: null, thinkingLevel: undefined });
+  await h.call('gilfoyle', gKey, { operation: 'update_task', holder: 'product', note: 'Done?' });
+  h.endAllRuns();
+  await h.tick();
+  assert.deepEqual(h.native.patches.at(-1), {
+    key: key(h, 'product', task),
+    agentId: 'main',
+    model: null,
+    thinkingLevel: null,
+  });
+
+  // The companion lets sessions.patch touch only the model settings of private sessions.
+  assert(companionMethodAllowed('sessions.patch', { key: gKey, agentId: 'gilfoyle', model: null }));
+  assert(
+    !companionMethodAllowed('sessions.patch', { key: JARVIS_GROUP, agentId: 'main', model: null }),
+  );
+  assert(!companionMethodAllowed('sessions.patch', { key: gKey, agentId: 'gilfoyle', label: 'x' }));
 });
 
 test('roles, project isolation and closed tasks are enforced', async () => {

@@ -5,11 +5,21 @@ const methods = new Set([
   'sessions.list',
   'sessions.create',
   'sessions.abort',
+  'sessions.patch',
   'agent',
 ]);
 
 export const COMPANION_METHODS = [...methods];
-export const companionMethodAllowed = (method) => methods.has(method);
+// sessions.patch may only set the model and thinking level of the plugin's own private
+// task sessions.
+export const companionMethodAllowed = (method, params) =>
+  methods.has(method) &&
+  (method !== 'sessions.patch' ||
+    (Object.keys(params ?? {}).every((key) =>
+      ['key', 'agentId', 'model', 'thinkingLevel'].includes(key),
+    ) &&
+      /^agent:([^:]+):[a-z][a-z0-9_-]{0,31}:task-\d+-[0-9a-z]+$/.exec(params.key ?? '')?.[1] ===
+        params.agentId));
 
 // Only the plugin's own private task sessions may be cleaned up.
 export function cleanupScope(params) {

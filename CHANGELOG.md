@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.2.0 - 2026-09-29
+
+Protocol 11.3.
+
+- Private task sessions of both managers follow the model and thinking level the user chose in the project chat, read at every wake; otherwise the agents' defaults. The project chat binding now also records the product manager's session for that chat. Projects bound earlier need `use_this_chat` once.
+- The companion may call `sessions.patch`, limited to the model and thinking level of the plugin's private task sessions.
+
 ## 6.1.1 - 2026-09-29
 
 Skill only (protocol 11.2): the engineering manager keeps one checkout per repository in the projects directory named in its local notes, gives each worker assignment its own worktree and branch with the worker's `cwd` set to it, removes worktrees after merge or cancellation, and records the checkout path in the project context.

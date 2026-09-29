@@ -267,7 +267,9 @@ export class BoardRuntime {
     let id = base;
     for (let n = 2; this.store.get('SELECT 1 FROM projects WHERE id=?', id); n++)
       id = `${base}-${n}`;
-    const route = caller.source?.route ?? null;
+    const route = caller.source?.route
+      ? { ...caller.source.route, sessionKey: caller.session }
+      : null;
     const now = this.now();
     this.store.run(
       'INSERT INTO projects(id,name,context,route,created,updated) VALUES(?,?,?,?,?,?)',
@@ -300,7 +302,7 @@ export class BoardRuntime {
         route,
         'use_this_chat needs a current user message in a chat the plugin can reply to (not a private task session)',
       );
-      changes.route = JSON.stringify(route);
+      changes.route = JSON.stringify({ ...route, sessionKey: caller.session });
     }
     if (input.state !== undefined) {
       assert(
@@ -948,6 +950,33 @@ export class BoardRuntime {
       }
     }
   }
+  // A private task session runs on the model and thinking level the user chose in the
+  // project chat, or on the agent's defaults when the chat has none. Fails open.
+  async followChatModel(task, role, key) {
+    const chatKey = this.store.project(task.project).route?.sessionKey;
+    try {
+      const row = chatKey
+        ? (await this.sessionRows(topology().productAgentId, chatKey)).find(
+            (candidate) => candidate.key === chatKey,
+          )
+        : null;
+      const chosen = row?.modelOverrideSource === 'user' && row.model;
+      await this.rpc('sessions.patch', {
+        key,
+        agentId: agentForRole(role),
+        model: chosen
+          ? row.modelProvider
+            ? `${row.modelProvider}/${row.model}`
+            : row.model
+          : null,
+        thinkingLevel: row?.thinkingLevel ?? null,
+      });
+    } catch (error) {
+      this.log(
+        `Task #${task.id} runs on default settings: ${String(error?.message ?? error).slice(0, 200)}`,
+      );
+    }
+  }
   async wake(task, role, key, poked, workers) {
     const now = this.now();
     this.wakes.set(key, now);
@@ -974,6 +1003,7 @@ export class BoardRuntime {
         agentId: agentForRole(role),
         label: clip(`Task #${task.id}: ${task.title}`, 80),
       }).catch(() => undefined);
+      await this.followChatModel(task, role, key);
       await this.rpc('agent', {
         agentId: agentForRole(role),
         sessionKey: key,
