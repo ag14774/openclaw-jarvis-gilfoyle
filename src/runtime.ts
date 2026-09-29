@@ -875,7 +875,13 @@ export class BoardRuntime {
     const scope = parseTaskSession(sessionKey);
     if (!scope) return false;
     const task = this.store.get('SELECT status,created FROM tasks WHERE id=?', scope.taskId);
-    return Boolean(task && task.created === scope.created && task.status === 'open');
+    if (task && task.created === scope.created && task.status === 'open') return true;
+    // A late native turn recreated a closed task's session; the next scan removes it again.
+    if (task && task.created === scope.created) {
+      this.store.run('UPDATE tasks SET cleaned=NULL WHERE id=?', scope.taskId);
+      this.requestTick();
+    }
+    return false;
   }
 
   // ---- The scan ----------------------------------------------------------------------
@@ -984,16 +990,18 @@ export class BoardRuntime {
           )
         : null;
       const chosen = row?.modelOverrideSource === 'user' && row.model;
+      // Two calls: the companion sends the model with write scope only, so the choice
+      // never becomes a configured default; the thinking level needs admin scope.
+      const target = { key, agentId: agentForRole(role) };
       await this.rpc('sessions.patch', {
-        key,
-        agentId: agentForRole(role),
+        ...target,
         model: chosen
           ? row.modelProvider
             ? `${row.modelProvider}/${row.model}`
             : row.model
           : null,
-        thinkingLevel: row?.thinkingLevel ?? null,
       });
+      await this.rpc('sessions.patch', { ...target, thinkingLevel: row?.thinkingLevel ?? null });
     } catch (error) {
       this.log(
         `Task #${task.id} runs on default settings: ${String(error?.message ?? error).slice(0, 200)}`,

@@ -22,7 +22,8 @@
 - non-interference with personal work and other agents;
 - the board file surviving a restart, and refusal of a database with another schema;
 - one shared board when OpenClaw registers the plugin more than once in a process;
-- private task sessions following the project chat's model choice, the chat's session refreshed only from that chat, and the companion's limit on `sessions.patch`.
+- private task sessions following the project chat's model choice, the chat's session refreshed only from that chat, and the companion's limits on `sessions.patch` (one setting per call, the model never with admin scope);
+- closed task sessions recreated by late native turns being removed again.
 
 The fakes follow OpenClaw 2026.9.2 as found in its distribution:
 

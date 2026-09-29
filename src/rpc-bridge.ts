@@ -6,7 +6,7 @@ import {
   cleanupSessionLifecycleArtifacts,
   getSessionEntry,
 } from 'openclaw/plugin-sdk/session-store-runtime';
-import { cleanupScope, companionMethodAllowed } from './bridge-methods.js';
+import { cleanupScope, companionMethodAllowed, companionScopes } from './bridge-methods.js';
 const lines = createInterface({ input: process.stdin });
 lines.on('line', async (line) => {
   let id;
@@ -33,7 +33,7 @@ lines.on('line', async (line) => {
     } else {
       if (!companionMethodAllowed(q.method, q.params)) throw Error('Unsupported companion method');
       result = await callGatewayFromCli(q.method, { timeout: '20000', json: true }, q.params, {
-        scopes: ['operator.read', 'operator.write', 'operator.admin'],
+        scopes: companionScopes(q.method, q.params),
       });
     }
     process.stdout.write(JSON.stringify({ id, result }) + '\n');

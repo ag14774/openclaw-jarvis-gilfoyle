@@ -1,5 +1,10 @@
 # Changelog
 
+## 6.2.2 - 2026-09-29
+
+- The model is applied to private task sessions with write scope only and the thinking level in a separate call. With admin scope OpenClaw also made the model the configured default (sticky model selection).
+- A closed task's private session recreated by a late native turn (such as a cancelled worker's completion notice) is blocked, as before, and now removed again by the next scan.
+
 ## 6.2.1 - 2026-09-29
 
 - A user message in a project's chat records the session OpenClaw routed it to, so the chat's session follows resets of session scope or deleted sessions, and projects bound before 6.2.0 pick it up without `use_this_chat`. Messages in other chats, such as the owner DM for a project with its own chat, never change it.

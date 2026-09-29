@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness, JARVIS_DM, JARVIS_GROUP, MINUTE, ref } from './support/harness.ts';
 import { taskSessionKey } from '../src/topology.ts';
-import { companionMethodAllowed } from '../src/bridge-methods.ts';
+import { companionMethodAllowed, companionScopes } from '../src/bridge-methods.ts';
 import { Store } from '../src/store.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -121,7 +121,13 @@ test('a request goes from the user to engineering and back, and the user hears t
   h.endAllRuns();
   await h.tick();
   assert.deepEqual(h.native.cleaned.sort(), [gKey, jKey].sort());
+
+  // A late native turn that recreates a closed task's session is blocked, and the next scan
+  // removes the session again.
+  h.native.session(gKey);
   assert.equal(h.hooks.before_agent_run({}, { sessionKey: gKey }).outcome, 'block');
+  await h.tick();
+  assert.equal(h.native.cleaned.filter((k) => k === gKey).length, 2);
 });
 
 test('a question goes to the user with its message, and the answer goes back to engineering', async () => {
@@ -301,24 +307,21 @@ test('private task sessions follow the model chosen in the project chat', async 
   h.endTurn('main', JARVIS_GROUP);
   await h.tick();
   const gKey = key(h, 'engineering', task);
-  assert.deepEqual(h.native.patches.at(-1), {
-    key: gKey,
-    agentId: 'gilfoyle',
-    model: 'openai/gpt-5.6-sol',
-    thinkingLevel: 'high',
-  });
+  assert.deepEqual(h.native.patches.slice(-2), [
+    { key: gKey, agentId: 'gilfoyle', model: 'openai/gpt-5.6-sol' },
+    { key: gKey, agentId: 'gilfoyle', thinkingLevel: 'high' },
+  ]);
 
   // Without a choice in the chat the session goes back to the agent's defaults.
   Object.assign(chat, { modelOverrideSource: null, thinkingLevel: undefined });
   await h.call('gilfoyle', gKey, { operation: 'update_task', holder: 'product', note: 'Done?' });
   h.endAllRuns();
   await h.tick();
-  assert.deepEqual(h.native.patches.at(-1), {
-    key: key(h, 'product', task),
-    agentId: 'main',
-    model: null,
-    thinkingLevel: null,
-  });
+  const jKey = key(h, 'product', task);
+  assert.deepEqual(h.native.patches.slice(-2), [
+    { key: jKey, agentId: 'main', model: null },
+    { key: jKey, agentId: 'main', thinkingLevel: null },
+  ]);
 
   // A message in the project chat records the session OpenClaw routed it to; a message in
   // another chat (the DM) does not.
@@ -334,6 +337,21 @@ test('private task sessions follow the model chosen in the project chat', async 
     !companionMethodAllowed('sessions.patch', { key: JARVIS_GROUP, agentId: 'main', model: null }),
   );
   assert(!companionMethodAllowed('sessions.patch', { key: gKey, agentId: 'gilfoyle', label: 'x' }));
+  assert(
+    !companionMethodAllowed('sessions.patch', {
+      key: gKey,
+      agentId: 'gilfoyle',
+      model: null,
+      thinkingLevel: null,
+    }),
+  );
+  // A model is never sent with admin scope, which would make it the configured default.
+  assert(!companionScopes('sessions.patch', { key: gKey, model: 'x' }).includes('operator.admin'));
+  assert(
+    companionScopes('sessions.patch', { key: gKey, thinkingLevel: 'high' }).includes(
+      'operator.admin',
+    ),
+  );
 });
 
 test('roles, project isolation and closed tasks are enforced', async () => {
