@@ -1,20 +1,14 @@
 {
   "id": "jarvis-gilfoyle",
-  "name": "Jarvis-Gilfoyle Project Runtime",
-  "description": "Durable project identities and current conversation routing over native Workboard and delivery.",
-  "version": "4.1.0",
-  "contracts": { "tools": ["jarvis_project", "gilfoyle_engineering"] },
+  "name": "Jarvis-Gilfoyle Project Board",
+  "description": "A small project board in SQLite: projects, tasks with whose turn it is, notes, timed wake-ups for the product and engineering managers, and guaranteed messages to the project chat.",
+  "version": "6.0.0",
+  "contracts": { "tools": ["project_board"] },
   "skills": ["./skills"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": [
-      "statePath",
-      "productAgentId",
-      "engineeringAgentId",
-      "fallbackDestinations",
-      "worker"
-    ],
+    "required": ["statePath", "productAgentId", "engineeringAgentId", "ownerChat", "worker"],
     "properties": {
       "statePath": { "type": "string" },
       "productAgentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
@@ -25,32 +19,49 @@
         "default": "jarvis-gilfoyle"
       },
       "enabled": { "type": "boolean" },
-      "scanMs": { "type": "integer", "minimum": 10000, "maximum": 600000 },
-      "fallbackDestinations": {
+      "scanMs": { "type": "integer", "minimum": 10000, "maximum": 600000, "default": 60000 },
+      "turnTimeoutSeconds": {
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 14400,
+        "default": 1800,
+        "description": "Timeout for one private task-session turn started by the board."
+      },
+      "maxWakesPerRole": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10,
+        "default": 2,
+        "description": "At most this many private task sessions per manager run at once."
+      },
+      "ownerChat": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["product", "engineering"],
+        "required": ["channel", "accountId", "to"],
+        "description": "The owner's direct chat with the product manager: fallback for project messages.",
         "properties": {
-          "product": { "$ref": "#/$defs/fallbackDestination" },
-          "engineering": { "$ref": "#/$defs/fallbackDestination" }
+          "channel": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "accountId": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "to": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "threadId": { "type": "string", "minLength": 1, "maxLength": 240 }
         }
       },
       "worker": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["agentId", "runtime", "profiles"],
+        "required": ["agentId", "profiles"],
         "properties": {
           "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+          "runtime": { "type": "string", "enum": ["acp", "subagent"], "default": "acp" },
           "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 2 },
-          "runtime": { "const": "acp" },
           "profiles": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 5,
+            "maxItems": 8,
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["id", "model", "thinking", "description"],
+              "required": ["id", "model"],
               "properties": {
                 "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
                 "model": { "type": "string", "minLength": 1, "maxLength": 160 },
@@ -62,20 +73,6 @@
               }
             }
           }
-        }
-      }
-    },
-    "$defs": {
-      "fallbackDestination": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["channel", "accountId", "to", "kind"],
-        "properties": {
-          "channel": { "type": "string", "minLength": 1, "maxLength": 60 },
-          "accountId": { "type": "string", "minLength": 1, "maxLength": 100 },
-          "to": { "type": "string", "minLength": 1, "maxLength": 240 },
-          "kind": { "const": "direct" },
-          "threadId": { "type": "string", "minLength": 1, "maxLength": 240 }
         }
       }
     }

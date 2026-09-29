@@ -6,7 +6,7 @@ import {
   cleanupSessionLifecycleArtifacts,
   getSessionEntry,
 } from 'openclaw/plugin-sdk/session-store-runtime';
-import { companionMethodAllowed } from './bridge-methods.js';
+import { cleanupScope, companionMethodAllowed } from './bridge-methods.js';
 const lines = createInterface({ input: process.stdin });
 lines.on('line', async (line) => {
   let id;
@@ -16,23 +16,15 @@ lines.on('line', async (line) => {
     let result;
     if (q.method === 'jarvis-gilfoyle.session.cleanup') {
       const p = q.params,
-        m = /^agent:([^:]+):([a-z][a-z0-9_-]{0,31}):([0-9a-f-]{36})$/.exec(p.sessionKey ?? '');
-      if (
-        !m ||
-        m[1] !== p.agentId ||
-        m[2] !== p.sessionNamespace ||
-        !/^[0-9a-f-]{36}$/.test(p.projectId ?? '')
-      )
-        throw Error('Invalid owned cleanup scope');
+        owned = cleanupScope(p);
+      if (!owned) throw Error('Invalid owned cleanup scope');
       const entry = getSessionEntry({ agentId: p.agentId, sessionKey: p.sessionKey });
       if (entry && entry.sessionId !== p.expectedSessionId)
         throw Error('Session generation changed before cleanup');
-      const marker = JSON.stringify(
-        `PROJECT CONTINUATION\nProject: ${p.projectId}\nScope: ${m[3]}`,
-      ).slice(1, -1);
+      const marker = JSON.stringify(`PROJECT TASK ${owned.scope}`).slice(1, -1);
       result = await cleanupSessionLifecycleArtifacts({
         agentId: p.agentId,
-        sessionKeySegmentPrefix: `${p.sessionNamespace}:${m[3]}`,
+        sessionKeySegmentPrefix: `${p.sessionNamespace}:${owned.scope}`,
         transcriptContentMarker: marker,
         archiveRemovedEntryTranscripts: false,
         orphanTranscriptMinAgeMs: 0,

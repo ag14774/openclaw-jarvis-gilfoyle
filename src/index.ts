@@ -1,141 +1,107 @@
-import { Store } from './store.js';
-import { projectRoleContext } from './role-context.js';
-import { ProjectRuntime, isProjectSession } from './runtime.js';
-import { Bridge } from './bridge.js';
-import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { createProductCard, creationError } from './helpers/create-card.js';
-import { operate } from './helpers/native-operation.js';
-import { finalizeFeature } from './helpers/finalize-feature.js';
-import { handoffCard, handoffError } from './helpers/handoff-card.js';
-import { readView } from './helpers/workboard-page.js';
-import { delegationError } from './helpers/record-delegation.js';
-import { validateRegisteredCompletion } from './helpers/completion-guard.js';
-import { assertEngineeringMutationScope } from './helpers/authority.js';
-import { configureTopology, topology, isManagerAgent, workerProfiles } from './topology.js';
+import { Store } from './store.js';
+import { BoardRuntime } from './runtime.js';
+import { Bridge } from './bridge.js';
+import { agentLabel, currentConfig, PRIVATE_GUIDANCE, projectRoleContext } from './role-context.js';
+import {
+  agentForRole,
+  configureTopology,
+  isManagerAgent,
+  isPrivateSession,
+  roleForAgent,
+  topology,
+} from './topology.js';
 
-const inputSchema = {
+export const OPERATIONS = [
+  'list',
+  'show',
+  'create_project',
+  'update_project',
+  'add_task',
+  'update_task',
+  'notify',
+];
+
+const parameters = {
   type: 'object',
+  additionalProperties: false,
+  required: ['operation'],
   properties: {
     operation: {
       type: 'string',
-      enum: [
-        'list',
-        'conversations',
-        'current',
-        'visible-context',
-        'summary',
-        'inventory',
-        'declare',
-        'move',
-        'context',
-        'priority',
-        'associate',
-        'intake',
-        'amend',
-        'control',
-        'notify',
-        'communication-decision',
-        'milestone-decision',
-        'delivery',
-        'also-notify',
-        'question-delivery',
-        'answer',
-        'schedule',
-        'schedule-disable',
-        'inactivate',
-        'reactivate',
-        'recover',
-        'conclude',
-      ],
+      enum: OPERATIONS,
+      description:
+        'list: projects and open tasks. show: one task with its notes (or one project with its context). create_project / update_project (product; engineering may update context). add_task. update_task: note, handover (holder), close (status), check_in_minutes. notify: message the user (product).',
     },
-    input: { type: 'object', additionalProperties: true },
-  },
-  required: ['operation', 'input'],
-  additionalProperties: false,
-};
-const engineeringOperations = [
-  'work-item',
-  'review',
-  'exceptional-intervention',
-  'profiles',
-  'prepare',
-  'record',
-  'publish-gate',
-  'gate',
-  'finish',
-  'settle-control',
-  'finalize',
-  'handoff',
-  'decide',
-  'handoff-apply',
-  'workboard-query',
-];
-const engineeringSchema = {
-  type: 'object',
-  properties: {
-    operation: { type: 'string', enum: engineeringOperations },
-    input: {
-      type: 'object',
-      additionalProperties: true,
-      properties: {
-        reviewKey: {
-          type: 'string',
-          description:
-            'Stable review key. Reuse the returned reviewKey, not the full idempotencyKey or its review- prefix. Missing binding is not a reason for a new key.',
-        },
-        boardId: { type: 'string', description: 'Native repository board ID, not a project UUID.' },
-        id: {
-          type: 'string',
-          description: 'Target Workboard card UUID. For record, the original prepared Work item.',
-        },
-        agentId: { type: 'string', description: 'Manager ID for workboard-query.' },
-        tenant: {
-          type: 'string',
-          description: 'Feature UUID to list its child cards; omit to include the Feature itself.',
-        },
-        includeArchived: {
-          type: 'boolean',
-          description:
-            'Required for workboard-query. Include archived evidence for reconciliation.',
-        },
-        view: {
-          type: 'string',
-          enum: ['queue', 'todoUndelegated', 'delegated', 'attention'],
-          description:
-            'Optional query filter. Omit for all scoped records; there is no native view.',
-        },
-        after: { type: 'string', description: 'Returned nextAfter pagination cursor only.' },
-        membership: {
-          type: 'string',
-          description: 'Returned opaque membership token, only with after. Not a Feature ID.',
-        },
-        runId: { type: 'string', description: 'Actual sessions_spawn runId for record.' },
-        childSessionKey: {
-          type: 'string',
-          description: 'Actual accepted worker session key for record.',
-        },
-        taskId: {
-          type: 'string',
-          description: 'Native ACP task UUID; optional when uniquely discoverable.',
-        },
-        wrapperTaskId: {
-          type: 'string',
-          description: 'Native wrapper task UUID, distinct from the ACP task.',
-        },
-      },
+    project: {
+      type: 'string',
+      description: 'Project id. Implied in a task session or a project chat.',
+    },
+    task: { type: 'integer', description: 'Task number. Implied in a task session.' },
+    name: { type: 'string', description: 'create_project/update_project: project name.' },
+    context: {
+      type: 'string',
+      description:
+        'create_project/update_project: durable project facts (repositories, conventions).',
+    },
+    state: {
+      type: 'string',
+      enum: ['active', 'paused', 'archived'],
+      description: 'update_project.',
+    },
+    use_this_chat: {
+      type: 'boolean',
+      description:
+        'update_project: send this project’s messages to the chat you are talking in now.',
+    },
+    title: { type: 'string', description: 'add_task: short title.' },
+    body: { type: 'string', description: 'add_task: what is wanted, in plain words.' },
+    holder: {
+      type: 'string',
+      enum: ['product', 'engineering', 'user'],
+      description:
+        'Whose turn it is. add_task (default engineering) or update_task (handover; needs a note).',
+    },
+    note: {
+      type: 'string',
+      description:
+        'update_task: progress, result, question or answer. Required when handing over or closing.',
+    },
+    status: {
+      type: 'string',
+      enum: ['open', 'done', 'cancelled'],
+      description: 'update_task: close (done/cancelled) or reopen (open, product).',
+    },
+    message: {
+      type: 'string',
+      description:
+        'update_task/notify: text for the user, sent to the project chat. Required outside that chat when handing to the user or closing a product task.',
+    },
+    check_in_minutes: {
+      type: 'integer',
+      description: 'update_task: when the holder should be woken to look again (default 60).',
     },
   },
-  required: ['operation'],
-  additionalProperties: false,
 };
-export const isCompletionMutation = (event) =>
-  event.toolName === 'workboard_complete' ||
-  (['workboard_move', 'workboard_release'].includes(event.toolName) &&
-    event.params?.status === 'done');
+
+export const OUTPUT_LIMIT = 16 * 1024;
+const bound = (value) => {
+  const encoded = JSON.stringify(value ?? null);
+  return Buffer.byteLength(encoded) <= OUTPUT_LIMIT
+    ? encoded
+    : JSON.stringify({
+        truncated: true,
+        partial: encoded.slice(0, OUTPUT_LIMIT - 200),
+        hint: 'Ask for one project or task.',
+      });
+};
+
+// Test-only injection points. Production leaves every field null.
+export const testHooks = { bridge: null, now: null, manualTicks: false, runtime: null };
+
 export default {
   id: 'jarvis-gilfoyle',
-  name: 'Jarvis-Gilfoyle project runtime',
+  name: 'Jarvis-Gilfoyle project board',
   register(api) {
     const cfg = api.pluginConfig ?? {};
     configureTopology({
@@ -143,455 +109,244 @@ export default {
       engineeringAgentId: cfg.engineeringAgentId,
       workerAgentId: cfg.worker?.agentId,
       workerRuntime: cfg.worker?.runtime,
-      workerLimit: cfg.worker?.limit ?? 2,
+      workerLimit: cfg.worker?.limit,
       workerProfiles: cfg.worker?.profiles,
       sessionNamespace: cfg.sessionNamespace,
     });
-    const configured = topology();
-    let store, runtime, timer;
-    const bridge = new Bridge();
+    const bridge = testHooks.bridge ?? new Bridge();
+    let runtime, timer, openError;
+    // The board opens lazily; a failure is reported by the tool and health and never
+    // affects other agents. It is retried after a minute.
     const get = () => {
-      if (!runtime) {
+      if (runtime) return runtime;
+      if (openError && Date.now() - openError.at < 60 * 1000) throw new Error(openError.message);
+      try {
         assert(
           typeof cfg.statePath === 'string' &&
             (cfg.statePath.startsWith('/') || cfg.statePath === ':memory:'),
-          'Absolute statePath is required',
+          'An absolute statePath is required',
         );
-        store = new Store(cfg.statePath);
-        runtime = new ProjectRuntime(store, (method, params) => bridge.request(method, params), {
-          fallbackDestinations: cfg.fallbackDestinations ?? {},
-          log: (message) => api.logger.warn(message),
+        const store = new Store(cfg.statePath, testHooks.now ? { now: testHooks.now } : {});
+        runtime = new BoardRuntime(store, (method, params) => bridge.request(method, params), {
+          ownerChat: cfg.ownerChat ?? null,
+          log: (message) => api.logger?.warn?.(message),
+          turnTimeoutSeconds: cfg.turnTimeoutSeconds ?? 1800,
+          maxWakesPerRole: cfg.maxWakesPerRole ?? 2,
+          agentName: (role) => agentLabel(currentConfig(api), agentForRole(role)),
+          ...(testHooks.now ? { now: testHooks.now } : {}),
         });
-        runtime.stopped = cfg.enabled === false;
+      } catch (error) {
+        openError = {
+          at: Date.now(),
+          message: `Project board unavailable (${String(error?.message ?? error)
+            .split('\n')[0]
+            .slice(0, 300)}); the operator must fix the jarvis-gilfoyle statePath.`,
+        };
+        api.logger?.warn?.(openError.message);
+        throw new Error(openError.message);
       }
+      openError = null;
+      runtime.stopped = cfg.enabled === false;
+      if (testHooks.manualTicks) runtime.requestTick = () => {};
+      testHooks.runtime = runtime;
       return runtime;
     };
-    api.registerTool(
-      (ctx) => {
-        if (!isManagerAgent(ctx.agentId)) return null;
-        return {
-          name: 'jarvis_project',
-          label: 'Project conversations',
-          description:
-            'Durable project identity, current preferred conversations, contextual summaries, explicit intake, lifecycle, schedules, and receipt-backed notifications. Use current to obtain trusted source. Discussion is not implementation. Declare only on explicit user declaration. Move only on explicit intent. Intake replies naturally once in the receiving chat after durable success. Never use sessions_send into user chats.',
-          parameters: inputSchema,
-          async execute(_id, args) {
-            const result = await get().operation(args.operation, args.input, ctx);
-            return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
-          },
+    const agentOf = (ctx) => ctx?.agentId ?? /^agent:([^:]+):/.exec(ctx?.sessionKey ?? '')?.[1];
+    // Hooks run for every agent: they return at once unless a manager is involved, and a
+    // failure is logged and ignored so no hook can block unrelated work.
+    const on = (name, fn) =>
+      api.on(name, (event, ctx) => {
+        const failed = (error) => {
+          api.logger?.warn?.(
+            `jarvis-gilfoyle ${name} hook skipped: ${String(error?.message ?? error).slice(0, 300)}`,
+          );
+          return undefined;
         };
-      },
-      { name: 'jarvis_project' },
-    );
+        try {
+          const value = fn(event, ctx);
+          return value && typeof value.then === 'function' ? value.catch(failed) : value;
+        } catch (error) {
+          return failed(error);
+        }
+      });
+
     api.registerTool(
       (ctx) => {
         if (!isManagerAgent(ctx.agentId)) return null;
         return {
-          name: 'gilfoyle_engineering',
-          label: 'Project engineering records',
+          name: 'project_board',
+          label: 'Project board',
           description:
-            'Validated Workboard creation, worker binding, handoffs, evidence queries, publication gates, and generic settled-outcome finalization. Available only inside a registered project context. It performs bookkeeping and validation; it never spawns workers, sends user messages, pushes, creates pull requests, merges, or deploys.',
-          parameters: engineeringSchema,
-          async execute(_id, args) {
-            const r = get(),
-              exchange = isProjectSession(ctx.sessionKey)
-                ? r.store.get('SELECT * FROM exchanges WHERE session=?', ctx.sessionKey)
-                : null;
-            const fail = (value) => ({
-              content: [{ type: 'text', text: JSON.stringify(value) }],
-              details: value,
-              isError: true,
-            });
+            'The shared project board: projects, tasks with whose turn it is (holder), notes, and guaranteed messages to the project chat. Load the project-coordination skill for how to use it.',
+          parameters,
+          async execute(_id, args = {}) {
+            const { operation, ...input } = args;
             try {
-              const operation = args.operation,
-                input = args.input ?? {};
-              const readOnly = ['profiles', 'workboard-query'].includes(operation);
-              assert(exchange || readOnly, 'Registered project context required for mutations');
-              assert(!Object.hasOwn(input, 'actor'), 'Actor is supplied by the runtime');
-              assert(
-                ctx.agentId !== configured.productAgentId || operation === 'decide' || readOnly,
-                'Engineering operations belong to the engineering manager; the product agent owns communication and decisions',
-              );
-              let repository = null;
-              let registryProject = exchange?.project ?? null;
-              if (input.boardId) {
-                const matches = r.store
-                  .list()
-                  .flatMap((project) =>
-                    project.boards
-                      .filter((board) => board.id === input.boardId)
-                      .map((board) => ({ project, board })),
-                  );
-                assert.equal(matches.length, 1, 'Board is not uniquely registered');
-                const { project, board } = matches[0];
-                assert(
-                  !exchange || project.id === exchange.project,
-                  'Board belongs to another project',
-                );
-                registryProject = project.id;
-                repository = board.metadata;
-              }
-              let calls = 0,
-                bytes = 0;
-              const rpc = async (method, params) => {
-                assert(++calls <= 64, 'Engineering operation call budget exceeded');
-                const value = await bridge.request(method, params);
-                bytes += Buffer.byteLength(JSON.stringify(value));
-                assert(bytes <= 24 * 1024 * 1024, 'Engineering operation read budget exceeded');
-                return value;
-              };
-              let result;
-              const registry = exchange
-                ? {
-                    store: r.store,
-                    project: registryProject,
-                    repository,
-                  }
-                : registryProject
-                  ? { store: r.store, project: registryProject, repository }
-                  : null;
-              if (!readOnly) {
-                assertEngineeringMutationScope(
-                  r.store,
-                  exchange,
-                  registryProject,
-                  operation,
-                  input,
-                );
-              }
-              if (['work-item', 'review', 'exceptional-intervention'].includes(operation))
-                result = await createProductCard(operation, input, rpc, registry);
-              else if (operation === 'profiles') result = { profiles: workerProfiles() };
-              else if (
-                ['prepare', 'record', 'publish-gate', 'gate', 'finish', 'settle-control'].includes(
-                  operation,
-                )
-              )
-                result = await operate(operation, input, rpc, undefined, undefined, registry);
-              else if (operation === 'finalize')
-                result = await finalizeFeature(input, rpc, undefined, registry);
-              else if (operation === 'decide')
-                result = await handoffCard(
-                  'handoff-decision',
-                  { ...input, actor: ctx.sessionKey },
-                  rpc,
-                  registry,
-                );
-              else if (['handoff', 'handoff-apply'].includes(operation))
-                result = await handoffCard(
-                  operation,
-                  { ...input, actor: ctx.sessionKey },
-                  rpc,
-                  registry,
-                );
-              else if (operation === 'workboard-query') {
-                assert(registryProject, 'Registered board required for registry-backed queries');
-                result = await readView(input, rpc, r.store.records(registryProject));
-              } else throw Error('Unsupported engineering operation');
-              if (result?.communicationIntent) r.requestTick();
-              assert(
-                Buffer.byteLength(JSON.stringify(result)) <= 12000,
-                'Engineering operation output exceeds bound',
-              );
-              return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+              const result = await get().operation(operation, input, ctx);
+              return { content: [{ type: 'text', text: bound(result) }], details: result };
             } catch (error) {
-              const operation = args.operation;
-              if (['work-item', 'review', 'exceptional-intervention'].includes(operation))
-                return fail(creationError(error));
-              if (['prepare', 'record'].includes(operation)) return fail(delegationError(error));
-              if (operation.startsWith('handoff')) return fail(handoffError(error));
-              if (
-                operation === 'workboard-query' &&
-                /^(Expected query object|Unknown query field|Invalid (manager|boardId|tenant|view|after|membership)|Explicit (scope|includeArchived) required|Continuation requires after and membership together)$/.test(
-                  error.message ?? '',
-                )
-              )
-                return fail({
-                  complete: false,
-                  code: 'invalid-query',
-                  error: error.message,
-                  guidance:
-                    'Use boardId and includeArchived. Omit view for all records. Use tenant for a Feature UUID; after/membership are returned pagination tokens.',
-                });
-              return fail({
-                complete: false,
-                code: 'validation-failed',
-                error:
-                  error instanceof assert.AssertionError
-                    ? String(error.message).split('\n')[0].slice(0, 500)
-                    : 'Operation failed; inspect the scoped records and runtime health.',
+              const value = {
+                ok: false,
                 operation,
-                recordId: args.input?.id ?? args.input?.featureId,
-              });
+                error:
+                  String(error?.message ?? error)
+                    .split('\n')[0]
+                    .slice(0, 1000) || 'Operation failed',
+              };
+              return {
+                content: [{ type: 'text', text: JSON.stringify(value) }],
+                details: value,
+                isError: true,
+              };
             }
           },
         };
       },
-      { name: 'gilfoyle_engineering' },
+      { name: 'project_board' },
     );
+
     api.registerGatewayMethod(
-      'jarvis-gilfoyle.projects.call',
+      'jarvis-gilfoyle.board.call',
       async ({ params, respond }) => {
         try {
-          const result = await get().operation(params.operation, params.input ?? {}, {
-            operator: true,
-            agentId: params.agentId ?? configured.productAgentId,
-            sessionKey: params.sessionKey ?? `agent:${configured.productAgentId}:main`,
-          });
-          respond(true, result);
-        } catch (e) {
-          respond(false, undefined, { code: 'INVALID_REQUEST', message: e.message });
+          const agentId = params.agentId ?? topology().productAgentId;
+          respond(
+            true,
+            await get().operation(params.operation, params.input ?? {}, {
+              agentId,
+              sessionKey: params.sessionKey ?? `agent:${agentId}:operator`,
+            }),
+          );
+        } catch (error) {
+          respond(false, undefined, { code: 'INVALID_REQUEST', message: error.message });
         }
       },
       { scope: 'operator.admin' },
     );
     api.registerGatewayMethod(
-      'jarvis-gilfoyle.projects.guard',
-      async ({ params, respond }) => {
-        try {
-          const r = get(),
-            p = r.store.project(params.projectId),
-            feature = r.store.feature(params.featureId);
-          assert.equal(feature.project, p.id);
-          respond(true, {
-            active: p.state === 'active' && !r.store.pendingStop(feature.id),
-            state: p.state,
-            stopped: Boolean(r.store.pendingStop(feature.id)),
-          });
-        } catch {
-          respond(false, undefined, {
-            code: 'INVALID_REQUEST',
-            message: 'Project identity unavailable',
-          });
-        }
-      },
-      { scope: 'operator.read' },
-    );
-    api.registerGatewayMethod(
-      'jarvis-gilfoyle.projects.tick',
+      'jarvis-gilfoyle.board.tick',
       async ({ respond }) => {
         try {
           respond(true, await get().tick());
-        } catch {
-          respond(false, undefined, { code: 'UNAVAILABLE', message: 'Project scan incomplete' });
+        } catch (error) {
+          respond(false, undefined, {
+            code: 'UNAVAILABLE',
+            message: String(error?.message ?? error),
+          });
         }
       },
       { scope: 'operator.admin' },
     );
     api.registerGatewayMethod(
-      'jarvis-gilfoyle.projects.health',
+      'jarvis-gilfoyle.board.health',
       async ({ respond }) => {
         try {
           const r = get();
-          const native = await bridge.request('workboard.boards.list', {});
           respond(true, {
             enabled: !r.stopped,
             registry: r.store.get('PRAGMA quick_check').quick_check,
-            nativeReachable: Array.isArray(native.boards),
-            ...r.health,
+            ...r.healthReport(),
           });
-        } catch {
-          respond(false, undefined, {
-            code: 'UNAVAILABLE',
-            message: 'Project registry or companion unavailable',
+        } catch (error) {
+          respond(true, {
+            enabled: cfg.enabled !== false,
+            registry: 'unavailable',
+            error: error.message,
           });
         }
       },
       { scope: 'operator.read' },
     );
-    api.on('message_received', async (event, ctx) => {
-      const session = ctx.sessionKey ?? event.sessionKey,
-        agentId = /^agent:([^:]+):/.exec(session ?? '')?.[1];
-      if (!isManagerAgent(agentId)) return;
-      const r = get(),
-        clean = (s) => {
-          let v = String(s ?? '');
-          if (v.startsWith(`${ctx.channelId}:`)) v = v.slice(ctx.channelId.length + 1);
-          if (ctx.channelId === 'discord') v = v.replace(/^(channel|user):/, '');
-          return v.replace(/:topic:.+$/, '');
-        };
-      const routes = await r
-        .conversations(agentId, clean(ctx.conversationId ?? event.from))
-        .catch(() => []);
-      const matches = routes.filter(
-        (c) =>
-          c.channel === ctx.channelId &&
-          c.accountId === (ctx.accountId ?? 'default') &&
-          clean(c.target) === clean(ctx.conversationId ?? event.from) &&
-          String(c.threadId ?? '') === String(event.threadId ?? ''),
-      );
-      {
-        const source = {
-          ...(matches.length === 1 ? { route: matches[0] } : {}),
-          raw: {
-            channel: ctx.channelId,
-            accountId: ctx.accountId ?? 'default',
-            conversationId: ctx.conversationId ?? event.from,
-            threadId: event.threadId,
-          },
-          messageId: ctx.messageId ?? event.messageId,
-          senderId: ctx.senderId ?? event.senderId,
-          replyTo: ctx.replyToId ?? event.replyToId,
-          runId: ctx.runId ?? event.runId,
-          sessionKey: session,
-          sourceToken: randomUUID(),
-        };
-        r.store.source(session, source);
-        r.store.source(`token:${source.sourceToken}`, source);
-        if (source.runId) r.store.source(`run:${source.runId}`, source);
-      }
+
+    on('message_received', (event, ctx) => {
+      const sessionKey = ctx?.sessionKey ?? event?.sessionKey;
+      const agentId = agentOf({ agentId: ctx?.agentId, sessionKey });
+      if (!isManagerAgent(agentId) || isPrivateSession(sessionKey)) return;
+      return get().captureInbound(sessionKey, agentId, {
+        channel: ctx.channelId,
+        accountId: ctx.accountId ?? 'default',
+        conversationId: ctx.conversationId ?? event.from,
+        threadId: event.threadId,
+      });
     });
-    api.on('before_prompt_build', async (_event, ctx) => {
-      if (!isManagerAgent(ctx.agentId)) return;
-      const roleContext = projectRoleContext(api.config, ctx.agentId);
-      const r = get(),
-        internal = isProjectSession(ctx.sessionKey);
-      if (internal)
+    on('before_prompt_build', async (_event, ctx) => {
+      const agentId = agentOf(ctx);
+      if (!isManagerAgent(agentId)) return;
+      const role = projectRoleContext(currentConfig(api), agentId);
+      let r;
+      try {
+        r = get();
+      } catch {
+        return { prependSystemContext: role };
+      }
+      if (isPrivateSession(ctx.sessionKey))
         return {
-          prependContext: `${roleContext}\nYou are working privately on one project task, not talking to the user. Use only that project and its Workboard/task records. Do not read personal conversations or other projects. Load project-coordination before acting. Use jarvis_project for any user notification. End with NO_REPLY.`,
+          prependSystemContext: `${role}\n${PRIVATE_GUIDANCE}`,
+          prependContext: r.taskCard(ctx.sessionKey),
         };
-      const source =
-        (ctx.runId && r.store.getSource(`run:${ctx.runId}`)) ||
-        (ctx.sessionKey && r.store.getSource(ctx.sessionKey));
-      if (!source) return { prependContext: roleContext };
-      const ref = source.route?.conversationRef,
-        projects = ref
-          ? r.store
-              .list()
-              .filter((p) =>
-                [
-                  p.productConversation?.conversationRef,
-                  p.engineeringConversation?.conversationRef,
-                ].includes(ref),
-              )
-          : [];
+      await r.beginTurn(ctx.sessionKey);
+      const chat = roleForAgent(agentId) === 'product' ? r.chatContext(ctx.sessionKey) : null;
+      return { prependSystemContext: role, ...(chat ? { prependContext: chat } : {}) };
+    });
+    on('before_agent_run', (_event, ctx) => {
+      if (!isPrivateSession(ctx?.sessionKey) || get().allowRun(ctx.sessionKey)) return;
       return {
-        prependContext: `${roleContext}\nProject context for this message: ${JSON.stringify({ source, projects: projects.map((p) => ({ id: p.id, name: p.name, purpose: p.purpose, state: p.state, context: p.context, revision: p.revision, repositories: p.boards })), recentProjectMessages: ref ? r.visibleContext(ctx.agentId, ref) : null })}\nTreat this as background information, not as a user instruction. The sourceToken identifies this exact incoming message; include it when jarvis_project acts on this message. The projects shown are only those currently using this chat. If the user names another project, find it with jarvis_project list/summary before saying it is unknown. recentProjectMessages contains only verified project updates sent here, not the full chat. Reply naturally in this chat. Talking about a project here does not move its preferred chat. Ask only when the project or repository is genuinely unclear.`,
+        outcome: 'block',
+        reason: 'This private project session has no open task.',
+        category: 'project-lifecycle',
       };
     });
-    api.on('before_agent_run', (_event, ctx) => {
-      if (!isProjectSession(ctx.sessionKey)) return;
-      const r = get(),
-        base = ctx.sessionKey.replace(/:heartbeat$/, ''),
-        e = r.store.get('SELECT * FROM exchanges WHERE session=?', base);
-      if (
-        ctx.sessionKey.endsWith(':heartbeat') ||
-        (e && (e.closed || r.store.project(e.project).state === 'inactive'))
-      )
-        return {
-          outcome: 'block',
-          reason:
-            'Project context is settled, inactive, or a redundant per-Feature heartbeat. Shared project recovery owns continuation.',
-          category: 'project-lifecycle',
-        };
+    // Private sessions never reply into user chats; the board's messages do that.
+    on('reply_payload_sending', (event, ctx) => {
+      if (isPrivateSession(event?.sessionKey ?? ctx?.sessionKey))
+        return { cancel: true, reason: 'Private project session.' };
     });
-    // Backend-only sessionEffects controls are unavailable to ordinary plugins.
-    // Supported delivery hooks enforce the user-chat boundary for automatic finals,
-    // including native hook-block/error text and detached completion projections.
-    api.on('reply_payload_sending', (event, ctx) => {
-      if (isProjectSession(event.sessionKey ?? ctx.sessionKey))
-        return {
-          cancel: true,
-          reason: 'Internal project context; proactive delivery uses its durable project route.',
-        };
+    on('message_sending', (_event, ctx) => {
+      if (isPrivateSession(ctx?.sessionKey))
+        return { cancel: true, cancelReason: 'Private project session.' };
     });
-    api.on('message_sending', (_event, ctx) => {
-      if (isProjectSession(ctx.sessionKey))
-        return {
-          cancel: true,
-          cancelReason: 'Internal project context; use receipt-backed project notification.',
-        };
+    on('before_tool_call', (event, ctx) => {
+      if (!isManagerAgent(agentOf(ctx)) || !isPrivateSession(ctx?.sessionKey)) return;
+      return get().beforeToolCall(event, ctx);
     });
-    api.on('before_tool_call', async (event, ctx) => {
-      const r = get(),
-        exchange = r.store.get(
-          'SELECT project FROM exchanges WHERE session=?',
-          ctx.sessionKey ?? '',
-        );
-      const completesCard = isCompletionMutation(event);
-      if (completesCard) {
+    on('after_tool_call', (event, ctx) => {
+      if (event?.toolName !== 'sessions_spawn' || !isPrivateSession(ctx?.sessionKey)) return;
+      let details = event.result?.details;
+      if (!details?.childSessionKey)
         try {
-          const matches = r.store
-            .list()
-            .filter((project) =>
-              r.store.records(project.id).obligations.some((row) => row.card === event.params?.id),
-            );
-          if (!matches.length) return;
-          assert.equal(matches.length, 1, 'Registered card project is ambiguous');
-          const project = matches[0];
-          if (exchange)
-            assert.equal(
-              exchange.project,
-              project.id,
-              'Registered card belongs to another project',
-            );
-          const cards = await r.cards(project);
-          await validateRegisteredCompletion(r.store, project, cards, event.params?.id, r.rpc);
-        } catch (error) {
-          return {
-            block: true,
-            blockReason:
-              error instanceof assert.AssertionError
-                ? String(error.message).split('\n')[0].slice(0, 300)
-                : 'Execution evidence is not reconciled; inspect the existing card and native tasks before completion.',
-          };
+          details = JSON.parse(event.result?.content?.[0]?.text ?? 'null');
+        } catch {
+          details = null;
         }
-      }
-      if (
-        exchange &&
-        r.store.project(exchange.project).state === 'inactive' &&
-        ['sessions_spawn', 'sessions_send'].includes(event.toolName)
-      )
-        return {
-          block: true,
-          blockReason: 'Project is inactive; its pending obligations are deliberately paused.',
-        };
-      if (event.toolName === 'sessions_send' && isProjectSession(ctx.sessionKey)) {
-        const target = r.store.get(
-          'SELECT project,scope,closed FROM exchanges WHERE session=?',
-          event.params?.sessionKey ?? '',
-        );
-        const source = r.store.get(
-          'SELECT project,scope FROM exchanges WHERE session=?',
-          ctx.sessionKey,
-        );
-        if (
-          target &&
-          source &&
-          target.project === source.project &&
-          target.scope === source.scope &&
-          !target.closed
-        )
-          return;
-        return {
-          block: true,
-          blockReason:
-            'Project continuations use durable records and jarvis_project; do not insert hidden exchanges into a user or canonical product conversation.',
-        };
-      }
+      if (details?.childSessionKey) get().recordWorker(ctx.sessionKey, details.childSessionKey);
     });
-    api.on('agent_end', async (_event, ctx) => {
-      if (isProjectSession(ctx.sessionKey) || ctx.agentId === configured.workerAgentId)
-        get().requestTick();
+    on('agent_end', (_event, ctx) => {
+      if (!isManagerAgent(agentOf(ctx))) return;
+      const r = get();
+      r.endTurn(ctx.sessionKey);
+      if (isPrivateSession(ctx.sessionKey)) r.requestTick();
     });
-    api.on('after_tool_call', (event, ctx) => {
-      if (event.toolName === 'sessions_spawn' && isProjectSession(ctx.sessionKey))
-        get().requestTick();
-    });
+
     api.registerService({
-      id: 'jarvis-gilfoyle-project-recovery',
+      id: 'jarvis-gilfoyle-board',
       start: async () => {
         bridge.stopped = false;
-        const r = get();
-        r.stopped = cfg.enabled === false;
-        if (cfg.enabled !== false) {
-          timer = setInterval(
-            () => r.tick().catch(() => api.logger.warn('Project recovery scan incomplete')),
-            cfg.scanMs ?? 60000,
+        if (cfg.enabled === false) return;
+        const scan = () => {
+          let r;
+          try {
+            r = get();
+          } catch {
+            return;
+          }
+          r.stopped = false;
+          r.tick().catch((error) =>
+            api.logger?.warn?.(`Project scan incomplete: ${error?.message ?? error}`),
           );
-          timer.unref();
-          r.requestTick();
-        }
+        };
+        timer = setInterval(scan, cfg.scanMs ?? 60000);
+        timer.unref?.();
+        scan();
       },
       stop: async () => {
         if (timer) clearInterval(timer);

@@ -1,7 +1,7 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "4.1.0",
-  "description": "Role-configurable product and engineering project coordination for OpenClaw",
+  "version": "6.0.0",
+  "description": "A small SQLite project board for a product and an engineering manager agent on OpenClaw",
   "license": "UNLICENSED",
   "type": "module",
   "main": "./dist/index.js",

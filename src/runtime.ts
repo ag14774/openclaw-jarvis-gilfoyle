@@ -1,1728 +1,1027 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
-import { conversation, hash, text } from './store.js';
-import { createFeatureCard, ensureNativeCard } from './helpers/create-card.js';
-import { pageCards, readView } from './helpers/workboard-page.js';
-import { amendFeature } from './helpers/amend-feature.js';
-import { reconcileExecutionBindings } from './helpers/execution-bindings.js';
-import { projectAnsweredDecision, scopedDecision } from './helpers/handoff-card.js';
-import { topology, isProjectSessionKey, roleForAgent, agentForRole } from './topology.js';
+import {
+  agentForRole,
+  isManagerAgent,
+  isPrivateSession,
+  parseTaskSession,
+  roleForAgent,
+  taskScope,
+  taskSessionKey,
+  topology,
+} from './topology.js';
 
-const terminal = new Set(['completed', 'succeeded', 'failed', 'lost', 'timed_out', 'cancelled']);
-const quiet = new Set([
-  'settled',
-  'decision-wait',
-  'running',
-  'queued',
-  'children-wait',
-  'dependency-wait',
-  'capacity-wait',
-  'publication-wait',
-]);
-const productOperations = new Set([
-  'declare',
-  'context',
-  'priority',
-  'associate',
-  'intake',
-  'amend',
-  'control',
-  'notify',
-  'communication-decision',
-  'milestone-decision',
-  'also-notify',
-  'question-delivery',
-  'answer',
-  'schedule',
-  'schedule-disable',
-  'inactivate',
-  'reactivate',
-]);
-const mainConversationOperations = new Set([
-  'declare',
-  'move',
-  'context',
-  'priority',
-  'associate',
-  'intake',
-  'schedule',
-  'schedule-disable',
-  'inactivate',
-  'reactivate',
-]);
-const sourcePart = (value) =>
-  String(value).replace(/[^A-Za-z0-9._:@+-]+/g, (part) =>
-    encodeURIComponent(part).replace(
-      /[!'()*]/g,
-      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
-    ),
-  );
-export const sourceString = (route) =>
-  `channel=${sourcePart(route.channel)};account=${sourcePart(route.accountId)};recipient=${sourcePart(route.target)};thread=${sourcePart(route.threadId ?? 'none')}`;
-export const isProjectSession = isProjectSessionKey;
-export const orderReady = (requests) =>
-  [...requests].sort(
-    (a, b) =>
-      Number(b.ownsClaim) - Number(a.ownsClaim) ||
-      (b.project.priority ?? 0) - (a.project.priority ?? 0) ||
-      b.priority - a.priority ||
-      a.created - b.created ||
-      a.feature.localeCompare(b.feature),
-  );
+const MINUTE = 60 * 1000;
+export const CHECK_IN_MINUTES = 60;
+export const STALL_WAKES = 3;
+const WAKE_RETRY_MINUTES = 5;
+const WAKE_GRACE_MS = MINUTE;
+const WORKER_GRACE_MS = 2 * MINUTE;
+const STALE_RUN_MS = 6 * 60 * MINUTE;
+const SOURCE_FRESH_MS = 10 * MINUTE;
+const ROUTE_CACHE_MS = 24 * 60 * MINUTE;
+const PREFERRED_ATTEMPTS = 3;
+const FALLBACK_ATTEMPTS = 10;
+const ROLES = ['product', 'engineering'];
+const HOLDERS = ['product', 'engineering', 'user'];
 
-const fallbackDestination = (value) => {
-  assert(value && typeof value === 'object' && !Array.isArray(value));
-  assert(value.kind === 'direct', 'Fallback destination must be direct');
+const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+export function text(value, max, name) {
+  assert(typeof value === 'string', `${name} must be text`);
+  const normalized = value.replace(/\r\n?/g, '\n').trim();
+  assert(normalized, `${name} must not be empty`);
+  assert(normalized.length <= max, `${name} must be at most ${max} characters`);
+  assert(!CONTROL.test(normalized), `${name} must not contain control characters`);
+  return normalized;
+}
+const line = (value, max, name) =>
+  text(typeof value === 'string' ? value.replace(/\s+/g, ' ') : value, max, name);
+const optional = (value, max, name) =>
+  value === undefined || value === null || value === '' ? undefined : text(value, max, name);
+const clip = (value, max) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
+const when = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+const slug = (name) =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/, '') || 'project';
+
+export const conversation = (value) => {
+  assert(
+    value && /^conv_[a-f0-9]{30,64}$/.test(value.conversationRef ?? ''),
+    'Native conversation reference required',
+  );
   return {
-    channel: text(value.channel, 60),
-    accountId: text(value.accountId, 100),
-    to: text(value.to, 240),
-    kind: 'direct',
+    conversationRef: value.conversationRef,
+    channel: String(value.channel ?? ''),
+    accountId: String(value.accountId ?? 'default'),
+    target: String(value.target ?? ''),
+    kind: String(value.kind ?? ''),
     ...(value.threadId ? { threadId: String(value.threadId) } : {}),
   };
 };
+const chatLabel = (route) =>
+  route
+    ? `${route.channel} ${route.kind === 'direct' ? 'DM' : 'chat'} ${route.target}`
+    : 'the owner DM (no project chat bound yet)';
 
-export class ProjectRuntime {
+// A native session row is working when its own turn is live (not a stale leftover) or,
+// for workers, when descendants still run.
+export const rowLive = (row, now) =>
+  row?.hasActiveRun === true && !(now - Number(row.updatedAt) > STALE_RUN_MS);
+const rowBusy = (row, now) => rowLive(row, now) || row?.hasActiveSubagentRun === true;
+
+export class BoardRuntime {
   constructor(
     store,
     rpc,
-    { fallbackDestinations = {}, now = () => Date.now(), log = () => {} } = {},
+    {
+      ownerChat = null,
+      now = () => Date.now(),
+      log = () => {},
+      turnTimeoutSeconds = 1800,
+      maxWakesPerRole = 2,
+      agentName = (role) => role,
+    } = {},
   ) {
     this.store = store;
     this.rpc = rpc;
-    this.fallbackDestinations = Object.fromEntries(
-      Object.entries(fallbackDestinations).map(([managerRole, value]) => [
-        managerRole,
-        fallbackDestination(value),
-      ]),
-    );
+    this.ownerChat = ownerChat;
     this.now = now;
     this.log = log;
-    this.busy = false;
-    this.running = new Set();
-    this.roleAdmission = new Set();
+    this.turnTimeoutSeconds = turnTimeoutSeconds;
+    this.maxWakesPerRole = maxWakesPerRole;
+    this.agentName = agentName;
+    this.sources = new Map(); // session -> newest inbound chat {route, at, used}
+    this.turns = new Map(); // session -> the inbound chat of the running turn
+    this.captures = new Map(); // session -> route resolution still in progress
+    this.routeCache = new Map();
+    this.wakes = new Map(); // session -> dispatch time (until the run shows up as live)
+    this.ownerRouteCache = null;
     this.stopped = false;
-    this.health = { lastScan: null, lastDispatchFailure: null, bindingDiagnostics: [] };
+    this.health = { lastScan: null, lastError: null };
   }
-  async conversations(agentId, query, channel) {
-    const result = await this.rpc('conversations.list', {
-      agentId,
-      ...(query ? { query } : {}),
-      ...(channel ? { channel } : {}),
-      limit: 100,
-    });
-    assert(Array.isArray(result.conversations) && result.conversations.length < 100);
-    return result.conversations;
-  }
-  async fallbackRoute(managerRole) {
-    const destination = this.fallbackDestinations[managerRole];
-    assert(destination, 'Fallback destination is not configured');
-    const matches = (
-      await this.conversations(agentForRole(managerRole), destination.to, destination.channel)
-    ).filter(
-      (route) =>
-        route.channel === destination.channel &&
-        route.accountId === destination.accountId &&
-        route.target === destination.to &&
-        route.kind === destination.kind &&
-        String(route.threadId ?? '') === String(destination.threadId ?? ''),
-    );
-    assert.equal(matches.length, 1, 'Fallback destination is unavailable or ambiguous');
-    return conversation(matches[0]);
-  }
-  async route(agentId, ref) {
-    const matches = (await this.conversations(agentId, ref)).filter(
-      (route) => route.conversationRef === ref,
-    );
-    assert.equal(matches.length, 1, 'Conversation not available for this manager');
-    return conversation(matches[0]);
-  }
-  visibleContext(agentId, ref) {
-    const managerRole = roleForAgent(agentId);
-    assert(managerRole);
+
+  // ---- Who is calling, from where ----------------------------------------------------
+
+  caller(ctx = {}) {
+    const agentId = ctx.agentId ?? /^agent:([^:]+):/.exec(ctx.sessionKey ?? '')?.[1];
+    const role = roleForAgent(agentId);
+    assert(role, 'Only the product and engineering managers use the project board');
+    const scope = parseTaskSession(ctx.sessionKey);
+    let task = null;
+    if (scope) {
+      assert(scope.role === role, 'This private session belongs to the other manager');
+      task = this.store.task(scope.taskId);
+      assert(task.created === scope.created, 'This private session belongs to a removed task');
+    } else assert(!isPrivateSession(ctx.sessionKey), 'This private session has no task');
     return {
-      messages: this.store
-        .all(
-          "SELECT id,text,receipt FROM deliveries WHERE role=? AND status='sent' AND json_extract(route,'$.conversationRef')=? ORDER BY due DESC LIMIT 3",
-          managerRole,
-          ref,
-        )
-        .flatMap((delivery) => {
-          const receipt = JSON.parse(delivery.receipt);
-          return receipt.messageId
-            ? [{ messageId: receipt.messageId, text: delivery.text, deliveryId: delivery.id }]
-            : [];
-        }),
-      coverage:
-        'Verified project deliveries only; native conversation history remains authoritative.',
+      role,
+      task,
+      source: task ? null : (this.turns.get(ctx.sessionKey) ?? null),
     };
   }
-  async current(ctx) {
-    const saved = this.store.getSource(
-      ctx.sourceToken ? `token:${ctx.sourceToken}` : ctx.sessionKey,
-    );
-    if (ctx.sourceToken)
-      assert(saved?.sessionKey === ctx.sessionKey, 'Source token belongs to another conversation');
-    if (saved?.sourceToken)
-      assert.equal(ctx.sourceToken, saved.sourceToken, 'Use the current-turn sourceToken');
-    if (saved?.route)
-      return {
-        route: await this.route(ctx.agentId, saved.route.conversationRef),
-        messageId: saved.messageId,
-        senderId: saved.senderId,
-        replyTo: saved.replyTo,
-        sessionKey: ctx.sessionKey,
-      };
-    const delivery = ctx.deliveryContext ?? {};
-    const channel = delivery.channel ?? ctx.messageChannel ?? saved?.raw?.channel;
-    const target = delivery.to ?? ctx.nativeChannelId ?? saved?.raw?.conversationId;
-    const matches = (await this.conversations(ctx.agentId, target)).filter(
-      (route) =>
-        route.channel === channel &&
-        route.accountId ===
-          (delivery.accountId ?? ctx.agentAccountId ?? saved?.raw?.accountId ?? 'default') &&
-        route.target === target &&
-        String(route.threadId ?? '') === String(delivery.threadId ?? saved?.raw?.threadId ?? ''),
-    );
-    assert.equal(matches.length, 1, 'Current channel route unavailable');
-    return {
-      route: conversation(matches[0]),
-      messageId: saved?.messageId,
-      senderId: ctx.requesterSenderId,
-      sessionKey: ctx.sessionKey,
-    };
-  }
-  async cards(project) {
-    const cards = [];
-    for (const board of project.boards) {
-      const response = await this.rpc('workboard.cards.list', { boardId: board.id });
-      pageCards(response, { boardId: board.id, includeArchived: true });
-      cards.push(...response.cards);
+  scopeProject(caller, id) {
+    if (caller.task) {
+      assert(
+        id === undefined || id === caller.task.project,
+        'A task session works only on its own project',
+      );
+      return this.store.project(caller.task.project);
     }
-    return cards;
+    if (id !== undefined) return this.store.project(id);
+    const live = this.store.projects().filter((project) => project.state !== 'archived');
+    const here = caller.source?.route
+      ? live.filter(
+          (project) => project.route?.conversationRef === caller.source.route.conversationRef,
+        )
+      : [];
+    const candidates = here.length ? here : live;
+    assert(
+      candidates.length === 1,
+      `Pass project: ${live.map((project) => `${project.id} (${project.name})`).join(', ') || 'no projects yet'}`,
+    );
+    return candidates[0];
   }
-  registryContext(projectId, boardId) {
-    const project = this.store.project(projectId);
-    const board = project.boards.find((candidate) => candidate.id === boardId);
-    assert(board, 'Board belongs to another project');
-    return { store: this.store, project: project.id, repository: board.metadata };
+  scopeTask(caller, id) {
+    if (id === undefined && caller.task) return this.store.task(caller.task.id);
+    assert(id !== undefined, 'Pass task (the task number)');
+    const task = this.store.task(id);
+    assert(
+      !caller.task || task.project === caller.task.project,
+      'A task session works only on its own project',
+    );
+    return task;
   }
-  async summary(id) {
-    const project = this.store.project(id);
-    const records = this.store.records(id);
-    const cards = await this.cards(project);
-    const byId = new Map(cards.map((card) => [card.id, card]));
+  // Whether the caller is talking in the chat where this project's messages go (its
+  // project chat, or the owner DM for a project without one).
+  inProjectChat(caller, project) {
+    const here = caller.source?.route?.conversationRef;
+    const there = project.route?.conversationRef ?? this.ownerRouteCache?.route?.conversationRef;
+    return Boolean(here && there && here === there);
+  }
+
+  // ---- Operations --------------------------------------------------------------------
+
+  async operation(operation, input = {}, ctx = {}) {
+    const caller = this.caller(ctx);
+    const handlers = {
+      list: () => this.list(caller, input),
+      show: () => this.show(caller, input),
+      create_project: () => this.createProject(caller, input),
+      update_project: () => this.updateProject(caller, input),
+      add_task: () => this.addTask(caller, input),
+      update_task: () => this.updateTask(caller, input),
+      notify: () => this.notify(caller, input),
+    };
+    assert(handlers[operation], `Unknown operation ${operation}`);
+    return handlers[operation]();
+  }
+
+  taskView(task, detail = false) {
+    return {
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      ...(task.status === 'open' ? { waitingOn: task.holder } : {}),
+      ...(task.stalled ? { stalled: when(task.stalled) } : {}),
+      updated: when(task.updated),
+      ...(detail
+        ? {
+            project: task.project,
+            body: task.body,
+            createdBy: task.created_by,
+            workers: task.workers.map((worker) => worker.key),
+            ...(task.check_at && task.status === 'open'
+              ? { nextCheckIn: when(task.check_at) }
+              : {}),
+          }
+        : {}),
+    };
+  }
+  projectView(project) {
+    const open = this.store.all(
+      "SELECT * FROM tasks WHERE project=? AND status='open' ORDER BY id",
+      project.id,
+    );
+    const closed = this.store.all(
+      "SELECT * FROM tasks WHERE project=? AND status<>'open' ORDER BY updated DESC LIMIT 3",
+      project.id,
+    );
+    const failed = this.store.all(
+      "SELECT id,task,text,error FROM outbox WHERE project=? AND state='failed' ORDER BY id DESC LIMIT 3",
+      project.id,
+    );
     return {
       id: project.id,
       name: project.name,
-      purpose: project.purpose,
-      context: project.context,
       state: project.state,
-      revision: project.revision,
-      priority: project.priority,
-      productConversation: project.productConversation,
-      engineeringConversation: project.engineeringConversation,
-      repositories: project.boards,
-      requests: records.requests.map((request) => ({
-        id: request.id,
-        title: request.title,
-        scope: request.scope,
-        features: records.features
-          .filter((feature) => feature.request === request.id)
-          .map((feature) => feature.id),
-      })),
-      features: records.features.map((feature) => {
-        const card = byId.get(feature.card);
-        return {
-          id: feature.id,
-          cardId: feature.card,
-          requestId: feature.request,
-          boardId: feature.board,
-          scope: feature.scope,
-          scopeRevision: feature.scope_revision,
-          title: card?.title ?? null,
-          status: card?.status ?? 'missing',
-          outcome: card?.metadata?.automation?.summary ?? null,
-          notification:
-            this.store.get(
-              'SELECT id,event,status FROM deliveries WHERE project=? AND event=? AND role=?',
-              id,
-              `result:${feature.id}`,
-              'product',
-            ) ?? null,
-        };
-      }),
-      decisions: records.decisions.filter((decision) => decision.phase !== 'applied'),
-      controls: records.controls.filter((control) => control.state === 'pending'),
-      publications: records.publications,
-      openRecords: records.obligations.flatMap((obligation) => {
-        const card = byId.get(obligation.card);
-        return card && card.status !== 'done'
-          ? [
-              {
-                id: obligation.id,
-                cardId: card.id,
-                title: card.title,
-                owner: card.agentId,
-                status: card.status,
-              },
-            ]
-          : [];
-      }),
-      schedules: this.store.all(
-        'SELECT id,next,intervalMs,enabled FROM schedules WHERE project=?',
-        id,
-      ),
-      pendingNotifications: this.store.all(
-        "SELECT id,event,status FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent')",
-        id,
-      ),
-      bindingDiagnostics: this.health.bindingDiagnostics.filter(
-        (diagnostic) => diagnostic.project === id,
-      ),
+      chat: chatLabel(project.route),
+      open: open.map((row) => this.taskView({ ...row, workers: [] })),
+      recentlyClosed: closed.map((row) => ({ id: row.id, title: row.title, status: row.status })),
+      ...(failed.length
+        ? {
+            undeliveredMessages: failed.map((row) => ({
+              id: row.id,
+              task: row.task,
+              text: clip(row.text, 200),
+              error: row.error,
+            })),
+          }
+        : {}),
     };
   }
-  async inventory(id) {
-    const project = this.store.project(id);
-    const records = this.store.records(id);
-    const cards = new Map((await this.cards(project)).map((card) => [card.id, card]));
-    return {
-      revision: project.revision,
-      obligations: records.obligations.flatMap((obligation) => {
-        const card = cards.get(obligation.card);
-        return !card || card.status !== 'done'
-          ? [
-              {
-                id: `obligation:${obligation.id}`,
-                recordId: obligation.id,
-                cardId: card?.id ?? null,
-                status: card?.status ?? 'projection-pending',
-                feature: obligation.feature,
-              },
-            ]
-          : [];
-      }),
-      controls: records.controls
-        .filter((control) => control.state === 'pending')
-        .map((control) => ({ ...control, recordId: control.id, id: `control:${control.id}` })),
-      notifications: this.store
-        .all(
-          "SELECT id,event,status FROM deliveries WHERE project=? AND kind<>'milestone-batch' AND status NOT IN ('sent','cancelled','fallback-sent')",
-          id,
-        )
-        .map((delivery) => ({
-          ...delivery,
-          recordId: delivery.id,
-          id: `delivery:${delivery.id}`,
+  list(caller, input) {
+    const projects =
+      input.project !== undefined || caller.task
+        ? [this.scopeProject(caller, input.project)]
+        : this.store.projects().filter((project) => project.state !== 'archived');
+    return { projects: projects.map((project) => this.projectView(project)) };
+  }
+  show(caller, input) {
+    if (input.task !== undefined || (caller.task && input.project === undefined)) {
+      const task = this.scopeTask(caller, input.task);
+      return {
+        task: this.taskView(task, true),
+        notes: this.store.notes(task.id).map((note) => ({
+          by: note.author,
+          at: when(note.created),
+          text: note.text,
         })),
-      communicationIntents: this.store
-        .all(
-          "SELECT id,event,scope,kind,status FROM communication_intents WHERE project=? AND status='pending'",
-          id,
-        )
-        .map((intent) => ({
-          ...intent,
-          recordId: intent.id,
-          id: `communication:${intent.id}`,
-        })),
-      schedules: this.store
-        .all('SELECT id,next,intervalMs FROM schedules WHERE project=? AND enabled=1', id)
-        .map((schedule) => ({
-          ...schedule,
-          recordId: schedule.id,
-          id: `schedule:${schedule.id}`,
-        })),
-    };
-  }
-  async hasActiveExecution(project) {
-    const records = this.store.records(project.id);
-    for (const attempt of records.attempts.filter((row) => row.bound)) {
-      const task = (await this.rpc('tasks.get', { taskId: attempt.task_id })).task;
-      if (!task || !terminal.has(task.status)) return true;
-      const sessions = await this.rpc('sessions.list', {
-        agentId: topology().workerAgentId,
-        search: attempt.child_session,
-        archived: 'all',
-        limit: 10,
-      });
-      if (
-        sessions.hasMore ||
-        sessions.sessions.some(
-          (session) => session.key === attempt.child_session && session.hasActiveRun,
-        )
-      )
-        return true;
-    }
-    return false;
-  }
-  async createBoard(id, name) {
-    const response = await this.rpc('workboard.boards.list', {});
-    if (!response.boards.some((board) => board.id === id))
-      await this.rpc('workboard.boards.upsert', { id, name });
-  }
-  async reconcileRegistryProjections(project) {
-    const diagnostics = [];
-    const allowed = (obligation) => {
-      if (project.state !== 'draining') return true;
-      return (
-        this.store.get(
-          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-          project.id,
-          'obligation',
-          obligation,
-        )?.disposition === 'finish'
-      );
-    };
-    for (const feature of this.store.all(
-      'SELECT * FROM features WHERE project=? AND card IS NULL ORDER BY created',
-      project.id,
-    )) {
-      if (!allowed(feature.id)) continue;
-      try {
-        const result = await ensureNativeCard(JSON.parse(feature.creation_payload), this.rpc);
-        this.store.bindFeatureCard(feature.id, result.card.id);
-      } catch (error) {
-        diagnostics.push({
-          type: 'feature-creation',
-          id: feature.id,
-          error: String(error.message),
-        });
-      }
-    }
-    for (const obligation of this.store.all(
-      "SELECT o.* FROM obligations o JOIN features f ON f.id=o.feature WHERE f.project=? AND o.card IS NULL AND o.kind<>'feature' ORDER BY o.created",
-      project.id,
-    )) {
-      if (!allowed(obligation.id)) continue;
-      try {
-        const feature = this.store.feature(obligation.feature);
-        assert(feature.card, 'Feature projection must bind before child obligation');
-        const result = await ensureNativeCard(JSON.parse(obligation.creation_payload), this.rpc);
-        this.store.bindObligationCard(obligation.id, result.card.id);
-      } catch (error) {
-        diagnostics.push({
-          type: 'obligation-creation',
-          id: obligation.id,
-          error: String(error.message),
-        });
-      }
-    }
-    for (const revision of this.store.all(
-      'SELECT r.*,f.board,f.card FROM feature_scope_revisions r JOIN features f ON f.id=r.feature WHERE f.project=? AND r.projected IS NULL AND f.card IS NOT NULL ORDER BY r.created',
-      project.id,
-    )) {
-      if (!allowed(revision.feature)) continue;
-      try {
-        let response = await this.rpc('workboard.cards.list', { boardId: revision.board });
-        let card = response.cards?.find((candidate) => candidate.id === revision.card);
-        assert(card && !card.metadata?.archivedAt, 'Feature scope projection card missing');
-        if (card.notes !== revision.scope) {
-          await this.rpc('workboard.cards.update', {
-            id: card.id,
-            expectedUpdatedAt: card.updatedAt,
-            patch: { notes: revision.scope },
-          });
-          response = await this.rpc('workboard.cards.list', { boardId: revision.board });
-          card = response.cards?.find((candidate) => candidate.id === revision.card);
-          assert.equal(card?.notes, revision.scope, 'Feature scope projection not confirmed');
-        }
-        this.store.markFeatureRevisionProjected(revision.feature, revision.revision);
-      } catch (error) {
-        diagnostics.push({
-          type: 'feature-scope',
-          id: `${revision.feature}:${revision.revision}`,
-          error: String(error.message),
-        });
-      }
-    }
-    this.health.projectionDiagnostics = [
-      ...(this.health.projectionDiagnostics ?? []).filter(
-        (diagnostic) => diagnostic.project !== project.id,
-      ),
-      ...diagnostics.map((diagnostic) => ({ project: project.id, ...diagnostic })),
-    ];
-    return diagnostics;
-  }
-  async intake(project, input, source) {
-    project = this.store.project(project.id);
-    let drainingSchedule = null;
-    if (project.state === 'draining' && source.route?.channel === 'schedule') {
-      const match = /^([0-9a-f-]{36})-[0-9]+$/.exec(String(source.messageId ?? ''));
-      drainingSchedule =
-        match &&
-        this.store.get(
-          'SELECT * FROM inactivation_plans WHERE project=? AND kind=? AND item=? AND disposition=?',
-          project.id,
-          'schedule',
-          match[1],
-          'finish',
-        );
-    }
-    assert(project.state === 'active' || drainingSchedule, 'Project is inactive or draining');
-    assert(source.messageId, 'Actual source message identity required');
-    if (!project.boards.length) {
-      const board = `jg-${project.id}`;
-      await this.createBoard(board, project.name);
-      this.store.attach(project.id, board);
-      project = this.store.project(project.id);
-    }
-    const boards = input.boards ?? (project.boards.length === 1 ? [project.boards[0].id] : []);
-    assert(
-      boards.length > 0 && boards.length <= 8 && new Set(boards).size === boards.length,
-      'Clarify intended repository scope',
-    );
-    const request = this.store.createRequest({
-      project: project.id,
-      source: { route: source.route, messageId: source.messageId },
-      title: input.title,
-      scope: input.scope,
-      requestKey: input.requestKey ?? null,
-    });
-    const features = [];
-    for (const boardId of boards) {
-      const board = project.boards.find((candidate) => candidate.id === boardId);
-      assert(board, 'Repository is not associated with project');
-      const result = await createFeatureCard(
-        { boardId, title: input.title, scope: input.scope },
-        this.rpc,
-        { store: this.store, project: project.id, request: request.id },
-      );
-      features.push(result.featureId);
-      this.store.exchange(project.id, result.featureId, 'engineering');
-    }
-    return {
-      durable: true,
-      requestId: request.id,
-      features,
-      acknowledgementReady: true,
-      engineeringStarted: false,
-      replyInCurrentConversation: true,
-    };
-  }
-  async operation(operation, input, ctx = {}) {
-    const { productAgentId } = topology();
-    ctx = { ...ctx, sourceToken: input.sourceToken };
-    const agentId = ctx.agentId ?? productAgentId;
-    const managerRole = roleForAgent(agentId);
-    assert(managerRole, 'Manager role required');
-    const internal = Boolean(ctx.operator || isProjectSession(ctx.sessionKey));
-    const project = input.projectId ? this.store.project(input.projectId) : null;
-    const exchange =
-      !ctx.operator && isProjectSession(ctx.sessionKey)
-        ? this.store.get('SELECT * FROM exchanges WHERE session=?', ctx.sessionKey)
-        : null;
-    if (!ctx.operator && isProjectSession(ctx.sessionKey))
-      assert(exchange, 'Registered purpose context required');
-    if (exchange && project)
-      assert.equal(project.id, exchange.project, 'Internal context cannot cross projects');
-    if (productOperations.has(operation))
-      assert(agentId === productAgentId, 'This project operation belongs to the product agent');
-    if (exchange && mainConversationOperations.has(operation))
-      throw new Error('Project-wide operation is unavailable inside a Feature context');
-    const assertExchangeScope = (feature) => {
-      const row = this.store.feature(feature);
-      assert.equal(row.project, project.id, 'Feature belongs to another project');
-      const id = row.id;
-      if (exchange)
-        assert.equal(exchange.scope, id, 'Internal context cannot mutate another Feature');
-      return id;
-    };
-    if (operation === 'list')
-      return this.store
-        .list()
-        .filter((candidate) => !exchange || candidate.id === exchange.project)
-        .map((candidate) => ({
-          id: candidate.id,
-          name: candidate.name,
-          purpose: candidate.purpose,
-          state: candidate.state,
-          revision: candidate.revision,
-          repositories: candidate.boards,
-        }));
-    if (operation === 'conversations') return this.conversations(agentId, input.query);
-    if (operation === 'current') return this.current(ctx);
-    if (operation === 'visible-context') return this.visibleContext(agentId, input.conversationRef);
-    if (operation === 'summary') return this.summary(project.id);
-    if (operation === 'inventory') return this.inventory(project.id);
-    if (operation === 'guard')
-      return { active: project.state !== 'inactive', state: project.state };
-    if (operation === 'declare') {
-      assert(
-        agentId === productAgentId && input.explicit === true,
-        'Explicit product declaration required',
-      );
-      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      assert(source.messageId);
-      const route = input.conversationRef
-        ? await this.route(productAgentId, input.conversationRef)
-        : source.route;
-      const created = this.store.declare({
-        key: hash([source.route, source.messageId]),
-        name: input.name,
-        purpose: input.purpose,
-        route,
-        productFallback: route,
-      });
-      return this.summary(created.id);
-    }
-    if (operation === 'move') {
-      assert(input.explicit === true);
-      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      const route = input.conversationRef
-        ? await this.route(agentId, input.conversationRef)
-        : source.route;
-      this.store.move({
-        key: hash([source.route, source.messageId, managerRole]),
-        id: project.id,
-        managerRole,
-        route,
-        revision: input.revision,
-      });
-      return this.summary(project.id);
-    }
-    if (operation === 'context')
-      return this.store.context(project.id, input.context, input.revision);
-    if (operation === 'priority') {
-      assert(Number.isSafeInteger(input.priority) && Math.abs(input.priority) <= 100);
-      this.store.run(
-        'UPDATE projects SET priority=?,revision=revision+1 WHERE id=?',
-        input.priority,
-        project.id,
-      );
-      return this.store.project(project.id);
-    }
-    if (operation === 'associate') {
-      assert(input.explicit === true && input.repository);
-      const existing = project.boards.find(
-        (board) => board.repository === input.repository.repository,
-      );
-      const empty = project.boards.find((board) => !board.repository);
-      const boardId =
-        existing?.id ??
-        empty?.id ??
-        `jg-${hash([project.id, input.repository.repository]).slice(0, 32)}`;
-      await this.createBoard(boardId, `${project.name} repository`);
-      this.store.attach(project.id, boardId, input.repository);
-      return { boardId, project: await this.summary(project.id) };
-    }
-    if (operation === 'intake') {
-      assert(
-        agentId === productAgentId && input.authorized === true,
-        'Explicit work authorization required',
-      );
-      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      const result = await this.intake(project, input, source);
-      this.requestTick();
-      return result;
-    }
-    if (operation === 'amend') {
-      assert(agentId === productAgentId && input.authorized === true);
-      assertExchangeScope(input.featureId ?? input.id);
-      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      assert(source.messageId, 'Actual amendment source required');
-      const result = await amendFeature(
-        {
-          ...input,
-          source: JSON.stringify({ route: source.route, messageId: source.messageId }),
-        },
-        this.rpc,
-        this.registryContext(project.id, input.boardId),
-      );
-      this.requestTick();
-      return result;
-    }
-    if (operation === 'control') {
-      assert(
-        agentId === productAgentId && input.explicit === true,
-        'Explicit control intent required',
-      );
-      assertExchangeScope(input.featureId);
-      const feature = this.store.feature(input.featureId);
-      const card = (await this.cards(project)).find((candidate) => candidate.id === feature.card);
-      assert(card && card.status !== 'done', 'Cannot stop a completed Feature');
-      const result = this.store.control({
-        project: project.id,
-        request: input.requestId ?? null,
-        feature: input.featureId ?? null,
-        kind: 'stop',
-        reason: input.reason,
-      });
-      this.requestTick();
-      return result;
-    }
-    if (operation === 'notify') {
-      assert(internal && agentId === productAgentId);
-      assertExchangeScope(input.featureId);
-      assert(
-        !String(input.event).startsWith('result:'),
-        'Terminal results require communication-decision',
-      );
-      const prior = this.store.get(
-        'SELECT * FROM deliveries WHERE project=? AND event=? AND role=?',
-        project.id,
-        input.event,
-        'product',
-      );
-      const delivery =
-        prior ??
-        this.store.enqueue({
-          project: project.id,
-          event: input.event,
-          kind: input.kind ?? 'milestone',
-          message: text(input.message, 6000),
-          fallbackMessage: input.fallbackMessage,
-          due: this.now() + (input.kind === 'milestone' ? 45000 : 0),
-        });
-      this.requestTick();
-      return {
-        durable: true,
-        id: delivery.id,
-        status: delivery.status,
-        reused: Boolean(prior),
-        receipt: delivery.receipt ? JSON.parse(delivery.receipt) : null,
       };
     }
-    if (operation === 'communication-decision') {
-      assert(internal && agentId === productAgentId && typeof input.notify === 'boolean');
-      const intent = this.store.get(
-        'SELECT * FROM communication_intents WHERE project=? AND event=? AND eligible=1',
-        project.id,
-        input.event,
-      );
-      assert(intent);
-      if (exchange)
-        assert.equal(exchange.scope, intent.scope, 'Communication belongs to another scope');
-      if (intent.kind === 'result')
-        assert(input.notify === true, 'Terminal result communication must be composed');
-      if (intent.status !== 'pending')
-        return {
-          event: intent.event,
-          status: intent.status,
-          deliveryId: this.store.get(
-            'SELECT id FROM deliveries WHERE project=? AND event=? AND role=?',
-            project.id,
-            intent.event,
-            'product',
-          )?.id,
-        };
-      const delivery = input.notify
-        ? this.store.enqueue({
-            project: project.id,
-            event: intent.event,
-            kind: intent.kind,
-            message: text(input.message, 6000),
-            fallbackMessage: input.fallbackMessage,
-          })
-        : null;
-      this.store.run(
-        'UPDATE communication_intents SET status=?,reason=?,updated=? WHERE id=?',
-        input.notify ? 'composed' : 'dismissed',
-        text(input.reason ?? 'Product communication judgment', 1000),
-        this.now(),
-        intent.id,
-      );
-      return {
-        event: intent.event,
-        status: input.notify ? 'composed' : 'dismissed',
-        deliveryId: delivery?.id ?? null,
-      };
-    }
-    if (operation === 'milestone-decision') {
-      assert(internal && agentId === productAgentId && typeof input.notify === 'boolean');
-      assertExchangeScope(input.featureId);
-      assert(
-        !String(input.event).startsWith('result:'),
-        'Terminal results require communication-decision',
-      );
-      const key = `milestone-decision:${project.id}:${text(input.event, 240)}`;
-      return this.store.once(key, { notify: input.notify, reason: input.reason }, () => {
-        const delivery = input.notify
-          ? this.store.enqueue({
-              project: project.id,
-              event: input.event,
-              kind: 'milestone',
-              message: text(input.message, 6000),
-              due: this.now() + 45000,
-            })
-          : null;
-        return {
-          event: input.event,
-          notified: Boolean(delivery),
-          deliveryId: delivery?.id ?? null,
-          reason: text(input.reason ?? 'Product milestone judgment', 1000),
-        };
-      });
-    }
-    if (operation === 'delivery') {
-      const delivery = this.store.get(
-        'SELECT * FROM deliveries WHERE project=? AND id=?',
-        project.id,
-        input.id,
-      );
-      assert(delivery);
-      return {
-        ...delivery,
-        delivered: ['sent', 'fallback-sent'].includes(delivery.status),
-        receipt: delivery.receipt ? JSON.parse(delivery.receipt) : null,
-      };
-    }
-    if (operation === 'also-notify') {
-      assert(input.explicit === true);
-      if (exchange) assertExchangeScope(input.featureId);
-      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      return this.store.copy({
-        project: project.id,
-        event: input.event,
-        managerRole,
-        route: input.conversationRef
-          ? await this.route(agentId, input.conversationRef)
-          : source.route,
-        recurring: input.recurring ?? false,
-      });
-    }
-    if (operation === 'question-delivery') {
-      assert(internal && agentId === productAgentId);
-      const decision = scopedDecision(this.store, project.id, input.checkpoint);
-      assertExchangeScope(decision.feature);
-      assert(['open', 'sent'].includes(decision.phase), 'Open decision required');
-      const existing = decision.question_delivery
-        ? this.store.get(
-            'SELECT * FROM deliveries WHERE id=? AND project=?',
-            decision.question_delivery,
-            project.id,
-          )
-        : null;
-      const delivery =
-        existing ??
-        this.store.enqueue({
-          project: project.id,
-          event: `question:${decision.id}`,
-          kind: 'question',
-          message: text(input.message, 6000),
-          fallbackMessage: input.fallbackMessage,
-        });
-      await this.deliver(delivery);
-      const sent = this.store.get('SELECT * FROM deliveries WHERE id=?', delivery.id);
-      if (['sent', 'fallback-sent'].includes(sent.status))
-        this.store.run(
-          "UPDATE decisions SET phase='sent',question_delivery=?,updated=? WHERE id=?",
-          delivery.id,
-          this.now(),
-          decision.id,
-        );
-      return { checkpoint: decision.id, deliveryId: delivery.id, status: sent.status };
-    }
-    if (operation === 'answer') {
-      assert(agentId === productAgentId && input.correlated === true);
-      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      assert(source.messageId, 'Actual answer message required');
-      const decision = scopedDecision(this.store, project.id, input.checkpoint);
-      assertExchangeScope(decision.feature);
-      assert(['sent', 'answered'].includes(decision.phase), 'Sent decision required');
-      const answer = text(input.answer, 1400);
-      if (decision?.phase === 'answered') {
-        assert.equal(decision.answer, answer, 'Decision answer changed');
-        assert.equal(decision.answer_message, String(source.messageId), 'Answer source changed');
-      } else {
-        assert(decision?.authority === 'user', 'Exact sent user decision required');
-        this.store.run(
-          "UPDATE decisions SET phase='answered',answer=?,answer_message=?,source=?,updated=? WHERE id=?",
-          answer,
-          String(source.messageId),
-          JSON.stringify(source.route),
-          this.now(),
-          decision.id,
-        );
-      }
-      this.requestTick();
-      await projectAnsweredDecision(
-        this.store,
-        project.id,
-        decision.id,
-        this.rpc,
-        input.expectedUpdatedAt,
-      );
-      return this.store.get('SELECT * FROM decisions WHERE id=?', decision.id);
-    }
-    if (operation === 'schedule') {
-      assert(agentId === productAgentId && input.authorized === true && project.state === 'active');
-      const source = ctx.operator && input.source ? input.source : await this.current(ctx);
-      assert(source.messageId, 'Actual schedule source required');
-      const boards = input.boards ?? project.boards.map((board) => board.id);
-      assert(
-        Array.isArray(boards) &&
-          boards.length > 0 &&
-          boards.length <= 8 &&
-          new Set(boards).size === boards.length &&
-          boards.every((id) => project.boards.some((board) => board.id === id)),
-        'Schedule boards must be unique associated repositories',
-      );
-      const spec = {
-        title: text(input.title, 180),
-        scope: text(input.scope, 1400),
-        boards,
-      };
-      return this.store.schedule({
-        project: project.id,
-        spec,
-        next: input.next,
-        intervalMs: input.intervalMs ?? null,
-        sourceKey: hash([source.route, source.messageId]),
-      });
-    }
-    if (operation === 'schedule-disable') {
-      const schedule = this.store.get(
-        'SELECT * FROM schedules WHERE id=? AND project=?',
-        input.id,
-        project.id,
-      );
-      assert(schedule);
-      this.store.run('UPDATE schedules SET enabled=0 WHERE id=?', schedule.id);
-      return { disabled: true };
-    }
-    if (operation === 'inactivate') {
-      assert(agentId === productAgentId && input.confirmed === true);
-      const inventory = await this.inventory(project.id);
-      assert.equal(input.revision, inventory.revision, 'Project changed; show refreshed inventory');
-      const items = [
-        ...inventory.obligations.map((item) => ({ ...item, kind: 'obligation' })),
-        ...inventory.notifications.map((item) => ({ ...item, kind: 'delivery' })),
-        ...inventory.communicationIntents.map((item) => ({ ...item, kind: 'communication' })),
-        ...inventory.controls.map((item) => ({ ...item, kind: 'control' })),
-        ...inventory.schedules.map((item) => ({ ...item, kind: 'schedule' })),
-      ];
-      const dispositions = input.dispositions ?? {};
-      assert.deepEqual(
-        Object.keys(dispositions).sort(),
-        items.map((item) => item.id).sort(),
-        'Every unfinished item needs an explicit disposition',
-      );
-      assert(
-        Object.values(dispositions).every((value) => ['finish', 'stop', 'pending'].includes(value)),
-        'Disposition must be finish, stop, or pending',
-      );
-      for (const item of inventory.notifications.filter((item) => item.status === 'batched')) {
-        const member = this.store.get('SELECT * FROM deliveries WHERE id=?', item.recordId);
-        const leaderId = JSON.parse(member.receipt).batch;
-        const leader = this.store.get('SELECT * FROM deliveries WHERE id=?', leaderId);
-        if (leader.status !== 'pending' || leader.route)
-          assert(
-            inventory.notifications
-              .filter((candidate) => {
-                const row = this.store.get(
-                  'SELECT receipt FROM deliveries WHERE id=?',
-                  candidate.recordId,
-                );
-                return row?.receipt && JSON.parse(row.receipt).batch === leaderId;
-              })
-              .every((candidate) => dispositions[candidate.id] === 'finish'),
-            'In-flight batch members must all finish before inactivation',
-          );
-      }
-      this.store.tx(() => {
-        this.store.run('DELETE FROM inactivation_plans WHERE project=?', project.id);
-        for (const item of items)
-          this.store.run(
-            'INSERT INTO inactivation_plans VALUES(?,?,?,?,?)',
-            project.id,
-            item.recordId,
-            item.kind,
-            dispositions[item.id],
-            this.now(),
-          );
-        for (const item of inventory.obligations.filter(
-          (item) => dispositions[item.id] === 'stop',
-        )) {
-          const obligation = this.store.obligation(item.recordId);
-          if (!this.store.pendingStop(obligation.feature))
-            this.store.control({
-              project: project.id,
-              feature: obligation.feature,
-              reason: 'Explicit stop disposition during project inactivation',
-            });
-        }
-        for (const leader of this.store.all(
-          "SELECT * FROM deliveries WHERE project=? AND kind='milestone-batch' AND status='pending' AND route IS NULL",
-          project.id,
-        )) {
-          const members = this.store.all(
-            "SELECT * FROM deliveries WHERE project=? AND status='batched' AND json_extract(receipt,'$.batch')=?",
-            project.id,
-            leader.id,
-          );
-          if (!members.length) continue;
-          this.store.run("UPDATE deliveries SET status='cancelled' WHERE id=?", leader.id);
-          for (const member of members)
-            this.store.run(
-              'UPDATE deliveries SET status=?,receipt=NULL WHERE id=?',
-              dispositions[`delivery:${member.id}`] === 'stop' ? 'cancelled' : 'pending',
-              member.id,
-            );
-        }
-        for (const item of inventory.notifications.filter(
-          (item) => dispositions[item.id] === 'stop',
-        )) {
-          const delivery = this.store.get('SELECT * FROM deliveries WHERE id=?', item.recordId);
-          if (delivery.status === 'cancelled') continue;
-          assert(
-            delivery.status === 'pending' && !delivery.route,
-            'In-flight delivery must reconcile before stop',
-          );
-          this.store.run("UPDATE deliveries SET status='cancelled' WHERE id=?", item.recordId);
-        }
-        for (const item of inventory.communicationIntents.filter(
-          (item) => dispositions[item.id] === 'stop',
-        ))
-          this.store.run(
-            "UPDATE communication_intents SET status='dismissed',reason=?,updated=? WHERE id=?",
-            'Explicit stop disposition during project inactivation',
-            this.now(),
-            item.recordId,
-          );
-        for (const item of inventory.controls.filter((item) => dispositions[item.id] === 'stop'))
-          this.store.run(
-            "UPDATE control_intents SET state='dismissed',updated=? WHERE id=?",
-            this.now(),
-            item.recordId,
-          );
-        for (const item of inventory.schedules.filter((item) => dispositions[item.id] === 'stop'))
-          this.store.run('UPDATE schedules SET enabled=0 WHERE id=?', item.recordId);
-        this.store.run(
-          "UPDATE projects SET state='draining',revision=revision+1 WHERE id=? AND revision=?",
-          project.id,
-          input.revision,
-        );
-      });
-      const safe = (await this.inactivationReady(this.store.project(project.id))) === true;
-      if (safe)
-        this.store.run(
-          "UPDATE projects SET state='inactive',revision=revision+1 WHERE id=?",
-          project.id,
-        );
-      this.requestTick();
-      return { state: safe ? 'inactive' : 'draining', inventory };
-    }
-    if (operation === 'reactivate') {
-      assert(agentId === productAgentId && input.explicit === true);
-      return this.store.reactivate(project.id, this.now());
-    }
-    if (operation === 'recover') {
-      assert(project.state !== 'inactive');
-      if (ctx.operator)
-        this.store.run(
-          'UPDATE exchanges SET attempts=0,lastDispatch=0 WHERE project=?',
-          project.id,
-        );
-      this.requestTick();
-      return {
-        reconciliationRequested: true,
-        executionRestarted: false,
-        retryBudgetReset: Boolean(ctx.operator),
-      };
-    }
-    if (operation === 'conclude') {
-      assert(internal && exchange);
-      text(input.conclusion, 2000);
-      this.store.run('UPDATE exchanges SET conclusion=? WHERE id=?', input.conclusion, exchange.id);
-      return { durable: true, cleanup: 'after native obligations settle' };
-    }
-    throw new Error('Unknown project operation');
+    const project = this.scopeProject(caller, input.project);
+    return { project: { ...this.projectView(project), context: project.context } };
   }
-  requestTick() {
-    if (!this.stopped)
-      setTimeout(
-        () =>
-          this.tick().catch(() => this.log('Project scan failed; durable obligations retained')),
-        100,
-      ).unref();
-  }
-  async deliver(delivery) {
-    const project = this.store.project(delivery.project);
-    if (
-      project.state === 'inactive' ||
-      ['sent', 'cancelled', 'fallback-sent', 'batched'].includes(delivery.status) ||
-      delivery.due > this.now()
-    )
-      return;
-    let route;
-    try {
-      route =
-        delivery.kind === 'fallback'
-          ? await this.fallbackRoute(delivery.role)
-          : delivery.route
-            ? JSON.parse(delivery.route)
-            : delivery.role === 'product'
-              ? project.productConversation
-              : project.engineeringConversation;
-    } catch {
-      await this.failure(delivery, 'Fallback destination unavailable');
-      return;
-    }
-    assert(route, 'Notification route missing');
-    if (!delivery.route || delivery.kind === 'fallback') {
-      this.store.run(
-        "UPDATE deliveries SET route=?,status='sending' WHERE id=?",
-        JSON.stringify(route),
-        delivery.id,
-      );
-      delivery = this.store.get('SELECT * FROM deliveries WHERE id=?', delivery.id);
-    }
-    try {
-      const receipt = await this.rpc('conversations.send', {
-        agentId: agentForRole(delivery.role),
-        operationId: `jarvis-gilfoyle-${delivery.id}`,
-        conversationRef: route.conversationRef,
-        message: delivery.text,
-      });
-      assert(['sent', 'queued', 'suppressed', 'unknown'].includes(receipt.status));
-      this.store.run(
-        'UPDATE deliveries SET status=?,receipt=?,attempts=attempts+1,error=NULL,due=? WHERE id=?',
-        receipt.status,
-        JSON.stringify(receipt),
-        this.now() + 60000,
-        delivery.id,
-      );
-      if (receipt.status === 'sent')
-        await this.settleBatch({
-          ...delivery,
-          status: 'sent',
-          receipt: JSON.stringify(receipt),
-          route: JSON.stringify(route),
-        });
-      else if (receipt.status === 'suppressed')
-        await this.failure(delivery, 'Preferred conversation rejected delivery');
-    } catch {
-      await this.failure(
-        delivery,
-        'Preferred conversation delivery failed or could not be reconciled',
-      );
-    }
-  }
-  async failure(delivery, error) {
-    const attempts = delivery.attempts + 1;
+  createProject(caller, input) {
+    assert(caller.role === 'product', 'Only the product manager creates projects');
+    const name = line(input.name, 120, 'name');
+    const context = optional(input.context, 8000, 'context') ?? '';
+    const base = slug(name);
+    let id = base;
+    for (let n = 2; this.store.get('SELECT 1 FROM projects WHERE id=?', id); n++)
+      id = `${base}-${n}`;
+    const route = caller.source?.route ?? null;
+    const now = this.now();
     this.store.run(
-      "UPDATE deliveries SET status='retry',attempts=?,error=?,due=? WHERE id=?",
+      'INSERT INTO projects(id,name,context,route,created,updated) VALUES(?,?,?,?,?,?)',
+      id,
+      name,
+      context,
+      route ? JSON.stringify(route) : null,
+      now,
+      now,
+    );
+    return { project: id, name, chat: chatLabel(route) };
+  }
+  updateProject(caller, input) {
+    const project = this.scopeProject(caller, input.project);
+    const fields = ['name', 'context', 'state', 'use_this_chat'].filter(
+      (key) => input[key] !== undefined,
+    );
+    assert(fields.length, 'Pass name, context, state or use_this_chat');
+    assert(
+      caller.role === 'product' || fields.every((key) => key === 'context'),
+      'The engineering manager may only change the project context',
+    );
+    const now = this.now();
+    const changes = {};
+    if (input.name !== undefined) changes.name = line(input.name, 120, 'name');
+    if (input.context !== undefined) changes.context = String(input.context).trim().slice(0, 8000);
+    if (input.use_this_chat) {
+      const route = caller.source?.route;
+      assert(
+        route,
+        'use_this_chat needs a current user message in a chat the plugin can reply to (not a private task session)',
+      );
+      changes.route = JSON.stringify(route);
+    }
+    if (input.state !== undefined) {
+      assert(
+        ['active', 'paused', 'archived'].includes(input.state),
+        'state is active, paused or archived',
+      );
+      if (input.state === 'archived')
+        assert(
+          !this.store.get("SELECT 1 FROM tasks WHERE project=? AND status='open'", project.id),
+          'Close or cancel the open tasks before archiving the project',
+        );
+      changes.state = input.state;
+    }
+    this.store.tx(() => {
+      for (const [key, value] of Object.entries(changes))
+        this.store.run(`UPDATE projects SET ${key}=?,updated=? WHERE id=?`, value, now, project.id);
+      // Resuming a project asks whoever holds each open task to look again.
+      if (changes.state === 'active' && project.state !== 'active')
+        this.store.run(
+          "UPDATE tasks SET poked=?,idle_wakes=0,stalled=NULL WHERE project=? AND status='open' AND holder IN ('product','engineering')",
+          now,
+          project.id,
+        );
+    });
+    const updated = this.store.project(project.id);
+    this.requestTick();
+    return {
+      project: updated.id,
+      name: updated.name,
+      state: updated.state,
+      chat: chatLabel(updated.route),
+    };
+  }
+  addTask(caller, input) {
+    const project = this.scopeProject(caller, input.project);
+    assert(project.state !== 'archived', 'The project is archived');
+    const holder = input.holder ?? 'engineering';
+    assert(ROLES.includes(holder), 'A new task is held by product or engineering');
+    const title = line(input.title, 200, 'title');
+    const body = optional(input.body, 8000, 'body') ?? '';
+    const now = this.now();
+    const id = Number(
+      this.store.run(
+        'INSERT INTO tasks(project,title,body,holder,created_by,poked,check_at,created,updated) VALUES(?,?,?,?,?,?,?,?,?)',
+        project.id,
+        title,
+        body,
+        holder,
+        caller.role,
+        holder === caller.role ? null : now,
+        now + CHECK_IN_MINUTES * MINUTE,
+        now,
+        now,
+      ).lastInsertRowid,
+    );
+    this.requestTick();
+    return { task: id, project: project.id, waitingOn: holder };
+  }
+  async updateTask(caller, input) {
+    const task = this.scopeTask(caller, input.task);
+    const project = this.store.project(task.project);
+    const note = optional(input.note, 4000, 'note');
+    const message = optional(input.message, 4000, 'message');
+    const status = input.status;
+    const holder = input.holder;
+    assert(
+      [note, message, status, holder, input.check_in_minutes].some((value) => value !== undefined),
+      'Pass note, holder, status, message or check_in_minutes',
+    );
+    assert(
+      status === undefined || ['open', 'done', 'cancelled'].includes(status),
+      'status is open, done or cancelled',
+    );
+    assert(
+      holder === undefined || HOLDERS.includes(holder),
+      'holder is product, engineering or user',
+    );
+    const closing = status === 'done' || status === 'cancelled';
+    const reopening = status === 'open' && task.status !== 'open';
+    assert(!(closing && holder), 'Pass either holder or a closing status, not both');
+    if (task.status !== 'open') {
+      assert(
+        reopening,
+        `Task #${task.id} is ${task.status}; the product manager can reopen it with status open`,
+      );
+      assert(caller.role === 'product', 'Only the product manager reopens tasks');
+      assert(project.state !== 'archived', 'The project is archived');
+    }
+    if (closing) {
+      assert(note, 'Closing a task needs a note with the result or the reason');
+      assert(
+        caller.role === 'product' || task.created_by === 'engineering',
+        'Only the product manager closes tasks it created; hand it to product with your result in a note',
+      );
+    }
+    const newHolder = closing ? null : (holder ?? (reopening ? 'engineering' : task.holder));
+    const handover = !closing && newHolder !== task.holder;
+    if (handover) {
+      assert(note, 'Handing a task over needs a note saying what is needed');
+      assert(
+        ROLES.includes(newHolder) || caller.role === 'product',
+        'Only the product manager hands tasks to the user',
+      );
+    }
+    if (message !== undefined)
+      assert(caller.role === 'product', 'Only the product manager messages the user');
+    // Required notifications travel with the change that requires them.
+    const mustTell =
+      (newHolder === 'user' && task.holder !== 'user') ||
+      (closing && task.created_by === 'product');
+    if (mustTell && !message && !this.inProjectChat(caller, project))
+      assert.fail(
+        `${newHolder === 'user' ? 'Handing a task to the user' : 'Closing a user request'} needs message: the text the user receives in ${chatLabel(project.route)}`,
+      );
+    let checkIn;
+    if (input.check_in_minutes !== undefined) {
+      checkIn = Number(input.check_in_minutes);
+      assert(
+        Number.isInteger(checkIn) && checkIn >= 1 && checkIn <= 10080,
+        'check_in_minutes is 1 to 10080',
+      );
+    }
+    if (status === 'done') {
+      const live = await this.liveWorkers(task);
+      assert(
+        !live.length,
+        `Task #${task.id} still has ${live.length} running worker(s); wait for them to finish or cancel the task`,
+      );
+    }
+    const now = this.now();
+    // The holder is asked to look when someone else changed its task.
+    const poke = ROLES.includes(newHolder) && newHolder !== caller.role;
+    const outbox = this.store.tx(() => {
+      if (note) this.store.note(task.id, caller.role, note);
+      this.store.run(
+        `UPDATE tasks SET status=?,holder=?,poked=CASE WHEN ? THEN ? ELSE poked END,check_at=?,
+           idle_wakes=0,stalled=NULL,cleaned=CASE WHEN ? THEN NULL ELSE cleaned END,updated=? WHERE id=?`,
+        closing ? status : 'open',
+        newHolder,
+        poke ? 1 : 0,
+        now,
+        closing ? null : now + (checkIn ?? CHECK_IN_MINUTES) * MINUTE,
+        reopening ? 1 : 0,
+        now,
+        task.id,
+      );
+      return message ? this.store.enqueue(project.id, task.id, message) : null;
+    });
+    if (status === 'cancelled') await this.abortWorkers(task);
+    const delivery = outbox ? await this.deliver(outbox) : undefined;
+    this.requestTick();
+    const updated = this.store.task(task.id);
+    return {
+      task: updated.id,
+      status: updated.status,
+      ...(updated.holder ? { waitingOn: updated.holder } : {}),
+      ...(delivery ? { message: delivery } : {}),
+    };
+  }
+  async notify(caller, input) {
+    assert(caller.role === 'product', 'Only the product manager messages the user');
+    const project = this.scopeProject(caller, input.project);
+    const message = text(input.message ?? input.text, 4000, 'message');
+    let taskId = null;
+    if (input.task !== undefined || caller.task) {
+      const task = this.scopeTask(caller, input.task);
+      assert(task.project === project.id, 'That task belongs to another project');
+      taskId = task.id;
+    }
+    const id = this.store.enqueue(project.id, taskId, message);
+    return { notification: id, ...(await this.deliver(id)) };
+  }
+
+  // ---- Delivery ----------------------------------------------------------------------
+
+  async ownerRoute() {
+    if (this.ownerRouteCache && this.now() - this.ownerRouteCache.at < ROUTE_CACHE_MS)
+      return this.ownerRouteCache.route;
+    const owner = this.ownerChat;
+    assert(owner, 'No ownerChat is configured');
+    const result = await this.rpc('conversations.list', {
+      agentId: topology().productAgentId,
+      query: owner.to,
+      channel: owner.channel,
+      limit: 100,
+    });
+    const matches = (result?.conversations ?? []).filter(
+      (route) =>
+        route.channel === owner.channel &&
+        route.accountId === owner.accountId &&
+        route.target === owner.to &&
+        route.kind === 'direct' &&
+        String(route.threadId ?? '') === String(owner.threadId ?? ''),
+    );
+    assert.equal(matches.length, 1, 'The owner DM is unavailable or ambiguous');
+    this.ownerRouteCache = { route: conversation(matches[0]), at: this.now() };
+    return this.ownerRouteCache.route;
+  }
+  // One attempt for one outbox row. "sent" and "queued" hand the message to OpenClaw's own
+  // durable delivery; the same operation id never sends twice. The project chat is tried
+  // first, then the owner DM (prefixed with the project name); the route is never rebound.
+  async deliver(id) {
+    const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
+    if (!row || row.state !== 'pending') return row ? { state: row.state } : undefined;
+    const project = this.store.project(row.project);
+    const toOwner = row.fallback === 1 || !project.route;
+    let receipt, error;
+    try {
+      const route = toOwner ? await this.ownerRoute() : project.route;
+      receipt = await this.rpc('conversations.send', {
+        agentId: topology().productAgentId,
+        operationId: `jarvis-gilfoyle-${row.id}-${toOwner ? 'owner' : 'project'}`,
+        conversationRef: route.conversationRef,
+        message: toOwner ? `[${project.name}] ${row.text}` : row.text,
+      });
+    } catch (failure) {
+      error = String(failure?.message ?? failure)
+        .split('\n')[0]
+        .slice(0, 300);
+    }
+    const status = receipt?.status;
+    if (status === 'sent' || status === 'queued') {
+      this.store.run(
+        "UPDATE outbox SET state='handed',receipt=?,error=NULL,attempts=attempts+1 WHERE id=?",
+        JSON.stringify(receipt),
+        row.id,
+      );
+      return { state: status, to: toOwner ? 'owner DM' : chatLabel(project.route) };
+    }
+    const attempts = row.attempts + 1;
+    error ??=
+      status === 'suppressed'
+        ? 'The chat rejected the message'
+        : `Delivery ${status ?? 'unconfirmed'}`;
+    if (!toOwner && (status === 'suppressed' || attempts >= PREFERRED_ATTEMPTS)) {
+      this.store.run(
+        'UPDATE outbox SET fallback=1,attempts=0,next_at=?,error=? WHERE id=?',
+        this.now(),
+        error,
+        row.id,
+      );
+      return this.deliver(row.id);
+    }
+    const failed = status === 'suppressed' || attempts >= FALLBACK_ATTEMPTS;
+    this.store.run(
+      'UPDATE outbox SET state=?,attempts=?,error=?,next_at=? WHERE id=?',
+      failed ? 'failed' : 'pending',
       attempts,
       error,
-      this.now() + 60000,
-      delivery.id,
+      this.now() + Math.min(2 ** attempts, 60) * MINUTE,
+      row.id,
     );
-    if (attempts < 3 || delivery.kind === 'fallback') return;
-    let route;
-    try {
-      route = await this.fallbackRoute(delivery.role);
-    } catch {
-      this.log('Role fallback unavailable; delivery remains durable');
+    if (failed) this.log(`Project message ${row.id} could not be delivered: ${error}`);
+    return { state: failed ? 'failed' : 'retrying', error };
+  }
+
+  // ---- Native session facts ----------------------------------------------------------
+
+  async sessionRows(agentId, search, extra = {}) {
+    const result = await this.rpc('sessions.list', { agentId, search, limit: 200, ...extra });
+    assert(Array.isArray(result?.sessions), 'Session list unavailable');
+    return result.sessions;
+  }
+  async liveWorkers(task) {
+    const live = [];
+    for (const worker of task.workers) {
+      if (this.now() - worker.at < WORKER_GRACE_MS) {
+        live.push(worker.key);
+        continue;
+      }
+      const agentId = /^agent:([^:]+):/.exec(worker.key)?.[1];
+      const rows = await this.sessionRows(agentId, worker.key);
+      if (
+        rowBusy(
+          rows.find((row) => row.key === worker.key),
+          this.now(),
+        )
+      )
+        live.push(worker.key);
+    }
+    return live;
+  }
+  async abortWorkers(task) {
+    for (const key of await this.liveWorkers(task).catch(() => task.workers.map((w) => w.key)))
+      await this.rpc('sessions.abort', { key }).catch((error) =>
+        this.log(`Could not stop worker ${key}: ${String(error?.message ?? error).slice(0, 200)}`),
+      );
+  }
+  recordWorker(sessionKey, childSessionKey) {
+    const scope = parseTaskSession(sessionKey);
+    if (!scope || typeof childSessionKey !== 'string' || !childSessionKey.startsWith('agent:'))
       return;
-    }
-    const fallback = this.store.enqueue({
-      project: delivery.project,
-      event: `fallback:${delivery.id}`,
-      kind: 'fallback',
-      managerRole: delivery.role,
-      message: delivery.fallback_text ?? delivery.text,
-      route,
-    });
-    await this.deliver(fallback);
-    if (this.store.get('SELECT status FROM deliveries WHERE id=?', fallback.id).status === 'sent')
-      await this.settleBatch(
-        {
-          ...delivery,
-          status: 'fallback-sent',
-          receipt: this.store.get('SELECT receipt FROM deliveries WHERE id=?', fallback.id).receipt,
-          route: this.store.get('SELECT route FROM deliveries WHERE id=?', fallback.id).route,
-        },
-        true,
-      );
-  }
-  async settleBatch(delivery, fallback = false) {
+    const task = this.store.task(scope.taskId);
+    if (task.workers.some((worker) => worker.key === childSessionKey)) return;
     this.store.run(
-      'UPDATE deliveries SET status=?,receipt=?,route=? WHERE id=?',
-      delivery.status,
-      delivery.receipt,
-      delivery.route,
-      delivery.id,
-    );
-    const members = this.store.all(
-      "SELECT * FROM deliveries WHERE project=? AND status='batched' AND json_extract(receipt,'$.batch')=?",
-      delivery.project,
-      delivery.id,
-    );
-    for (const member of members) {
-      this.store.run(
-        'UPDATE deliveries SET status=?,receipt=?,route=? WHERE id=?',
-        fallback ? 'fallback-sent' : 'sent',
-        delivery.receipt,
-        delivery.route,
-        member.id,
-      );
-      await this.processCopies({
-        ...member,
-        status: fallback ? 'fallback-sent' : 'sent',
-        receipt: delivery.receipt,
-        route: delivery.route,
-      });
-    }
-    await this.processCopies(delivery);
-  }
-  async processCopies(delivery) {
-    if (delivery.role !== 'product' || ['copy', 'fallback'].includes(delivery.kind)) return;
-    const events = [delivery.event];
-    if (delivery.event.startsWith('result:')) {
-      const feature = this.store.get('SELECT * FROM features WHERE id=?', delivery.event.slice(7));
-      const request =
-        feature && this.store.get('SELECT * FROM requests WHERE id=?', feature.request);
-      const source = request ? JSON.parse(request.source) : null;
-      const match = /^([0-9a-f-]{36})-[0-9]+$/.exec(String(source?.messageId ?? ''));
-      if (
-        match &&
-        this.store.get(
-          'SELECT id FROM schedules WHERE id=? AND project=?',
-          match[1],
-          delivery.project,
-        )
-      )
-        events.push(`schedule:${match[1]}:result`);
-    }
-    for (const copy of this.store
-      .all(
-        'SELECT * FROM copies WHERE project=? AND (consumed IS NULL OR recurring=1)',
-        delivery.project,
-      )
-      .filter((copy) => events.includes(copy.event))) {
-      const extra = this.store.enqueue({
-        project: delivery.project,
-        event: copy.recurring ? `copy:${copy.id}:${delivery.id}` : `copy:${copy.id}`,
-        kind: 'copy',
-        managerRole: copy.role,
-        message: delivery.text,
-        route: JSON.parse(copy.route),
-      });
-      if (!copy.recurring)
-        this.store.run('UPDATE copies SET consumed=? WHERE id=?', extra.id, copy.id);
-    }
-    this.store.run(
-      'INSERT OR REPLACE INTO receipts VALUES(?,?,?,?)',
-      `copies:${delivery.id}`,
-      hash(delivery.text),
-      JSON.stringify({ complete: true }),
-      this.now(),
+      'UPDATE tasks SET workers=?,idle_wakes=0 WHERE id=?',
+      JSON.stringify([...task.workers, { key: childSessionKey, at: this.now() }].slice(-50)),
+      task.id,
     );
   }
-  batchMilestones(project) {
-    const pending = this.store.all(
-      "SELECT * FROM deliveries WHERE project=? AND role='product' AND kind IN ('milestone','result') AND status='pending' AND route IS NULL ORDER BY created",
-      project.id,
-    );
-    if (pending.length < 2 || !pending.some((delivery) => delivery.due <= this.now())) return;
-    const leader = this.store.enqueue({
-      project: project.id,
-      event: `milestones:${hash(pending.map((delivery) => delivery.id)).slice(0, 32)}`,
-      kind: 'milestone-batch',
-      message: pending.map((delivery) => delivery.text).join('\n\n'),
+
+  // ---- Hook support (private sessions and project chats only) -----------------------
+
+  // Remembers the chat of a manager's newest inbound message (resolved to a native
+  // conversation the product manager can send to).
+  captureInbound(sessionKey, agentId, raw) {
+    if (!sessionKey || isPrivateSession(sessionKey) || !isManagerAgent(agentId)) return;
+    const at = this.now();
+    const pending = this.resolveRoute(agentId, raw)
+      .catch(() => null)
+      .then((route) => {
+        this.sources.set(sessionKey, { route, at, used: false });
+      });
+    this.captures.set(sessionKey, pending);
+    return pending.finally(() => {
+      if (this.captures.get(sessionKey) === pending) this.captures.delete(sessionKey);
     });
-    for (const delivery of pending)
-      this.store.run(
-        "UPDATE deliveries SET status='batched',receipt=? WHERE id=?",
-        JSON.stringify({ batch: leader.id }),
-        delivery.id,
-      );
   }
-  async runSchedules(project) {
-    if (project.state === 'inactive') return;
-    for (const schedule of this.store.all(
-      'SELECT * FROM schedules WHERE project=? AND enabled=1 AND next<=? ORDER BY next LIMIT 8',
-      project.id,
-      this.now(),
-    )) {
-      if (
-        project.state === 'draining' &&
-        this.store.get(
-          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-          project.id,
-          'schedule',
-          schedule.id,
-        )?.disposition !== 'finish'
-      )
-        continue;
-      try {
-        const spec = JSON.parse(schedule.spec);
-        const result = await this.intake(project, spec, {
-          route: { channel: 'schedule', accountId: 'project', target: project.id },
-          messageId: `${schedule.id}-${schedule.next}`,
-        });
-        if (project.state === 'draining')
-          for (const feature of result.features)
-            this.store.run(
-              "INSERT OR REPLACE INTO inactivation_plans(project,item,kind,disposition,created) VALUES(?,?,'obligation','finish',?)",
-              project.id,
-              feature,
-              this.now(),
-            );
-        this.store.run(
-          'UPDATE schedules SET next=?,enabled=? WHERE id=?',
-          schedule.intervalMs
-            ? schedule.next +
-                (Math.floor((this.now() - schedule.next) / schedule.intervalMs) + 1) *
-                  schedule.intervalMs
-            : schedule.next,
-          project.state === 'draining' ? 0 : schedule.intervalMs ? 1 : 0,
-          schedule.id,
+  async resolveRoute(agentId, raw) {
+    const clean = (value) => {
+      let v = String(value ?? '');
+      if (v.startsWith(`${raw.channel}:`)) v = v.slice(raw.channel.length + 1);
+      if (raw.channel === 'discord') v = v.replace(/^(channel|user):/, '');
+      return v.replace(/:topic:.+$/, '');
+    };
+    const target = clean(raw.conversationId);
+    const cacheKey = `${agentId}|${raw.channel}|${raw.accountId}|${target}|${raw.threadId ?? ''}`;
+    const cached = this.routeCache.get(cacheKey);
+    if (cached && this.now() - cached.at < ROUTE_CACHE_MS) return cached.route;
+    const result = await this.rpc('conversations.list', { agentId, query: target, limit: 100 });
+    const matches = (result?.conversations ?? []).filter(
+      (c) =>
+        c.channel === raw.channel &&
+        c.accountId === raw.accountId &&
+        clean(c.target) === target &&
+        String(c.threadId ?? '') === String(raw.threadId ?? ''),
+    );
+    const route = matches.length === 1 ? conversation(matches[0]) : null;
+    if (route) this.routeCache.set(cacheKey, { route, at: this.now() });
+    return route;
+  }
+  // The running turn keeps the chat of the message that started it, even if a newer
+  // message arrives meanwhile. Turns without a new message (cron, heartbeat) get none.
+  async beginTurn(sessionKey) {
+    const pending = this.captures.get(sessionKey);
+    if (pending)
+      await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, 5000).unref?.())]);
+    const source = this.sources.get(sessionKey);
+    if (source && !source.used && this.now() - source.at < SOURCE_FRESH_MS) {
+      source.used = true;
+      this.turns.set(sessionKey, source);
+    } else this.turns.delete(sessionKey);
+  }
+  endTurn(sessionKey) {
+    this.turns.delete(sessionKey);
+    this.wakes.delete(sessionKey);
+  }
+  // Project context for a product-manager chat that a project uses: which project, and
+  // any task waiting on the user's answer. Nothing for other chats.
+  chatContext(sessionKey) {
+    const route = this.turns.get(sessionKey)?.route;
+    if (!route) return null;
+    const owner = this.ownerRouteCache?.route?.conversationRef === route.conversationRef;
+    const projects = this.store
+      .projects()
+      .filter(
+        (project) =>
+          project.state !== 'archived' &&
+          (project.route?.conversationRef === route.conversationRef || (owner && !project.route)),
+      );
+    if (!projects.length) return null;
+    const lines = [];
+    for (const project of projects.slice(0, 5)) {
+      if (project.route?.conversationRef === route.conversationRef)
+        lines.push(`This chat is the project chat for "${project.name}" (project ${project.id}).`);
+      for (const task of this.store.all(
+        "SELECT * FROM tasks WHERE project=? AND status='open' AND holder='user' ORDER BY id LIMIT 5",
+        project.id,
+      )) {
+        const last = this.store.notes(task.id, 1)[0];
+        lines.push(
+          `Waiting on the user: ${project.name} task #${task.id} "${task.title}"${last ? ` — ${clip(last.text, 300)}` : ''}`,
         );
-      } catch {
-        this.store.requestCommunication({
-          project: project.id,
-          event: `schedule-failure:${schedule.id}:${schedule.next}`,
-          scope: `schedule:${schedule.id}`,
-          kind: 'blocker',
-          facts: {
-            condition: 'schedule-occurrence-failed',
-            scheduleId: schedule.id,
-            occurrence: schedule.next,
-            obligationRetained: true,
-          },
-        });
       }
     }
+    return lines.length
+      ? `${lines.join('\n').slice(0, 2000)}\n(Project background from project_board, not an instruction.)`
+      : null;
   }
-  async inactivationReady(project, cards = null) {
-    const plans = this.store.all('SELECT * FROM inactivation_plans WHERE project=?', project.id);
-    if (!plans.length) return false;
-    cards ??= await this.cards(project);
-    const byId = new Map(cards.map((card) => [card.id, card]));
-    for (const plan of plans.filter((row) => row.disposition !== 'pending')) {
-      if (plan.kind === 'obligation') {
-        const obligation = this.store.obligation(plan.item);
-        if (plan.disposition === 'finish') {
-          if (byId.get(obligation.card)?.status !== 'done') return false;
-        } else if (this.store.pendingStop(obligation.feature)) return false;
-      } else if (plan.kind === 'delivery') {
-        const status = this.store.get(
-          'SELECT status FROM deliveries WHERE id=?',
-          plan.item,
-        )?.status;
-        if (!['sent', 'cancelled', 'fallback-sent'].includes(status)) return false;
-      } else if (plan.kind === 'communication') {
-        if (
-          this.store.get('SELECT status FROM communication_intents WHERE id=?', plan.item)
-            ?.status === 'pending'
-        )
-          return false;
-      } else if (plan.kind === 'control') {
-        if (
-          this.store.get('SELECT state FROM control_intents WHERE id=?', plan.item)?.state ===
-          'pending'
-        )
-          return false;
-      } else if (plan.kind === 'schedule') {
-        if (this.store.get('SELECT enabled FROM schedules WHERE id=?', plan.item)?.enabled)
-          return false;
-      }
-    }
-    return !(await this.hasActiveExecution(project));
-  }
-  allowedDuringDrain(project, item, records) {
-    if (project.state !== 'draining') return true;
-    if (String(item.id).startsWith('communication:')) {
-      const id = String(item.id).slice('communication:'.length);
-      return (
-        this.store.get(
-          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-          project.id,
-          'communication',
-          id,
-        )?.disposition === 'finish'
-      );
-    }
-    if (String(item.id).startsWith('decision:')) {
-      const decision = records.decisions.find(
-        (row) => row.id === String(item.id).slice('decision:'.length),
-      );
-      if (!decision?.obligation) return false;
-      return (
-        this.store.get(
-          'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-          project.id,
-          'obligation',
-          decision.obligation,
-        )?.disposition === 'finish'
-      );
-    }
-    const obligation = records.obligations.find((row) => row.id === item.id);
-    if (!obligation) return false;
-    const direct = this.store.get(
-      'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-      project.id,
-      'obligation',
-      obligation.id,
-    )?.disposition;
-    if (direct && direct !== 'pending') return true;
-    const featurePlan = this.store.get(
-      'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-      project.id,
-      'obligation',
-      obligation.feature,
-    )?.disposition;
-    if (featurePlan === 'finish') return true;
-    return records.controls
-      .filter((control) => control.feature === obligation.feature && control.state === 'pending')
-      .some(
-        (control) =>
-          this.store.get(
-            'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-            project.id,
-            'control',
-            control.id,
-          )?.disposition === 'finish',
-      );
-  }
-  async dispatch(project, scope, managerRole, recordIds, attention = {}) {
-    if (this.roleAdmission.has(managerRole)) return;
-    this.roleAdmission.add(managerRole);
-    const exchange = this.store.exchange(project.id, scope, managerRole);
+  // The task card injected into every turn of a private task session.
+  taskCard(sessionKey) {
+    const scope = parseTaskSession(sessionKey);
+    let task;
     try {
-      if (this.now() - exchange.lastDispatch < 120000) return;
-      if (exchange.attempts >= 3) {
-        if (managerRole === 'engineering')
-          this.store.requestCommunication({
-            project: project.id,
-            event: `coordination:${exchange.id}:${String(exchange.observed).slice(0, 24)}`,
-            scope,
-            kind: 'blocker',
-            facts: {
-              condition: 'unchanged-attention-exhausted',
-              attentionVersion: exchange.observed,
-              attempts: exchange.attempts,
-              obligationRetained: true,
-            },
-          });
-        return;
-      }
-      const agentId = agentForRole(managerRole);
-      const sessions = await this.rpc('sessions.list', { agentId, limit: 500 });
-      assert(!sessions.hasMore);
-      if (
-        sessions.sessions.some(
-          (session) =>
-            isProjectSession(session.key) && (session.status === 'queued' || session.hasActiveRun),
-        )
-      )
-        return;
-      await this.rpc('sessions.create', {
-        key: exchange.session,
-        agentId,
-        label: `Project ${scope}`,
-        category: 'project-internal',
-      });
-      const runId = randomUUID();
-      this.store.run(
-        'UPDATE exchanges SET runId=?,attempts=attempts+1,lastDispatch=? WHERE id=?',
-        runId,
-        this.now(),
-        exchange.id,
+      task = this.store.task(scope.taskId);
+      assert(task.created === scope.created);
+    } catch {
+      return 'This private task session no longer has a task. Reply NO_REPLY.';
+    }
+    const project = this.store.project(task.project);
+    const you = scope.role;
+    const lines = [
+      `Project: ${project.name} (project ${project.id}), ${project.state}. Project chat: ${chatLabel(project.route)}.`,
+      ...(project.context ? [`Project context:\n${clip(project.context, 3000)}`] : []),
+      `Task #${task.id}: ${task.title}`,
+      `Status: ${task.status}${task.status === 'open' ? `, waiting on ${task.holder === you ? `you (${you})` : task.holder}` : ''}. Created by ${task.created_by}.`,
+      ...(task.body ? [`Description:\n${clip(task.body, 4000)}`] : []),
+    ];
+    const notes = this.store.notes(task.id, 15);
+    if (notes.length)
+      lines.push(
+        'Notes (oldest first):',
+        ...notes.map((note) => `- [${note.author}, ${when(note.created)}] ${clip(note.text, 800)}`),
       );
-      await this.rpc('agent', {
-        agentId,
-        sessionKey: exchange.session,
-        deliver: false,
-        idempotencyKey: runId,
-        timeout: 600,
-        message: `PROJECT CONTINUATION\nProject: ${project.id}\nScope: ${scope}\nRegistered obligations: ${recordIds.join(', ')}\nAttention: ${JSON.stringify(attention)}\nLoad project-coordination and use registry-backed project tools. Workboard notes are human context only. End with NO_REPLY.`,
-      });
-    } catch (error) {
-      this.health.lastDispatchFailure = {
-        project: project.id,
-        scope,
-        code: error.code ?? error.name,
-        at: this.now(),
+    if (task.workers.length)
+      lines.push(`Workers spawned for this task: ${task.workers.map((w) => w.key).join(', ')}`);
+    const { workerAgentId, workerProfiles } = topology();
+    if (you === 'engineering' && workerProfiles.length)
+      lines.push(
+        `Worker profiles (sessions_spawn with agentId "${workerAgentId}" and model set to a profile id): ${workerProfiles
+          .map(
+            (p) =>
+              `${p.id} = ${p.model}, thinking ${p.thinking ?? 'default'}${p.description ? ` — ${p.description}` : ''}`,
+          )
+          .join('; ')}`,
+      );
+    return lines.join('\n');
+  }
+  // Guards for tools used inside private task sessions. Everywhere else: nothing.
+  async beforeToolCall(event, ctx) {
+    const scope = parseTaskSession(ctx?.sessionKey);
+    if (!scope) {
+      if (
+        isPrivateSession(ctx?.sessionKey) &&
+        ['sessions_spawn', 'sessions_send', 'message'].includes(event?.toolName)
+      )
+        return { block: true, blockReason: 'This private session has no task.' };
+      return undefined;
+    }
+    const name = event?.toolName;
+    if (name === 'message')
+      return {
+        block: true,
+        blockReason:
+          'Private task session: the user is reached through project_board (update_task message, or notify by the product manager).',
       };
-      throw error;
-    } finally {
-      this.roleAdmission.delete(managerRole);
+    if (name !== 'sessions_spawn' && name !== 'sessions_send') return undefined;
+    let task, project;
+    try {
+      task = this.store.task(scope.taskId);
+      project = this.store.project(task.project);
+    } catch {
+      return { block: true, blockReason: 'This private session has no task.' };
     }
-  }
-  attentionVersion(records, cards, feature, managerRole, attention) {
-    const obligations = records.obligations.filter((row) => row.feature === feature);
-    const cardState = obligations.map((obligation) => {
-      const card = cards.find((candidate) => candidate.id === obligation.card);
-      return [
-        obligation.id,
-        card?.status ?? 'missing',
-        card?.agentId ?? null,
-        card?.metadata?.automation?.summary ?? null,
-        card?.metadata?.proof ?? null,
-      ];
-    });
-    return hash([
-      managerRole,
-      Object.entries(attention).sort(),
-      records.features.find((row) => row.id === feature),
-      cardState,
-      records.attempts.filter((row) => obligations.some((item) => item.id === row.obligation)),
-      records.decisions.filter((row) => row.feature === feature),
-      records.publications.filter((row) => row.feature === feature),
-      records.controls.filter((row) => row.feature === feature),
-      records.terminalCheckpoints.filter((row) => row.feature === feature),
-    ]);
-  }
-  syncAttention(project, feature, managerRole, version) {
-    const exchange = this.store.exchange(project, feature, managerRole);
-    if (exchange.observed !== version) {
-      this.store.run(
-        'UPDATE exchanges SET observed=?,attempts=0,lastDispatch=0 WHERE id=?',
-        version,
-        exchange.id,
+    if (task.status !== 'open')
+      return { block: true, blockReason: `Task #${task.id} is ${task.status}.` };
+    const params = event.params ?? {};
+    if (name === 'sessions_send') {
+      if (task.workers.some((worker) => worker.key === params.sessionKey)) return undefined;
+      return {
+        block: true,
+        blockReason:
+          'From a task session, sessions_send may only reach this task’s own workers (by sessionKey).',
+      };
+    }
+    if (project.state !== 'active')
+      return {
+        block: true,
+        blockReason: `Project ${project.name} is ${project.state}; no new workers.`,
+      };
+    const { workerAgentId, workerProfiles, workerRuntime, workerLimit } = topology();
+    if (params.agentId !== workerAgentId || !workerProfiles.length) return undefined;
+    const profile =
+      workerProfiles.find((p) => p.id === params.model) ??
+      workerProfiles.find(
+        (p) =>
+          p.model === params.model && (p.thinking ?? undefined) === (params.thinking ?? undefined),
       );
-      return this.store.get('SELECT * FROM exchanges WHERE id=?', exchange.id);
-    }
-    return exchange;
+    if (!profile)
+      return {
+        block: true,
+        blockReason: `Set model to a worker profile id: ${workerProfiles.map((p) => p.id).join(', ')}.`,
+      };
+    let running = 0;
+    for (const row of this.store.all("SELECT * FROM tasks WHERE status='open' AND workers<>'[]'"))
+      running += (await this.liveWorkers({ ...row, workers: JSON.parse(row.workers) })).filter(
+        (key) => key.startsWith(`agent:${workerAgentId}:`),
+      ).length;
+    if (running >= workerLimit)
+      return {
+        block: true,
+        blockReason: `${running} workers are already running (limit ${workerLimit}); wait for one to finish.`,
+      };
+    return {
+      params: {
+        ...params,
+        model: profile.model,
+        ...(profile.thinking ? { thinking: profile.thinking } : {}),
+        runtime: workerRuntime,
+      },
+    };
   }
-  async cleanup(project, cards) {
-    for (const exchange of this.store.all(
-      'SELECT * FROM exchanges WHERE project=? AND closed IS NULL',
-      project.id,
-    )) {
-      const feature = this.store
-        .records(project.id)
-        .features.find((row) => row.id === exchange.scope);
-      if (
-        !exchange.conclusion ||
-        !feature ||
-        cards.find((card) => card.id === feature.card)?.status !== 'done'
-      )
-        continue;
-      const sessions = await this.rpc('sessions.list', {
-        agentId: agentForRole(exchange.role),
-        search: exchange.session,
-        archived: 'all',
-        limit: 10,
-      });
-      const session = sessions.sessions.find((candidate) => candidate.key === exchange.session);
-      if (session?.hasActiveRun || session?.hasActiveSubagentRun) continue;
-      const result = await this.rpc('jarvis-gilfoyle.session.cleanup', {
-        agentId: agentForRole(exchange.role),
-        sessionNamespace: topology().sessionNamespace,
-        sessionKey: exchange.session,
-        projectId: project.id,
-        expectedSessionId: session?.sessionId,
-      });
-      assert(
-        result && result.archivedTranscriptArtifacts === 0,
-        'Temporary context cleanup not confirmed',
-      );
-      for (const path of result.exportedPaths ?? [])
-        await unlink(path).catch((error) => {
-          if (error.code !== 'ENOENT') throw error;
-        });
-      this.store.run('UPDATE exchanges SET closed=? WHERE id=?', this.now(), exchange.id);
-    }
+  // Runs in private sessions whose task is closed or gone are refused.
+  allowRun(sessionKey) {
+    if (!isPrivateSession(sessionKey)) return true;
+    const scope = parseTaskSession(sessionKey);
+    if (!scope) return false;
+    const task = this.store.get('SELECT status,created FROM tasks WHERE id=?', scope.taskId);
+    return Boolean(task && task.created === scope.created && task.status === 'open');
+  }
+
+  // ---- The scan ----------------------------------------------------------------------
+
+  requestTick() {
+    if (this.stopped || this.tickRequested) return;
+    this.tickRequested = true;
+    setTimeout(() => {
+      this.tickRequested = false;
+      this.tick().catch((error) => this.log(`Project scan failed: ${error?.message ?? error}`));
+    }, 2000).unref?.();
   }
   async tick() {
-    if (this.busy || this.stopped) return { skipped: true, stopped: this.stopped };
-    this.busy = true;
-    const scan = { at: this.now(), complete: true, checked: [], errors: [] };
-    const dispatches = [];
+    if (this.stopped || this.ticking) return { skipped: true };
+    this.ticking = true;
+    const summary = { delivered: 0, woken: [], stalled: [], cleaned: 0 };
     try {
-      this.store.run('DELETE FROM sources WHERE updated<?', this.now() - 30 * 24 * 60 * 60 * 1000);
-      for (const project of this.store.list()) {
-        if (project.state === 'inactive') continue;
-        scan.checked.push(project.id);
-        try {
-          await this.runSchedules(project);
-          await this.reconcileRegistryProjections(project);
-          this.batchMilestones(project);
-          for (const delivery of this.store.all(
-            "SELECT * FROM deliveries WHERE project=? AND status NOT IN ('sent','cancelled','fallback-sent','batched') AND due<=? ORDER BY created LIMIT 20",
-            project.id,
-            this.now(),
-          )) {
-            if (
-              project.state === 'draining' &&
-              (delivery.kind === 'milestone-batch'
-                ? !this.store.get(
-                    "SELECT 1 AS allowed FROM deliveries d JOIN inactivation_plans p ON p.project=d.project AND p.kind='delivery' AND p.item=d.id WHERE d.project=? AND d.status='batched' AND json_extract(d.receipt,'$.batch')=? AND p.disposition='finish' LIMIT 1",
-                    project.id,
-                    delivery.id,
-                  )
-                : this.store.get(
-                    'SELECT disposition FROM inactivation_plans WHERE project=? AND kind=? AND item=?',
-                    project.id,
-                    'delivery',
-                    delivery.id,
-                  )?.disposition !== 'finish')
-            )
-              continue;
-            await this.deliver(delivery);
-          }
-          let cards = await this.cards(project);
-          let records = this.store.records(project.id);
-          for (const checkpoint of records.terminalCheckpoints.filter(
-            (row) => row.state === 'staged',
-          )) {
-            const feature = records.features.find((row) => row.id === checkpoint.feature);
-            const card = feature && cards.find((candidate) => candidate.id === feature.card);
-            const evidence = JSON.parse(checkpoint.evidence);
-            if (
-              card?.status === 'done' &&
-              card.metadata?.automation?.summary === checkpoint.summary &&
-              card.metadata?.proof?.some(
-                (proof) =>
-                  proof.status === evidence.status &&
-                  proof.label === evidence.label &&
-                  proof.note === evidence.note,
-              )
-            )
-              this.store.completeTerminal(feature.id);
-          }
-          records = this.store.records(project.id);
-          const binding = await reconcileExecutionBindings(records, cards, this.store, this.rpc);
-          if (binding.bound.length) records = this.store.records(project.id);
-          this.health.bindingDiagnostics = [
-            ...this.health.bindingDiagnostics.filter(
-              (diagnostic) => diagnostic.project !== project.id,
-            ),
-            ...binding.pending.map((diagnostic) => ({ project: project.id, ...diagnostic })),
-          ];
-          const ready = [];
-          for (const decision of records.decisions.filter((row) => row.phase === 'answered')) {
-            try {
-              await projectAnsweredDecision(this.store, project.id, decision.id, this.rpc);
-            } catch (error) {
-              this.health.projectionDiagnostics = [
-                ...(this.health.projectionDiagnostics ?? []).filter(
-                  (diagnostic) =>
-                    !(
-                      diagnostic.project === project.id &&
-                      diagnostic.type === 'decision-answer' &&
-                      diagnostic.id === decision.id
-                    ),
-                ),
-                {
-                  project: project.id,
-                  type: 'decision-answer',
-                  id: decision.id,
-                  error: String(error.message),
-                },
-              ];
-            }
-            ready.push({
-              feature: decision.feature,
-              managerRole: 'engineering',
-              agentId: topology().engineeringAgentId,
-              id: `decision:${decision.id}`,
-              created: decision.updated,
-              priority: 1000,
-              ownsClaim: false,
-              stage: 'decision-answered',
-              project,
-            });
-          }
-          for (const board of project.boards) {
-            for (const [managerRole, agentId] of [
-              ['product', topology().productAgentId],
-              ['engineering', topology().engineeringAgentId],
-            ]) {
-              const page = await readView(
-                { agentId, boardId: board.id, includeArchived: false, view: 'attention' },
-                this.rpc,
-                records,
-              );
-              for (const row of page.cards) {
-                const item = Object.fromEntries(
-                  page.fields.map((field, index) => [field, row[index]]),
-                );
-                if (quiet.has(item.stage)) continue;
-                const obligation = records.obligations.find(
-                  (candidate) => candidate.id === item.obligation,
-                );
-                if (!obligation) continue;
-                if (
-                  managerRole === 'product' &&
-                  records.decisions.some(
-                    (decision) =>
-                      decision.obligation === obligation.id && decision.phase === 'answered',
-                  )
-                )
-                  continue;
-                ready.push({
-                  feature: obligation.feature,
-                  managerRole,
-                  agentId,
-                  id: obligation.id,
-                  created: records.features.find((feature) => feature.id === obligation.feature)
-                    .created,
-                  priority: item.priority === 'urgent' ? 1000 : 0,
-                  ownsClaim: Boolean(cards.find((card) => card.id === item.id)?.metadata?.claim),
-                  stage: item.stage,
-                  project,
-                });
-              }
-            }
-          }
-          for (const intent of this.store.all(
-            "SELECT * FROM communication_intents WHERE project=? AND status='pending' AND eligible=1",
-            project.id,
-          ))
-            ready.push({
-              feature: intent.scope,
-              managerRole: 'product',
-              id: `communication:${intent.id}`,
-              created: intent.created,
-              priority: 1000,
-              ownsClaim: false,
-              stage: 'communication-intent',
-              project,
-            });
-          const groups = new Map();
-          for (const item of ready) {
-            if (!this.allowedDuringDrain(project, item, records)) continue;
-            const key = `${item.managerRole}:${item.feature}`;
-            if (!groups.has(key)) groups.set(key, { ...item, ids: [], attention: {} });
-            groups.get(key).ids.push(item.id);
-            groups.get(key).attention[item.id] = item.stage;
-          }
-          for (const group of groups.values()) {
-            const version = this.attentionVersion(
-              records,
-              cards,
-              group.feature,
-              group.managerRole,
-              group.attention,
-            );
-            this.syncAttention(project.id, group.feature, group.managerRole, version);
-            dispatches.push(group);
-          }
-          if (project.state === 'draining' && (await this.inactivationReady(project, cards))) {
-            this.store.run(
-              "UPDATE projects SET state='inactive',revision=revision+1 WHERE id=?",
-              project.id,
-            );
-            continue;
-          }
-          await this.cleanup(project, cards);
-        } catch (error) {
-          scan.complete = false;
-          scan.errors.push({ project: project.id, code: error.code ?? error.name });
-          this.log(`Project ${project.id} reconciliation incomplete; retained for next scan`);
-        }
+      if (!this.ownerRouteCache && this.ownerChat)
+        await this.ownerRoute().catch((error) =>
+          this.log(`Owner DM unresolved: ${error?.message ?? error}`),
+        );
+      for (const row of this.store.all(
+        "SELECT id FROM outbox WHERE state='pending' AND next_at<=? ORDER BY id LIMIT 20",
+        this.now(),
+      )) {
+        const result = await this.deliver(row.id);
+        if (result?.state === 'sent' || result?.state === 'queued') summary.delivered++;
       }
-      const used = new Set();
-      for (const group of orderReady(dispatches)) {
-        if (used.has(group.managerRole)) continue;
-        used.add(group.managerRole);
-        this.dispatch(
-          group.project,
-          group.feature,
-          group.managerRole,
-          group.ids,
-          group.attention,
-        ).catch(() => this.log('Internal continuation failed; retry remains durable'));
-      }
-      return scan;
+      await this.wakeDue(summary);
+      summary.cleaned = await this.cleanupClosed();
+      this.health.lastScan = this.now();
+      this.health.lastError = null;
+    } catch (error) {
+      this.health.lastError = String(error?.message ?? error).slice(0, 300);
+      throw error;
     } finally {
-      this.busy = false;
-      this.health.lastScan = scan;
+      this.ticking = false;
+    }
+    return summary;
+  }
+  async wakeDue(summary) {
+    const now = this.now();
+    const tasks = this.store.all(
+      `SELECT t.* FROM tasks t JOIN projects p ON p.id=t.project
+       WHERE t.status='open' AND p.state='active' AND t.holder IN ('product','engineering') AND t.stalled IS NULL
+       ORDER BY t.updated`,
+    );
+    const due = tasks.filter(
+      (task) => task.poked !== null || (task.check_at !== null && now >= task.check_at),
+    );
+    for (const [session, at] of this.wakes)
+      if (now - at >= WAKE_GRACE_MS) this.wakes.delete(session);
+    if (!due.length) return;
+    // One list per role shows which private sessions are mid-turn.
+    const live = {};
+    for (const role of ROLES) {
+      if (!due.some((task) => task.holder === role)) continue;
+      try {
+        live[role] = new Set(
+          (await this.sessionRows(agentForRole(role), `${topology().sessionNamespace}:task-`))
+            .filter((row) => rowLive(row, now))
+            .map((row) => row.key),
+        );
+      } catch (error) {
+        this.log(`Cannot see ${role} sessions: ${error?.message ?? error}`);
+      }
+    }
+    for (const row of due) {
+      const task = { ...row, workers: JSON.parse(row.workers) };
+      const role = task.holder;
+      if (!live[role]) continue;
+      const key = taskSessionKey(role, task);
+      if (this.wakes.has(key) || live[role].has(key)) continue;
+      const busy =
+        live[role].size +
+        [...this.wakes.keys()].filter(
+          (k) => k.startsWith(`agent:${agentForRole(role)}:`) && !live[role].has(k),
+        ).length;
+      if (busy >= this.maxWakesPerRole) continue;
+      const poked = task.poked !== null;
+      let workers = 0;
+      try {
+        workers = (await this.liveWorkers(task)).length;
+      } catch {
+        workers = task.workers.length;
+      }
+      if (!poked && !workers && task.idle_wakes >= STALL_WAKES) {
+        await this.reportStall(task);
+        summary.stalled.push(task.id);
+        continue;
+      }
+      if (await this.wake(task, role, key, poked, workers)) {
+        live[role].add(key);
+        summary.woken.push(task.id);
+      }
     }
   }
+  async wake(task, role, key, poked, workers) {
+    const now = this.now();
+    this.wakes.set(key, now);
+    // The poke this wake answers is cleared; a newer one (changed meanwhile) stays.
+    this.store.run(
+      'UPDATE tasks SET woken=?,check_at=?,idle_wakes=idle_wakes+?,poked=CASE WHEN poked=? THEN NULL ELSE poked END WHERE id=?',
+      now,
+      now + CHECK_IN_MINUTES * MINUTE,
+      workers ? 0 : 1,
+      task.poked,
+      task.id,
+    );
+    const last = this.store.notes(task.id, 1)[0];
+    const reason = poked
+      ? last && last.author !== role
+        ? `New from ${last.author}: ${clip(last.text, 500)}`
+        : 'This task is waiting on you.'
+      : workers
+        ? 'Scheduled check-in; workers are still running.'
+        : 'Scheduled check-in.';
+    try {
+      await this.rpc('sessions.create', {
+        key,
+        agentId: agentForRole(role),
+        label: clip(`Task #${task.id}: ${task.title}`, 80),
+      }).catch(() => undefined);
+      await this.rpc('agent', {
+        agentId: agentForRole(role),
+        sessionKey: key,
+        deliver: false,
+        idempotencyKey: randomUUID(),
+        timeout: this.turnTimeoutSeconds,
+        message: `PROJECT TASK ${taskScope(task)}\n${reason}\nThe task card is in your context. Act with project_board; this reply is private. End with NO_REPLY.`,
+      });
+      return true;
+    } catch (error) {
+      this.wakes.delete(key);
+      this.store.run(
+        'UPDATE tasks SET check_at=? WHERE id=?',
+        now + WAKE_RETRY_MINUTES * MINUTE,
+        task.id,
+      );
+      this.log(
+        `Could not wake ${role} for task #${task.id}: ${String(error?.message ?? error).slice(0, 200)}`,
+      );
+      return false;
+    }
+  }
+  async reportStall(task) {
+    const project = this.store.project(task.project);
+    const last = this.store.notes(task.id, 1)[0];
+    const who = this.agentName(task.holder);
+    const message = `${project.name}: task #${task.id} "${task.title}" is waiting on ${who} and nothing has changed after ${STALL_WAKES} check-ins.${last ? ` Last note (${last.author}): ${clip(last.text, 500)}` : ''}`;
+    const id = this.store.tx(() => {
+      this.store.run('UPDATE tasks SET stalled=? WHERE id=?', this.now(), task.id);
+      this.store.note(
+        task.id,
+        'plugin',
+        `Stalled: no change after ${STALL_WAKES} check-ins; the user was told.`,
+      );
+      return this.store.enqueue(project.id, task.id, message);
+    });
+    await this.deliver(id);
+  }
+  // Private sessions of closed tasks are deleted once nothing runs in them.
+  async cleanupClosed() {
+    let cleaned = 0;
+    const { sessionNamespace } = topology();
+    for (const row of this.store.all(
+      "SELECT * FROM tasks WHERE status<>'open' AND cleaned IS NULL ORDER BY updated LIMIT 10",
+    )) {
+      let done = true;
+      for (const role of ROLES) {
+        const key = taskSessionKey(role, row);
+        try {
+          const session = (
+            await this.sessionRows(agentForRole(role), key, { archived: 'all' })
+          ).find((candidate) => candidate.key === key);
+          if (!session) continue;
+          if (rowBusy(session, this.now())) {
+            done = false;
+            continue;
+          }
+          const result = await this.rpc('jarvis-gilfoyle.session.cleanup', {
+            agentId: agentForRole(role),
+            sessionNamespace,
+            sessionKey: key,
+            expectedSessionId: session.sessionId,
+          });
+          for (const path of result?.exportedPaths ?? [])
+            await unlink(path).catch((error) => {
+              if (error.code !== 'ENOENT') throw error;
+            });
+        } catch (error) {
+          done = false;
+          this.log(`Cleanup of ${key} deferred: ${String(error?.message ?? error).slice(0, 200)}`);
+        }
+      }
+      if (done) {
+        this.store.run('UPDATE tasks SET cleaned=? WHERE id=?', this.now(), row.id);
+        cleaned++;
+      }
+    }
+    return cleaned;
+  }
+  healthReport() {
+    const count = (sql) => this.store.get(sql).n;
+    return {
+      ...this.health,
+      projects: count("SELECT COUNT(*) n FROM projects WHERE state<>'archived'"),
+      openTasks: count("SELECT COUNT(*) n FROM tasks WHERE status='open'"),
+      stalledTasks: count(
+        "SELECT COUNT(*) n FROM tasks WHERE status='open' AND stalled IS NOT NULL",
+      ),
+      pendingMessages: count("SELECT COUNT(*) n FROM outbox WHERE state='pending'"),
+      failedMessages: count("SELECT COUNT(*) n FROM outbox WHERE state='failed'"),
+    };
+  }
 }
+
+export { isManagerAgent };

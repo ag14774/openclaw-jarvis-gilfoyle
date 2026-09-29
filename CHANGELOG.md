@@ -1,5 +1,16 @@
 # Changelog
 
+## 6.0.0 - 2026-09-29
+
+Breaking rewrite as a small project board. (5.0.0 was never released.)
+
+- One tool, `project_board`, replaces `jarvis_project` and `gilfoyle_engineering`. It has seven operations: `list`, `show`, `create_project`, `update_project`, `add_task`, `update_task` and `notify`.
+- Fresh-only schema v16 with four tables: projects, tasks with a holder (whose turn it is), notes and outbox. Features, requests, obligations, decisions, schedules, repositories, verifiers, attention stages and pause dispositions are removed.
+- The scan wakes a task's holder in its own private session when someone else changed the task or its check-in is due. After three unproductive wakes the user is told once.
+- Required notifications travel with the change: handing a task to the user, or closing a product task, needs the user message in the same call, except from the project chat.
+- Cheap enforcement: role ownership, project isolation, notes on handovers and closing, worker recording with profile application and a limit, no done while workers run, cancel aborts workers, turn-bound `use_this_chat`, and delivery only to the project chat or the owner DM.
+- Configuration: `ownerChat` replaces `fallbackDestinations`, and `turnTimeoutSeconds` replaces `continuationTimeoutSeconds`. `maxWakesPerRole` is new; `checkoutRoot` is gone. Worker profiles need only `id` and `model`.
+
 ## 4.1.0 - 2026-09-27
 
 - Bundle the role-neutral `project-coordination` skill with the plugin and load it through native manifest skill discovery.

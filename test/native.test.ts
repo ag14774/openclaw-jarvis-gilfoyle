@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { COMPANION_METHODS } from '../src/bridge-methods.ts';
+
+// Compatibility lane: every native method the companion calls exists in the pinned build.
+test(
+  'companion methods exist in the pinned OpenClaw build',
+  { skip: process.env.JG_NATIVE_TEST !== '1' && 'set JG_NATIVE_TEST=1' },
+  () => {
+    const dist = dirname(fileURLToPath(import.meta.resolve('openclaw')));
+    const names = new Set();
+    for (const file of readdirSync(dist).filter(
+      (n) => n.startsWith('method-scopes-') && n.endsWith('.js'),
+    ))
+      for (const match of readFileSync(join(dist, file), 'utf8').matchAll(/"([a-z][\w.-]*)"/g))
+        names.add(match[1]);
+    for (const method of COMPANION_METHODS) assert(names.has(method), `${method} missing`);
+  },
+);

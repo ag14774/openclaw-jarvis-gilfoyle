@@ -1,53 +1,62 @@
 # OpenClaw Jarvis-Gilfoyle
 
-Jarvis-Gilfoyle is an OpenClaw plugin for a fixed, configurable project topology:
+An OpenClaw plugin that gives a product-manager agent and an engineering-manager agent a small shared project board in SQLite:
 
 ```text
-user -> product agent -> engineering agent -> implementation/review workers
+user <-> product manager (Jarvis) <-> project board <-> engineering manager (Gilfoyle) -> workers
 ```
 
-The names are thematic. Runtime authority and persisted state use generic `product` and `engineering` roles mapped to configured OpenClaw agent IDs.
+The names are thematic; roles map to configured OpenClaw agent IDs.
 
-## Tools
+## The board
 
-- `jarvis_project`: durable project identity, conversation routing, intake, lifecycle, schedules, answers, and receipt-backed notifications.
-- `gilfoyle_engineering`: registered Workboard obligations, ordered worker profiles, worker binding, decisions, publication gates, and reports.
+- **Projects**: name, free-text context (repositories, conventions), the chat its messages go to, and a state (`active`, `paused`, `archived`).
+- **Tasks**: title, body, status (`open`, `done`, `cancelled`) and a **holder**: whose turn it is (`product`, `engineering` or `user`).
+- **Notes**: an append-only log per task. Handovers and closing always carry one.
+- **Outbox**: messages to the user, delivered with native idempotency, retries and an owner-DM fallback.
+
+A mechanical scan (every 60 seconds by default) wakes whichever manager holds a task, in that task's own private session. It wakes a manager when someone else changed the task, or when the task's check-in time is due (60 minutes, or the holder's `check_in_minutes`). It never wakes anyone for the user, and never interrupts a session that is mid-turn. Each manager runs at most `maxWakesPerRole` private sessions at once. A holder woken three times without changing the task makes the plugin tell the user once; any change resets this.
+
+## Tool
+
+One tool, `project_board`, for both managers:
+
+| Operation        | What it does                                                                            |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| `list`           | Projects with their open tasks, recently closed tasks and undelivered messages.         |
+| `show`           | One task with its notes, or one project with its context.                               |
+| `create_project` | Product only. Uses the chat of the current user message.                                |
+| `update_project` | Name, `state` and `use_this_chat` (product only), or `context` (either manager).        |
+| `add_task`       | New task, held by engineering unless `holder` says otherwise.                           |
+| `update_task`    | `note`, handover (`holder`), close or reopen (`status`), `message`, `check_in_minutes`. |
+| `notify`         | Product only. Message the user in the project chat.                                     |
+
+## What the plugin enforces
+
+Rules are enforced when they can be checked from the caller, the rows that already exist, or a native call the plugin already makes. Everything else is agent judgment, described in the bundled `project-coordination` skill.
+
+- Only the product manager creates or renames projects, pauses, resumes or archives them, binds chats, messages the user, hands tasks to the user, reopens tasks and closes tasks it created. The engineering manager may close only tasks it created.
+- Handing a task to the user, or closing a product task, requires the `message` for the user in the same call. The message is queued in the same transaction as the change. The exception is a call made from the project's own chat, where the manager's reply is the message.
+- Handovers and closing require a note. Closed tasks are read-only until reopened.
+- A private task session sees and changes only its own project.
+- Workers spawned with `sessions_spawn` from a task session are recorded on that task. A spawn of the configured worker agent must name a worker profile (`model: "<profile id>"`); the plugin applies that profile's model, thinking level and runtime, and enforces `worker.limit`. Spawns are refused for closed tasks and paused projects. `sessions_send` may only reach the task's own workers, and the `message` tool is refused in task sessions.
+- A task cannot be marked done while its workers run. Cancelling a task aborts them.
+- `use_this_chat` binds only the chat of the message that started the current turn.
+- Messages go only to the project chat, or to the configured owner DM (prefixed with the project name) when the project chat rejects them or keeps failing. The project's chat is never rebound by delivery.
+- Private task sessions never reply into user chats. Runs in sessions of closed tasks are refused, and those sessions are deleted once idle.
+
+Outside the tool and private task sessions the plugin does nothing. It adds no context to personal chats, and it leaves other agents and the product manager's personal-assistant work untouched. In a chat that is a project chat, the product manager gets one line naming the project and one line per task waiting on the user. Hooks fail open: any hook error is logged and ignored.
 
 ## Installation
 
-OpenClaw managed installs execute the compiled files in `dist/`. TypeScript is a development input, not a runtime requirement for a packed release.
-
-### Linked Checkout
-
-Use this while developing from a local clone:
-
 ```bash
-git clone https://github.com/ag14774/openclaw-jarvis-gilfoyle.git
-cd openclaw-jarvis-gilfoyle
 npm ci
 npm run build
 openclaw plugins install --link . --force --accept-capabilities
+openclaw gateway restart
 ```
 
-`--link` creates a managed OpenClaw install record that points to the checkout. After changing source, run `npm run build` and restart the Gateway. A linked install does not copy the repository.
-
-Routine builds compile in place and do not delete the active `dist` directory. `npm run clean` is an explicit maintenance command; do not run it while the linked plugin is serving.
-
-### Packed Artifact
-
-Use this to validate the same package boundary used by a registry release:
-
-```bash
-npm ci
-npm pack
-openclaw plugins install npm-pack:./openclaw-jarvis-gilfoyle-4.1.0.tgz --force --accept-capabilities
-```
-
-The tarball contains compiled JavaScript, so its consumer does not need TypeScript. Installation records the package but leaves it disabled if required configuration is absent.
-
-### GitHub Checkout
-
-The Git repository intentionally does not track generated `dist/` files. Clone it, run `npm ci` and `npm run build`, then use the linked-checkout command above. Do not install the raw Git URL unless a future tagged release explicitly includes compiled artifacts.
+A linked install loads `dist/` when the Gateway starts. After changing source, run `npm run build` and restart the Gateway.
 
 ## Configuration
 
@@ -59,47 +68,24 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
         "enabled": true,
         "hooks": { "allowConversationAccess": true, "allowPromptInjection": true },
         "config": {
-          "enabled": true,
-          "statePath": "/absolute/path/to/state.sqlite",
+          "statePath": "/absolute/path/to/board.sqlite",
           "productAgentId": "main",
           "engineeringAgentId": "gilfoyle",
-          "sessionNamespace": "jarvis-gilfoyle",
-          "scanMs": 60000,
-          "fallbackDestinations": {
-            "product": {
-              "channel": "telegram",
-              "accountId": "default",
-              "to": "telegram:123456789",
-              "kind": "direct"
-            },
-            "engineering": {
-              "channel": "telegram",
-              "accountId": "gilfoyle",
-              "to": "telegram:123456789",
-              "kind": "direct"
-            }
+          "ownerChat": {
+            "channel": "telegram",
+            "accountId": "default",
+            "to": "telegram:123456789"
           },
           "worker": {
             "agentId": "opencode",
             "runtime": "acp",
+            "limit": 2,
             "profiles": [
               {
                 "id": "sol-low",
                 "model": "openai/gpt-5.6-sol",
                 "thinking": "low",
-                "description": "Routine bounded implementation, inspection, and straightforward tests."
-              },
-              {
-                "id": "sol-medium",
-                "model": "openai/gpt-5.6-sol",
-                "thinking": "medium",
-                "description": "Complex implementation, debugging, and independent review."
-              },
-              {
-                "id": "astra-low",
-                "model": "openai/gpt-6-astra",
-                "thinking": "low",
-                "description": "Unusually difficult architecture, security, or diagnosis."
+                "description": "Routine work."
               }
             ]
           }
@@ -110,31 +96,11 @@ The Git repository intentionally does not track generated `dist/` files. Clone i
 }
 ```
 
-Grant `jarvis_project` and `gilfoyle_engineering` to both configured manager agents. The plugin enforces their different authorities internally.
+Optional settings: `sessionNamespace` (default `jarvis-gilfoyle`), `scanMs` (60000), `turnTimeoutSeconds` (1800), `maxWakesPerRole` (2) and `enabled`.
 
-The plugin bundles the shared `project-coordination` skill through its manifest. It uses role-neutral product-manager/engineering-manager language; runtime prompt context tells each manager its role and its counterpart's display name and ID, without repeating its own identity. Names come from native `agents.entries[id].identity.name`, then `name`, then the ID. Display names do not change routing, authority or personas. No install-time generation is needed. Remove any manually installed copy of this procedure when adopting the bundled skill, because managed/workspace skills take precedence over plugin skills.
+Grant `project_board` to both managers. The registry is fresh-only (schema v16). An older file at `statePath` is refused rather than migrated, so move it aside when upgrading.
 
-Worker profiles are ordered from lowest to highest capability and are limited to five. Gilfoyle selects the lowest adequate `profileId` during `prepare`; arbitrary model overrides are rejected. Each attempt retains its concrete profile ID, model, and thinking level, so later configuration changes do not rewrite execution evidence.
-
-Every implementation or review worktree must be created before `prepare`. The plugin validates that the worktree is uniquely registered with its branch, belongs to the selected repository, is a clean canonical root at the immutable base SHA, is distinct from the integration checkout/branch, and does not reuse another retained attempt identity. The returned `spawnArgs.cwd` binds the worker to that validated worktree; the plugin does not create worktrees or spawn workers itself.
-
-Fallback destinations use OpenClaw's native `channel`/`accountId`/`to` address format, with optional `threadId`. The plugin requires direct destinations, rediscovers one exact current conversation reference before every fallback send, and fails closed when the address is unavailable or ambiguous. Opaque `conversationRef` values do not belong in static configuration.
-
-Agents decide intent, scope, decomposition and conclusions. The plugin validates identity, authority, settled execution and delivery. `finalize` accepts settled work without imposing an outcome taxonomy. Publication adapters verify claimed external effects and call the same terminal completion. Recovery records facts for the product manager to explain. Optional `fallbackMessage` preserves a manager-authored explanation when the preferred route fails.
-
-Accepted execution binding is bookkeeping, not a new permission grant. `prepare` and `record` retain attempt, worktree, profile and native task identities in registry rows after checking actual native task evidence. Spawn/completion hooks and shared scans recover uniquely matching native runs. Duplicate or incomplete evidence stays visible in `bindingDiagnostics`; the runtime never chooses between multiple executions or launches a replacement for a missing receipt. Independent-review findings remain free text while the registry binds the review obligation and publication candidate.
-
-Native Workboard states retain useful semantics: triage requires judgment, backlog/scheduled defer, todo/ready are open, review awaits verification, blocked retains a hold and done is settled. Worker liveness comes from task/session evidence, not card status. `worker.limit` configures cooperative capacity (default two); the native manager claim slot remains a platform constraint.
-
-`intake` and `schedule` require `authorized:true` for requested work, without treating inspection as modification permission. Optional stable `requestKey` separates requests in one message. One request can own one board-local Feature per selected repository. `amend` appends a per-Feature scope revision, updates the human note projection, and invalidates that Feature's publication checkpoint without changing sibling Features or shared request scope. `handoff` and `decide` use registry decision rows; only correlated user answers resolve user-reserved decisions. `control` records a stop intent without creating a card. Actual exceptional intervention work remains an ordinary registered Workboard obligation.
-
-## Authority Model
-
-The fresh v9 registry owns projects, routes, requests, board-to-Feature associations, recoverable native creation payloads, per-Feature scope revisions, obligation relationships, immutable review candidates, dependencies, attempt bindings, decisions, publication and terminal checkpoints, stop controls, explicit inactivation plans, source-idempotent schedules, exchanges, communication intents, and delivery receipts. It deliberately does not store Workboard status or native task liveness. Workboard owns human-visible obligation status, owner, conclusion and proof; native tasks/sessions own execution liveness; Git and GitHub own repository and publication effects.
-
-Card notes are natural human scope and context. They are never parsed for project identity, source, delivery, type, Feature membership, dependencies, attempts, decisions, publication state, or creation seals. Marker-like words and snippets are valid prose and have no machine effect; validation is limited to size and unsafe control characters. Scans start from registered obligations and ignore unregistered cards. Result delivery rows and native conversation receipts are the sole notification authority; no owner-notification card is created.
-
-The managed install record locates the package. Do not also add the same checkout to `plugins.load.paths`. For an unmanaged development load instead, omit `plugins install` and set `plugins.load.paths` to the repository path.
+Operator gateway methods: `jarvis-gilfoyle.board.call` (`{operation, input, agentId?}`), `jarvis-gilfoyle.board.tick` and `jarvis-gilfoyle.board.health`.
 
 ## Development
 
@@ -142,23 +108,9 @@ Requires Node.js with `node:sqlite` and OpenClaw `2026.9.2`.
 
 ```bash
 npm ci
-npm run build
 npm run format:check
 npm run check
 npm test
-npm pack --dry-run
 ```
 
-Source entrypoints are declared in `package.json` under `openclaw.extensions`; managed installs use the corresponding `openclaw.runtimeExtensions` compiled entrypoint. `openclaw.plugin.json` owns plugin identity, tool contracts, and configuration schema. `openclaw.json` owns enablement, grants, hooks, and deployment-specific configuration.
-
-The behavioral suite under `test/` uses Node's built-in `node:test` runner with `tsx` against `src/**/*.ts`; tests never import `dist`. `npm run check` separately builds and verifies the compiled registration/store boundary through `scripts/verify-dist.mjs`, and package validation inspects the packed artifact. These checks work on any machine with the declared Node and OpenClaw versions. See `TESTING.md` for test-layer and Arrange/Act/Assert guidance.
-
-Cross-authority writes reserve registry identity before native creation and retain recoverable staged checkpoints. Terminal completion stages facts for Jarvis before completing the Feature; only after native completion is confirmed can Jarvis compose the result delivery. Direct Feature completion requires that durable terminal checkpoint. Stops block new preparation, publication and finalization until engineering reconciles native tasks/sessions and any hosted effect.
-
-Worker execution currently requires the ACP runtime plus its native wrapper task; `worker.runtime` is therefore fixed to `acp` rather than advertising unsupported alternatives.
-
-Current state uses the fresh-only v9 project registry. Older plugin registries are rejected and are not migrated or parsed. Reset only the configured plugin `statePath`; personal OpenClaw state is separate and must not be erased.
-
-Internal control prompts use the semantic markers `PROJECT WAKE` and `PROJECT CONTINUATION`; the public brand is deliberately excluded from those markers.
-
-GitHub Actions runs formatting, compiled-output verification, behavioral tests, and package-boundary checks on Node `22.22.3`. The pinned native OpenClaw integration lane is available through manual workflow dispatch.
+See `TESTING.md`.
