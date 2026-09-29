@@ -99,6 +99,18 @@ const bound = (value) => {
 // Test-only injection points. Production leaves every field null.
 export const testHooks = { bridge: null, now: null, manualTicks: false, runtime: null };
 
+// OpenClaw may register the plugin more than once in one process: the gateway registry
+// runs the hooks while a per-run registry supplies the tool. Registrations with the same
+// configuration share one board, so a turn's chat, the scan and the bridge are not split
+// between them. An in-memory board belongs to its own registration.
+const boards = (globalThis[Symbol.for('jarvis-gilfoyle.boards')] ??= new Map());
+const sharedBoard = (cfg, create) => {
+  if (cfg.statePath === ':memory:') return create();
+  const key = JSON.stringify(cfg);
+  if (!boards.has(key)) boards.set(key, create());
+  return boards.get(key);
+};
+
 export default {
   id: 'jarvis-gilfoyle',
   name: 'Jarvis-Gilfoyle project board',
@@ -113,13 +125,21 @@ export default {
       workerProfiles: cfg.worker?.profiles,
       sessionNamespace: cfg.sessionNamespace,
     });
-    const bridge = testHooks.bridge ?? new Bridge();
-    let runtime, timer, openError;
+    const board = sharedBoard(cfg, () => ({
+      bridge: testHooks.bridge ?? new Bridge(),
+      runtime: null,
+      openError: null,
+      owner: null,
+    }));
+    const bridge = board.bridge;
+    const service = Symbol('service');
+    let timer;
     // The board opens lazily; a failure is reported by the tool and health and never
     // affects other agents. It is retried after a minute.
     const get = () => {
-      if (runtime) return runtime;
-      if (openError && Date.now() - openError.at < 60 * 1000) throw new Error(openError.message);
+      if (board.runtime) return board.runtime;
+      const failed = board.openError;
+      if (failed && Date.now() - failed.at < 60 * 1000) throw new Error(failed.message);
       try {
         assert(
           typeof cfg.statePath === 'string' &&
@@ -127,25 +147,30 @@ export default {
           'An absolute statePath is required',
         );
         const store = new Store(cfg.statePath, testHooks.now ? { now: testHooks.now } : {});
-        runtime = new BoardRuntime(store, (method, params) => bridge.request(method, params), {
-          ownerChat: cfg.ownerChat ?? null,
-          log: (message) => api.logger?.warn?.(message),
-          turnTimeoutSeconds: cfg.turnTimeoutSeconds ?? 1800,
-          maxWakesPerRole: cfg.maxWakesPerRole ?? 2,
-          agentName: (role) => agentLabel(currentConfig(api), agentForRole(role)),
-          ...(testHooks.now ? { now: testHooks.now } : {}),
-        });
+        board.runtime = new BoardRuntime(
+          store,
+          (method, params) => bridge.request(method, params),
+          {
+            ownerChat: cfg.ownerChat ?? null,
+            log: (message) => api.logger?.warn?.(message),
+            turnTimeoutSeconds: cfg.turnTimeoutSeconds ?? 1800,
+            maxWakesPerRole: cfg.maxWakesPerRole ?? 2,
+            agentName: (role) => agentLabel(currentConfig(api), agentForRole(role)),
+            ...(testHooks.now ? { now: testHooks.now } : {}),
+          },
+        );
       } catch (error) {
-        openError = {
+        board.openError = {
           at: Date.now(),
           message: `Project board unavailable (${String(error?.message ?? error)
             .split('\n')[0]
             .slice(0, 300)}); the operator must fix the jarvis-gilfoyle statePath.`,
         };
-        api.logger?.warn?.(openError.message);
-        throw new Error(openError.message);
+        api.logger?.warn?.(board.openError.message);
+        throw new Error(board.openError.message);
       }
-      openError = null;
+      board.openError = null;
+      const runtime = board.runtime;
       runtime.stopped = cfg.enabled === false;
       if (testHooks.manualTicks) runtime.requestTick = () => {};
       testHooks.runtime = runtime;
@@ -330,6 +355,7 @@ export default {
     api.registerService({
       id: 'jarvis-gilfoyle-board',
       start: async () => {
+        board.owner = service;
         bridge.stopped = false;
         if (cfg.enabled === false) return;
         const scan = () => {
@@ -350,7 +376,9 @@ export default {
       },
       stop: async () => {
         if (timer) clearInterval(timer);
-        if (runtime) runtime.stopped = true;
+        // A newer registration that already started keeps the shared board running.
+        if (board.owner !== service) return;
+        if (board.runtime) board.runtime.stopped = true;
         bridge.stop();
       },
     });

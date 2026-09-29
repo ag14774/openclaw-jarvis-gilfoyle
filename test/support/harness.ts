@@ -108,47 +108,54 @@ export async function harness({ config = {} } = {}) {
   testHooks.runtime = null;
   const hooks = {};
   let factory;
-  plugin.register({
-    pluginConfig: {
-      statePath: ':memory:',
-      productAgentId: 'main',
-      engineeringAgentId: 'gilfoyle',
-      ownerChat: { channel: 'telegram', accountId: 'default', to: 'telegram:100' },
-      worker: {
-        agentId: 'opencode',
-        limit: 2,
-        profiles: [
-          {
-            id: 'sol-low',
-            model: 'openai/gpt-5.6-sol',
-            thinking: 'low',
-            description: 'Routine work.',
-          },
-          {
-            id: 'astra',
-            model: 'openai/gpt-6-astra',
-            thinking: 'low',
-            description: 'Hard problems.',
-          },
-        ],
+  const pluginConfig = {
+    statePath: ':memory:',
+    productAgentId: 'main',
+    engineeringAgentId: 'gilfoyle',
+    ownerChat: { channel: 'telegram', accountId: 'default', to: 'telegram:100' },
+    worker: {
+      agentId: 'opencode',
+      limit: 2,
+      profiles: [
+        {
+          id: 'sol-low',
+          model: 'openai/gpt-5.6-sol',
+          thinking: 'low',
+          description: 'Routine work.',
+        },
+        {
+          id: 'astra',
+          model: 'openai/gpt-6-astra',
+          thinking: 'low',
+          description: 'Hard problems.',
+        },
+      ],
+    },
+    ...config,
+  };
+  // Registers the plugin as OpenClaw does; returns the tool factory and hooks it received.
+  const register = (into = hooks) => {
+    let made;
+    plugin.register({
+      pluginConfig,
+      config: {
+        agents: {
+          entries: { main: { identity: { name: 'Jarvis' } }, gilfoyle: { name: 'Gilfoyle' } },
+        },
       },
-      ...config,
-    },
-    config: {
-      agents: {
-        entries: { main: { identity: { name: 'Jarvis' } }, gilfoyle: { name: 'Gilfoyle' } },
+      logger: { warn() {} },
+      registerTool(make) {
+        made = make;
       },
-    },
-    logger: { warn() {} },
-    registerTool(make) {
-      factory = make;
-    },
-    registerGatewayMethod() {},
-    registerService() {},
-    on(name, fn) {
-      hooks[name] = fn;
-    },
-  });
+      registerGatewayMethod() {},
+      registerService() {},
+      on(name, fn) {
+        into[name] = fn;
+      },
+    });
+    return made;
+  };
+  factory = register();
   testHooks.bridge = null;
   const h = {
     native,
@@ -160,6 +167,8 @@ export async function harness({ config = {} } = {}) {
     get runtime() {
       return testHooks.runtime;
     },
+    // A further registration in the same process, as OpenClaw makes for agent runs.
+    registerAgain: () => register({}),
     tool(agentId, sessionKey) {
       return factory({ agentId, sessionKey });
     },

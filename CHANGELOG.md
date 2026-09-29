@@ -1,5 +1,13 @@
 # Changelog
 
+## 6.1.0 - 2026-09-29
+
+Fixes from the first live runs (protocol 11.1).
+
+- Registrations of the plugin in one process share one board, so the chat of a user's message reaches a tool call made through another registration, and there is one scan and one bridge.
+- The engineering manager hands over or closes only tasks it holds. A handover or close is refused when the calling session has not read a newer note in this turn.
+- In the project chat a `message` passed with a handover or close is not sent in addition to the reply.
+
 ## 6.0.0 - 2026-09-29
 
 Breaking rewrite as a small project board. (5.0.0 was never released.)

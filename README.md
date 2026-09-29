@@ -36,8 +36,9 @@ One tool, `project_board`, for both managers:
 Rules are enforced when they can be checked from the caller, the rows that already exist, or a native call the plugin already makes. Everything else is agent judgment, described in the bundled `project-coordination` skill.
 
 - Only the product manager creates or renames projects, pauses, resumes or archives them, binds chats, messages the user, hands tasks to the user, reopens tasks and closes tasks it created. The engineering manager may close only tasks it created.
-- Handing a task to the user, or closing a product task, requires the `message` for the user in the same call. The message is queued in the same transaction as the change. The exception is a call made from the project's own chat, where the manager's reply is the message.
+- Handing a task to the user, or closing a product task, requires the `message` for the user in the same call. The message is queued in the same transaction as the change. The exception is a call made from the project's own chat, where the manager's reply is the message and a `message` is not sent a second time.
 - Handovers and closing require a note. Closed tasks are read-only until reopened.
+- The engineering manager hands over or closes only tasks it holds. A handover or close is refused when a newer note arrived since the calling session last read the task in this turn; it reads the task again and decides.
 - A private task session sees and changes only its own project.
 - Workers spawned with `sessions_spawn` from a task session are recorded on that task. A spawn of the configured worker agent must name a worker profile (`model: "<profile id>"`); the plugin applies that profile's model, thinking level and runtime, and enforces `worker.limit`. Spawns are refused for closed tasks and paused projects. `sessions_send` may only reach the task's own workers, and the `message` tool is refused in task sessions.
 - A task cannot be marked done while its workers run. Cancelling a task aborts them.

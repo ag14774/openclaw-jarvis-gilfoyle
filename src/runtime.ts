@@ -100,6 +100,7 @@ export class BoardRuntime {
     this.captures = new Map(); // session -> route resolution still in progress
     this.routeCache = new Map();
     this.wakes = new Map(); // session -> dispatch time (until the run shows up as live)
+    this.seen = new Map(); // "session|task" -> newest note id read or written in this turn
     this.ownerRouteCache = null;
     this.stopped = false;
     this.health = { lastScan: null, lastError: null };
@@ -121,6 +122,7 @@ export class BoardRuntime {
     return {
       role,
       task,
+      session: ctx.sessionKey ?? '',
       source: task ? null : (this.turns.get(ctx.sessionKey) ?? null),
     };
   }
@@ -244,6 +246,7 @@ export class BoardRuntime {
   show(caller, input) {
     if (input.task !== undefined || (caller.task && input.project === undefined)) {
       const task = this.scopeTask(caller, input.task);
+      this.markSeen(caller.session, task.id);
       return {
         task: this.taskView(task, true),
         notes: this.store.notes(task.id).map((note) => ({
@@ -335,7 +338,10 @@ export class BoardRuntime {
     const project = this.scopeProject(caller, input.project);
     assert(project.state !== 'archived', 'The project is archived');
     const holder = input.holder ?? 'engineering';
-    assert(ROLES.includes(holder), 'A new task is held by product or engineering');
+    assert(
+      ROLES.includes(holder),
+      'A new task is held by product or engineering; to ask the user first, add it for product and then hand it to the user',
+    );
     const title = line(input.title, 200, 'title');
     const body = optional(input.body, 8000, 'body') ?? '';
     const now = this.now();
@@ -353,6 +359,7 @@ export class BoardRuntime {
         now,
       ).lastInsertRowid,
     );
+    this.markSeen(caller.session, id);
     this.requestTick();
     return { task: id, project: project.id, waitingOn: holder };
   }
@@ -395,6 +402,16 @@ export class BoardRuntime {
     }
     const newHolder = closing ? null : (holder ?? (reopening ? 'engineering' : task.holder));
     const handover = !closing && newHolder !== task.holder;
+    if (handover || closing || reopening) {
+      // Decisions are made on the latest state: another session may have changed the
+      // task since this one read it in this turn.
+      const seen = this.seen.get(`${caller.session}|${task.id}`);
+      const last = this.latestNote(task.id);
+      assert(
+        seen === undefined || seen >= (last?.id ?? 0),
+        `Task #${task.id} changed since you read it${last ? ` (latest from ${last.author}: ${clip(last.text, 300)})` : ''}; read it with show, then decide again`,
+      );
+    }
     if (handover) {
       assert(note, 'Handing a task over needs a note saying what is needed');
       assert(
@@ -402,13 +419,20 @@ export class BoardRuntime {
         'Only the product manager hands tasks to the user',
       );
     }
+    if (handover || closing)
+      assert(
+        caller.role === 'product' || task.holder === 'engineering',
+        `Task #${task.id} is waiting on ${task.holder}; add a note instead of handing it over`,
+      );
     if (message !== undefined)
       assert(caller.role === 'product', 'Only the product manager messages the user');
     // Required notifications travel with the change that requires them.
     const mustTell =
       (newHolder === 'user' && task.holder !== 'user') ||
       (closing && task.created_by === 'product');
-    if (mustTell && !message && !this.inProjectChat(caller, project))
+    // In the project chat the reply is the message; sending it too would say it twice.
+    const inChat = this.inProjectChat(caller, project);
+    if (mustTell && !message && !inChat)
       assert.fail(
         `${newHolder === 'user' ? 'Handing a task to the user' : 'Closing a user request'} needs message: the text the user receives in ${chatLabel(project.route)}`,
       );
@@ -444,8 +468,9 @@ export class BoardRuntime {
         now,
         task.id,
       );
-      return message ? this.store.enqueue(project.id, task.id, message) : null;
+      return message && !inChat ? this.store.enqueue(project.id, task.id, message) : null;
     });
+    this.markSeen(caller.session, task.id);
     if (status === 'cancelled') await this.abortWorkers(task);
     const delivery = outbox ? await this.deliver(outbox) : undefined;
     this.requestTick();
@@ -455,6 +480,14 @@ export class BoardRuntime {
       status: updated.status,
       ...(updated.holder ? { waitingOn: updated.holder } : {}),
       ...(delivery ? { message: delivery } : {}),
+      ...(message && inChat
+        ? {
+            message: {
+              state: 'not sent',
+              reason: 'you are in the project chat; say it in your reply',
+            },
+          }
+        : {}),
     };
   }
   async notify(caller, input) {
@@ -651,9 +684,19 @@ export class BoardRuntime {
       this.turns.set(sessionKey, source);
     } else this.turns.delete(sessionKey);
   }
+  latestNote(taskId) {
+    return this.store.get(
+      'SELECT id,author,text FROM notes WHERE task=? ORDER BY id DESC LIMIT 1',
+      taskId,
+    );
+  }
+  markSeen(sessionKey, taskId) {
+    this.seen.set(`${sessionKey}|${taskId}`, this.latestNote(taskId)?.id ?? 0);
+  }
   endTurn(sessionKey) {
     this.turns.delete(sessionKey);
     this.wakes.delete(sessionKey);
+    for (const key of this.seen.keys()) if (key.startsWith(`${sessionKey}|`)) this.seen.delete(key);
   }
   // Project context for a product-manager chat that a project uses: which project, and
   // any task waiting on the user's answer. Nothing for other chats.
@@ -699,6 +742,7 @@ export class BoardRuntime {
     }
     const project = this.store.project(task.project);
     const you = scope.role;
+    this.markSeen(sessionKey, task.id);
     const lines = [
       `Project: ${project.name} (project ${project.id}), ${project.state}. Project chat: ${chatLabel(project.route)}.`,
       ...(project.context ? [`Project context:\n${clip(project.context, 3000)}`] : []),

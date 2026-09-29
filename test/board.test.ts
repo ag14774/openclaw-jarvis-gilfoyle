@@ -202,6 +202,20 @@ test('in the project chat the reply is the message; elsewhere a message is requi
   });
   assert.equal(cancelled.status, 'cancelled');
   assert.equal(h.native.sent.length, 0);
+  const asked = await h.call('main', JARVIS_GROUP, {
+    operation: 'add_task',
+    title: 'Colour',
+    holder: 'product',
+  });
+  const question = await h.call('main', JARVIS_GROUP, {
+    operation: 'update_task',
+    task: asked.task,
+    holder: 'user',
+    note: 'Asked the user',
+    message: 'Which colour?',
+  });
+  assert.equal(question.message.state, 'not sent');
+  assert.equal(h.native.sent.length, 0);
 
   const other = await h.call('main', JARVIS_DM, {
     operation: 'add_task',
@@ -216,6 +230,59 @@ test('in the project chat the reply is the message; elsewhere a message is requi
     note: 'Dropped',
   });
   assert.match(fromDm.error, /needs message/);
+});
+
+test('a task is handed over only by its holder and from its latest state', async () => {
+  const h = await harness();
+  await project(h);
+  // Jarvis asks the user before engineering starts.
+  await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
+  const { task } = await h.call('main', JARVIS_GROUP, {
+    operation: 'add_task',
+    title: 'Summary header',
+    holder: 'product',
+  });
+  await h.call('main', JARVIS_GROUP, {
+    operation: 'update_task',
+    task,
+    holder: 'user',
+    note: 'Asked for the header text',
+  });
+  h.endTurn('main', JARVIS_GROUP);
+  const taken = await h.call('gilfoyle', key(h, 'engineering', task), {
+    operation: 'update_task',
+    holder: 'product',
+    note: 'Need the exact text',
+  });
+  assert.match(taken.error, /waiting on user; add a note instead/);
+
+  // A private product session reads the task; meanwhile the chat records the user's answer.
+  const jKey = key(h, 'product', task);
+  await h.hooks.before_prompt_build({}, { agentId: 'main', sessionKey: jKey });
+  await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
+  await h.call('main', JARVIS_GROUP, {
+    operation: 'update_task',
+    task,
+    holder: 'engineering',
+    note: 'User: "Copied Summary"',
+  });
+  const stale = await h.call('main', jKey, {
+    operation: 'update_task',
+    holder: 'user',
+    note: 'Ask again',
+    message: 'What should the header say?',
+  });
+  assert.match(
+    stale.error,
+    /changed since you read it \(latest from product: User: "Copied Summary"\)/,
+  );
+  await h.call('main', jKey, { operation: 'show' });
+  const current = await h.call('main', jKey, {
+    operation: 'update_task',
+    holder: 'product',
+    note: 'Taking it back to check the wording',
+  });
+  assert.equal(current.waitingOn, 'product');
 });
 
 test('roles, project isolation and closed tasks are enforced', async () => {
@@ -606,5 +673,20 @@ test('the board file persists across restarts and a foreign database is refused'
   other.exec('PRAGMA user_version=99');
   other.close();
   assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 16\)/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('registrations in one process share the board, so a chat seen by the hooks binds the tool call', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-'));
+  const h = await harness({ config: { statePath: join(dir, 'state.sqlite') } });
+  // OpenClaw runs the hooks from its gateway registration and the tool from another one.
+  const otherTool = h.registerAgain();
+  await h.userMessage('main', JARVIS_DM, 'telegram:100');
+  const run = (args) => otherTool({ agentId: 'main', sessionKey: JARVIS_DM }).execute('call', args);
+  const created = JSON.parse(
+    (await run({ operation: 'create_project', name: 'Quote Desk' })).content[0].text,
+  );
+  assert.match(created.chat, /telegram DM telegram:100/);
+  h.runtime.store.close();
   rmSync(dir, { recursive: true, force: true });
 });

@@ -10,7 +10,8 @@
 
 - the request round trip, from user to engineering and back to the user;
 - a question to the user and the answer back to engineering;
-- when a message is required;
+- when a message is required, and that the project chat is not told twice;
+- handovers only by the holder and from the latest notes;
 - roles, project isolation and closed tasks;
 - stall reporting and check-ins;
 - workers: profiles, the limit, cancellation and the done guard;
@@ -19,7 +20,8 @@
 - delivery fallback and retry identity;
 - `use_this_chat` turn binding;
 - non-interference with personal work and other agents;
-- refusal of an old registry.
+- the board file surviving a restart, and refusal of a database with another schema;
+- one shared board when OpenClaw registers the plugin more than once in a process.
 
 The fakes follow OpenClaw 2026.9.2 as found in its distribution:
 
