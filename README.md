@@ -98,7 +98,7 @@ A linked install loads `dist/` when the Gateway starts. After changing source, r
 
 Optional settings: `sessionNamespace` (default `jarvis-gilfoyle`), `scanMs` (60000), `turnTimeoutSeconds` (1800), `maxWakesPerRole` (2) and `enabled`.
 
-Grant `project_board` to both managers. The registry is fresh-only (schema v16). An older file at `statePath` is refused rather than migrated, so move it aside when upgrading.
+Grant `project_board` to both managers. `statePath` must be a new file or an existing board (schema 16); any other database is refused.
 
 Operator gateway methods: `jarvis-gilfoyle.board.call` (`{operation, input, agentId?}`), `jarvis-gilfoyle.board.tick` and `jarvis-gilfoyle.board.health`.
 

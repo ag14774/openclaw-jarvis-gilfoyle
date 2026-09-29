@@ -67,7 +67,7 @@ export class Store {
     const version = this.get('PRAGMA user_version').user_version;
     assert(
       version === 0 || version === SCHEMA_VERSION,
-      `Project board needs a fresh v${SCHEMA_VERSION} registry (found v${version}); move the old statePath file aside`,
+      `statePath is not a project board (schema ${version}, expected ${SCHEMA_VERSION}); point it at a new or existing board file`,
     );
     this.db.exec(SCHEMA);
     this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);

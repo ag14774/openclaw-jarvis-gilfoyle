@@ -591,12 +591,20 @@ test('the plugin stays out of personal work and non-manager agents', async () =>
   );
 });
 
-test('an old registry is refused rather than migrated', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'board-old-'));
+test('the board file persists across restarts and a foreign database is refused', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-'));
   const path = join(dir, 'state.sqlite');
-  const old = new DatabaseSync(path);
-  old.exec('PRAGMA user_version=15');
-  old.close();
-  assert.throws(() => new Store(path), /fresh v16 registry \(found v15\)/);
+  const first = new Store(path);
+  first.run("INSERT INTO projects(id,name,created,updated) VALUES('kept','Kept',1,1)");
+  first.close();
+  const reopened = new Store(path);
+  assert.equal(reopened.project('kept').name, 'Kept');
+  reopened.close();
+
+  const foreign = join(dir, 'other.sqlite');
+  const other = new DatabaseSync(foreign);
+  other.exec('PRAGMA user_version=99');
+  other.close();
+  assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 16\)/);
   rmSync(dir, { recursive: true, force: true });
 });
