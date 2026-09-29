@@ -4,7 +4,9 @@ import { harness, JARVIS_DM, JARVIS_GROUP, MINUTE, ref } from './support/harness
 import { taskSessionKey } from '../src/topology.ts';
 import { Store } from '../src/store.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const key = (h, role, id) => taskSessionKey(role, h.runtime.store.task(id));
 const agent = { product: 'main', engineering: 'gilfoyle' };
@@ -590,11 +592,11 @@ test('the plugin stays out of personal work and non-manager agents', async () =>
 });
 
 test('an old registry is refused rather than migrated', () => {
-  const path = `/tmp/opencode/board-old-${process.pid}.sqlite`;
-  rmSync(path, { force: true });
+  const dir = mkdtempSync(join(tmpdir(), 'board-old-'));
+  const path = join(dir, 'state.sqlite');
   const old = new DatabaseSync(path);
   old.exec('PRAGMA user_version=15');
   old.close();
   assert.throws(() => new Store(path), /fresh v16 registry \(found v15\)/);
-  rmSync(path, { force: true });
+  rmSync(dir, { recursive: true, force: true });
 });
