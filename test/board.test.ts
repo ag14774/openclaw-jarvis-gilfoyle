@@ -320,6 +320,14 @@ test('private task sessions follow the model chosen in the project chat', async 
     thinkingLevel: null,
   });
 
+  // A message in the project chat records the session OpenClaw routed it to; a message in
+  // another chat (the DM) does not.
+  const moved = 'agent:main:telegram:group:-200:reset-scope';
+  h.native.session(moved);
+  await h.userMessage('main', moved, 'telegram:-200');
+  await h.userMessage('main', JARVIS_DM, 'telegram:100');
+  assert.equal(h.runtime.store.project('quote-desk').route.sessionKey, moved);
+
   // The companion lets sessions.patch touch only the model settings of private sessions.
   assert(companionMethodAllowed('sessions.patch', { key: gKey, agentId: 'gilfoyle', model: null }));
   assert(

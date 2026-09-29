@@ -645,11 +645,34 @@ export class BoardRuntime {
       .catch(() => null)
       .then((route) => {
         this.sources.set(sessionKey, { route, at, used: false });
+        if (route && agentId === topology().productAgentId)
+          this.followChatSession(sessionKey, route);
       });
     this.captures.set(sessionKey, pending);
     return pending.finally(() => {
       if (this.captures.get(sessionKey) === pending) this.captures.delete(sessionKey);
     });
+  }
+  // The session OpenClaw routed a message in a project's own chat to is that chat's
+  // session; a project records it again when it changed (reset scope, deleted session).
+  // Messages in any other chat leave the project untouched.
+  followChatSession(sessionKey, route) {
+    try {
+      for (const project of this.store.projects())
+        if (
+          project.route?.conversationRef === route.conversationRef &&
+          project.route.sessionKey !== sessionKey
+        )
+          this.store.run(
+            'UPDATE projects SET route=? WHERE id=?',
+            JSON.stringify({ ...project.route, sessionKey }),
+            project.id,
+          );
+    } catch (error) {
+      this.log(
+        `Project chat session not recorded: ${String(error?.message ?? error).slice(0, 200)}`,
+      );
+    }
   }
   async resolveRoute(agentId, raw) {
     const clean = (value) => {

@@ -17,7 +17,7 @@ The names are thematic; roles map to configured OpenClaw agent IDs.
 
 A mechanical scan (every 60 seconds by default) wakes whichever manager holds a task, in that task's own private session. It wakes a manager when someone else changed the task, or when the task's check-in time is due (60 minutes, or the holder's `check_in_minutes`). It never wakes anyone for the user, and never interrupts a session that is mid-turn. Each manager runs at most `maxWakesPerRole` private sessions at once. A holder woken three times without changing the task makes the plugin tell the user once; any change resets this.
 
-Private task sessions of both managers run on the model and thinking level the user chose in the project chat (`/model`, `/think`), read at every wake. Without such a choice, or when the project was bound before 6.2.0 and has not been rebound with `use_this_chat`, they use the agents' defaults. `/new` and `/reset` in the chat keep both the binding and the choice.
+Private task sessions of both managers run on the model and thinking level the user chose in the project chat (`/model`, `/think`), read at every wake. Without such a choice they use the agents' defaults. The project chat's session is the one OpenClaw routed the binding message to, and every later user message in that chat records it again if it changed; messages in other chats never change it. `/new` and `/reset` keep both the session and the choice.
 
 ## Tool
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.2.1 - 2026-09-29
+
+- A user message in a project's chat records the session OpenClaw routed it to, so the chat's session follows resets of session scope or deleted sessions, and projects bound before 6.2.0 pick it up without `use_this_chat`. Messages in other chats, such as the owner DM for a project with its own chat, never change it.
+
 ## 6.2.0 - 2026-09-29
 
 Protocol 11.3.
