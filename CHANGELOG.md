@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.1.1 - 2026-09-29
+
+Skill only (protocol 11.2): the engineering manager keeps one checkout per repository in the projects directory named in its local notes, gives each worker assignment its own worktree and branch with the worker's `cwd` set to it, removes worktrees after merge or cancellation, and records the checkout path in the project context.
+
 ## 6.1.0 - 2026-09-29
 
 Fixes from the first live runs (protocol 11.1).

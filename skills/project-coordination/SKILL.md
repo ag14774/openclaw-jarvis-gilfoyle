@@ -3,7 +3,7 @@ name: project-coordination
 description: 'How the product and engineering managers run projects on the shared project board (tool project_board).'
 ---
 
-# Project Coordination — protocol11.1
+# Project Coordination — protocol11.2
 
 The board holds projects, tasks and notes. Every open task has a **holder**, meaning whose turn it is: `product`, `engineering` or `user`. Work moves by handing a task over with a note. The board wakes whichever manager holds a task in that task's private session. It never wakes anyone for the user.
 
@@ -31,5 +31,6 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - When the user talks to you directly, discuss and inspect. Refer implementation requests to the product manager.
 - Own the engineering: plan, split work, spawn workers, review, run CI and merge according to the repository's own standards.
 - Spawn workers from the task session with `sessions_spawn`: `agentId` is the worker agent, and `model` is a worker profile id from the task card. The board records each worker on the task and applies the profile. Worker completion wakes you in the same session.
-- Keep durable repository facts (paths, branches, conventions) in the project `context`.
+- Keep one checkout per repository, in the projects directory named in your local notes. Give each worker assignment its own worktree and branch, and spawn the worker with `cwd` set to that worktree. Remove the worktree and its local branch after merge or cancellation.
+- Keep durable repository facts (checkout path, branches, conventions) in the project `context`.
 - When the work is finished, hand the task to `product` with a note: what changed, where (branch, PR, commit), and how it was verified. When you need a decision, hand it to `product` with the question. You may close tasks you created yourself. A task cannot be marked done while its workers still run.
