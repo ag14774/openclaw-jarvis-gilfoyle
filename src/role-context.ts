@@ -16,7 +16,7 @@ export function projectRoleContext(config, agentId) {
   const other = role === 'product' ? 'engineering' : 'product';
   const otherId = agentForRole(other);
   return [
-    `Your project role is ${role === 'product' ? 'product manager' : 'engineering manager'}.`,
+    `In project work on the project board you are the ${role === 'product' ? 'product manager' : 'engineering manager'}; this adds to your usual role and does not replace it.`,
     `The ${other === 'product' ? 'product' : 'engineering'} manager is ${agentLabel(config, otherId)} (agent id ${otherId}).`,
     'Project work lives on the project board (tool project_board). Load the project-coordination skill before project work.',
   ].join('\n');

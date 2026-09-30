@@ -178,7 +178,7 @@ test('a question goes to the user with its message, and the answer goes back to 
 
   // In the project chat Jarvis sees the waiting question and records the answer.
   const context = await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
-  assert.match(context.prependContext, /project chat for "Quote Desk"/);
+  assert.match(context.prependContext, /also used as the project chat for "Quote Desk"/);
   assert.match(context.prependContext, /Waiting on the user: Quote Desk task #\d+ "Pricing page"/);
   const answered = await h.call('main', JARVIS_GROUP, {
     operation: 'update_task',
@@ -721,6 +721,10 @@ test('the plugin stays out of personal work and non-manager agents', async () =>
   // A personal chat without projects gets only the role line.
   const personal = await h.userMessage('main', 'agent:main:telegram:direct:999', 'telegram:999');
   assert.equal(personal.prependContext, undefined);
+  assert.match(
+    personal.prependSystemContext,
+    /project work .* adds to your usual role and does not replace it/,
+  );
   assert.match(
     personal.prependSystemContext,
     /engineering manager is Gilfoyle \(agent id gilfoyle\)/,

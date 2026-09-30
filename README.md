@@ -48,7 +48,7 @@ Rules are enforced when they can be checked from the caller, the rows that alrea
 - Messages go only to the project chat, or to the configured owner DM (prefixed with the project name) when the project chat rejects them or keeps failing. The project's chat is never rebound by delivery.
 - Private task sessions never reply into user chats. Runs in sessions of closed tasks are refused, and those sessions are deleted once idle.
 
-Outside the tool and private task sessions the plugin does nothing. It adds no context to personal chats, and it leaves other agents and the product manager's personal-assistant work untouched. In a chat that is a project chat, the product manager gets one line naming the project and one line per task waiting on the user. Hooks fail open: any hook error is logged and ignored.
+Outside the tool and private task sessions the plugin does nothing. In other chats a manager gets only one line saying that its project role adds to its usual role, and the plugin leaves other agents and the product manager's personal-assistant work untouched. In a chat that is also a project chat, the product manager gets one line naming the project and one line per task waiting on the user. Hooks fail open: any hook error is logged and ignored.
 
 ## Installation
 

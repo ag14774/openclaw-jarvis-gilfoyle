@@ -740,7 +740,9 @@ export class BoardRuntime {
     const lines = [];
     for (const project of projects.slice(0, 5)) {
       if (project.route?.conversationRef === route.conversationRef)
-        lines.push(`This chat is the project chat for "${project.name}" (project ${project.id}).`);
+        lines.push(
+          `This chat is also used as the project chat for "${project.name}" (project ${project.id}).`,
+        );
       for (const task of this.store.all(
         "SELECT * FROM tasks WHERE project=? AND status='open' AND holder='user' ORDER BY id LIMIT 5",
         project.id,

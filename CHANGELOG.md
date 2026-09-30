@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.2.3 - 2026-09-30
+
+- The manager role line now says the project role adds to the manager's usual role, and a project chat is described as "also used as" the project chat. Jarvis had described himself as only Quote Desk's product manager in the owner DM, which is also that project's chat.
+
 ## 6.2.2 - 2026-09-29
 
 - The model is applied to private task sessions with write scope only and the thinking level in a separate call. With admin scope OpenClaw also made the model the configured default (sticky model selection).
