@@ -13,7 +13,7 @@
 - when a message is required, and that the project chat is not told twice;
 - handovers only by the holder and from the latest notes;
 - roles, project isolation and closed tasks;
-- stall reporting and check-ins;
+- stall reporting and check-ins, and a failed worker waking its holder once;
 - workers: profiles, the limit, cancellation and the done guard;
 - pause and resume;
 - per-role concurrency;

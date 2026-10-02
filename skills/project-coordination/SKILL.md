@@ -3,7 +3,7 @@ name: project-coordination
 description: 'How the product and engineering managers run projects on the shared project board (tool project_board).'
 ---
 
-# Project Coordination — protocol11.5
+# Project Coordination — protocol11.6
 
 The board holds projects, tasks and notes. Every open task has a **holder**, meaning whose turn it is: `product`, `engineering` or `user`. Work moves by handing a task over with a note. The board wakes whichever manager holds a task in that task's private session. It never wakes anyone for the user.
 

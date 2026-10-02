@@ -2,7 +2,7 @@
   "id": "jarvis-gilfoyle",
   "name": "Jarvis-Gilfoyle Project Board",
   "description": "A small project board in SQLite: projects, tasks with whose turn it is, notes, timed wake-ups for the product and engineering managers, and guaranteed messages to the project chat.",
-  "version": "6.2.5",
+  "version": "6.3.0",
   "contracts": { "tools": ["project_board"] },
   "skills": ["./skills"],
   "configSchema": {

@@ -931,8 +931,12 @@ export class BoardRuntime {
        WHERE t.status='open' AND p.state='active' AND t.holder IN ('product','engineering') AND t.stalled IS NULL
        ORDER BY t.updated`,
     );
+    const failed = await this.failedWorkers(tasks);
     const due = tasks.filter(
-      (task) => task.poked !== null || (task.check_at !== null && now >= task.check_at),
+      (task) =>
+        task.poked !== null ||
+        failed.has(task.id) ||
+        (task.check_at !== null && now >= task.check_at),
     );
     for (const [session, at] of this.wakes)
       if (now - at >= WAKE_GRACE_MS) this.wakes.delete(session);
@@ -970,12 +974,12 @@ export class BoardRuntime {
       } catch {
         workers = task.workers.length;
       }
-      if (!poked && !workers && task.idle_wakes >= STALL_WAKES) {
+      if (!poked && !failed.has(task.id) && !workers && task.idle_wakes >= STALL_WAKES) {
         await this.reportStall(task);
         summary.stalled.push(task.id);
         continue;
       }
-      if (await this.wake(task, role, key, poked, workers)) {
+      if (await this.wake(task, role, key, poked, workers, failed.get(task.id))) {
         live[role].add(key);
         summary.woken.push(task.id);
       }
@@ -1010,7 +1014,37 @@ export class BoardRuntime {
       );
     }
   }
-  async wake(task, role, key, poked, workers) {
+  // A worker that stopped without finishing (a restart, crash or provider error) wakes its
+  // holder at once, because OpenClaw's own completion notice does not always start a
+  // turn. Normal completions are left to that notice. A worker counts once: the wake
+  // moves the task's woken time past the worker's end.
+  async failedWorkers(tasks) {
+    const failed = new Map();
+    const withWorkers = tasks.filter((task) => task.workers !== '[]');
+    if (!withWorkers.length) return failed;
+    const { workerAgentId } = topology();
+    try {
+      const rows = new Map(
+        (await this.sessionRows(workerAgentId, `agent:${workerAgentId}:`)).map((row) => [
+          row.key,
+          row,
+        ]),
+      );
+      for (const task of withWorkers)
+        for (const worker of JSON.parse(task.workers).slice(-5)) {
+          const row = rows.get(worker.key);
+          const ended = Number(row?.updatedAt);
+          if (row?.status === 'failed' && ended > (task.woken ?? 0) && ended > worker.at)
+            failed.set(task.id, worker.key);
+        }
+    } catch (error) {
+      this.log(
+        `Cannot see ${workerAgentId} sessions: ${String(error?.message ?? error).slice(0, 200)}`,
+      );
+    }
+    return failed;
+  }
+  async wake(task, role, key, poked, workers, failedWorker) {
     const now = this.now();
     this.wakes.set(key, now);
     // The poke this wake answers is cleared; a newer one (changed meanwhile) stays.
@@ -1023,13 +1057,15 @@ export class BoardRuntime {
       task.id,
     );
     const last = this.store.notes(task.id, 1)[0];
-    const reason = poked
-      ? last && last.author !== role
-        ? `New from ${last.author}: ${clip(last.text, 500)}`
-        : 'This task is waiting on you.'
-      : workers
-        ? 'Scheduled check-in; workers are still running.'
-        : 'Scheduled check-in.';
+    const reason = failedWorker
+      ? `A worker stopped without finishing (${failedWorker}). Check its session and the worktree, then continue.`
+      : poked
+        ? last && last.author !== role
+          ? `New from ${last.author}: ${clip(last.text, 500)}`
+          : 'This task is waiting on you.'
+        : workers
+          ? 'Scheduled check-in; workers are still running.'
+          : 'Scheduled check-in.';
     try {
       await this.rpc('sessions.create', {
         key,

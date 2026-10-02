@@ -504,6 +504,45 @@ test('check_in_minutes schedules the next wake, and running workers do not count
   }
 });
 
+test('a worker that stops without finishing wakes its holder once', async () => {
+  const h = await harness();
+  await project(h);
+  const { task } = await h.call('main', JARVIS_DM, {
+    operation: 'add_task',
+    project: 'quote-desk',
+    title: 'Shortcuts',
+  });
+  await h.tick();
+  const gKey = key(h, 'engineering', task);
+  const { childSessionKey } = await h.spawn(gKey, {
+    agentId: 'opencode',
+    model: 'astra',
+    task: 'Build',
+  });
+  await h.call('gilfoyle', gKey, {
+    operation: 'update_task',
+    note: 'Worker running',
+    check_in_minutes: 30,
+  });
+  h.endAllRuns();
+  h.advance(2 * MINUTE);
+  assert.deepEqual((await h.tick()).woken, []);
+
+  // A gateway restart kills the worker; its native session is marked failed.
+  h.advance(MINUTE);
+  Object.assign(h.native.session(childSessionKey), {
+    hasActiveRun: false,
+    status: 'failed',
+    updatedAt: h.now(),
+  });
+  h.advance(MINUTE);
+  assert.deepEqual((await h.tick()).woken, [task]);
+  assert.match(h.native.runs.at(-1).message, /A worker stopped without finishing/);
+  h.endAllRuns();
+  h.advance(2 * MINUTE);
+  assert.deepEqual((await h.tick()).woken, []);
+});
+
 test('cancelling stops the task’s workers', async () => {
   const h = await harness();
   await project(h);

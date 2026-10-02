@@ -1,5 +1,11 @@
 # Changelog
 
+## 6.3.0 - 2026-10-02
+
+Protocol 11.6.
+
+- A recorded worker whose native session failed after its holder was last woken wakes the holder at the next scan, once per failure: "A worker stopped without finishing". OpenClaw's own completion notice does not always start a turn. In a live restart test, the holder waited 29 minutes for his own check-in. Normal completions are still left to OpenClaw's notice. The scan adds one session list for the worker agent while open tasks have workers.
+
 ## 6.2.5 - 2026-10-02
 
 Skill only (protocol 11.5):
