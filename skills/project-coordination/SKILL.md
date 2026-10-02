@@ -3,7 +3,7 @@ name: project-coordination
 description: 'How the product and engineering managers run projects on the shared project board (tool project_board).'
 ---
 
-# Project Coordination — protocol11.3
+# Project Coordination — protocol11.4
 
 The board holds projects, tasks and notes. Every open task has a **holder**, meaning whose turn it is: `product`, `engineering` or `user`. Work moves by handing a task over with a note. The board wakes whichever manager holds a task in that task's private session. It never wakes anyone for the user.
 
@@ -11,6 +11,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 
 - Read the task card in a private session. Use `show` for full notes and `list` for the whole board.
 - Handing a task over or closing it needs a note: what you did, what you found, what you need. If the board says the task changed since you read it, `show` it and decide again.
+- In a private session your turn ends as soon as you reply without a tool call, and nothing happens until the next wake-up. Do not end with what you are about to do; do it. End a turn only when the task is handed over or closed, or you are genuinely waiting.
 - When you are waiting (CI, a worker, a date), add a note or set `check_in_minutes`. A holder who is woken three times without changing the task makes the board tell the user the task is stuck.
 - Nobody sees replies in a private session. End them with `NO_REPLY`. The user is reached only through the board's messages.
 - Work only on the task's own project. Paused projects get no wake-ups and no new workers.
