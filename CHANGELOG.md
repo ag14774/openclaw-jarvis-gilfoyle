@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.3.3 - 2026-10-02
+
+- Skill: after merge or cancellation, engineering also removes the remote branch (`gh pr merge --delete-branch` on merge). Every merged PR in the live test repository had left its branch on GitHub.
+
 ## 6.3.2 - 2026-10-02
 
 - A failed worker is timed by its session's `endedAt`, not `updatedAt`. After a restart the host touches the dead row again, which woke the holder a second time in the live test.
