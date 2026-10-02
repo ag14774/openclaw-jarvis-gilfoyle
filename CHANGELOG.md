@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.3.2 - 2026-10-02
+
+- A failed worker is timed by its session's `endedAt`, not `updatedAt`. After a restart the host touches the dead row again, which woke the holder a second time in the live test.
+
 ## 6.3.1 - 2026-10-02
 
 - The failed-worker wake-up now says "Unless you stopped it". A worker the holder stops himself also ends as failed and causes one wake-up, which should not prompt a re-run.

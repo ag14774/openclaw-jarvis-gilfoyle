@@ -534,13 +534,16 @@ test('a worker that stops without finishing wakes its holder once', async () => 
   Object.assign(h.native.session(childSessionKey), {
     hasActiveRun: false,
     status: 'failed',
-    updatedAt: h.now(),
+    endedAt: h.now(),
   });
   h.advance(MINUTE);
   assert.deepEqual((await h.tick()).woken, [task]);
   assert.match(h.native.runs.at(-1).message, /A worker stopped without finishing/);
+  // The host touches the dead row again after the wake; that is not a new failure.
   h.endAllRuns();
-  h.advance(2 * MINUTE);
+  h.advance(MINUTE);
+  h.native.session(childSessionKey).updatedAt = h.now();
+  h.advance(MINUTE);
   assert.deepEqual((await h.tick()).woken, []);
 });
 

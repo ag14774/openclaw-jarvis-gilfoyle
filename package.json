@@ -1,6 +1,6 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "6.3.1",
+  "version": "6.3.2",
   "description": "A small SQLite project board for a product and an engineering manager agent on OpenClaw",
   "license": "UNLICENSED",
   "type": "module",

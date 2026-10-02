@@ -1033,7 +1033,8 @@ export class BoardRuntime {
       for (const task of withWorkers)
         for (const worker of JSON.parse(task.workers).slice(-5)) {
           const row = rows.get(worker.key);
-          const ended = Number(row?.updatedAt);
+          // endedAt, not updatedAt: the host touches rows again after a restart.
+          const ended = Number(row?.endedAt);
           if (row?.status === 'failed' && ended > (task.woken ?? 0) && ended > worker.at)
             failed.set(task.id, worker.key);
         }
