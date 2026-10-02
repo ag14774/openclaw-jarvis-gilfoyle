@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.2.5 - 2026-10-02
+
+Skill only (protocol 11.5):
+
+- The product manager describes what the user needs and passes technical choices to engineering as questions, even when the user asks it to decide.
+- Repository changes describe the product and its technical decisions. Coordination between the managers (who asked, who decided, handovers and corrections) stays on the board.
+
 ## 6.2.4 - 2026-10-02
 
 Skill only (protocol 11.4): in a private session a reply without a tool call ends the turn, so managers do the next step instead of announcing it, and end a turn only when the task is handed over or closed, or they are genuinely waiting. After a worker finished, Gilfoyle had replied "I'm checking the implementation…" and stopped until his check-in ten minutes later.

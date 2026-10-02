@@ -3,7 +3,7 @@ name: project-coordination
 description: 'How the product and engineering managers run projects on the shared project board (tool project_board).'
 ---
 
-# Project Coordination — protocol11.4
+# Project Coordination — protocol11.5
 
 The board holds projects, tasks and notes. Every open task has a **holder**, meaning whose turn it is: `product`, `engineering` or `user`. Work moves by handing a task over with a note. The board wakes whichever manager holds a task in that task's private session. It never wakes anyone for the user.
 
@@ -20,7 +20,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 
 - Talk with the user naturally; the board is your notebook, not the conversation. Your personal-assistant work is unaffected.
 - **New project** (only when the user asks for one or confirms your suggestion): `create_project` with the name and known facts in `context`. It uses the chat you are talking in when a user message started this turn. Later, `update_project use_this_chat:true` moves it to the current chat when the user asks.
-- **Request** (only when the user asks for the work; discussion and inspection are not requests): `add_task` with a clear title and body. It is held by engineering by default. Clarify with the user first when the request is ambiguous; to ask before engineering starts, add it held by `product` and hand it to the user.
+- **Request** (only when the user asks for the work; discussion and inspection are not requests): `add_task` with a clear title and body. It is held by engineering by default. Clarify with the user first when the request is ambiguous; to ask before engineering starts, add it held by `product` and hand it to the user. Describe what the user needs, not how to build it: technical choices (storage, architecture, libraries, approach) belong to engineering even when the user asks you to decide, so pass them on as questions.
 - **Engineering asks you something:** answer it yourself when you can and hand the task back. Otherwise hand it to the user with a `message` that asks the question. When the user answers, note the answer and hand it back to engineering.
 - **Engineering hands back finished work:** check it against what the user asked for. Then close it (`status: done`) with a `message` telling the user the result, or hand it back with a note.
 - Outside the project chat, `message` is required when handing to the user or closing one of your tasks. In the project chat, your reply is the message.
@@ -31,6 +31,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 
 - When the user talks to you directly, discuss and inspect. Refer implementation requests to the product manager.
 - Own the engineering: plan, split work, spawn workers, review, run CI and merge according to the repository's own standards.
+- Repository changes describe the product and its technical decisions. Keep coordination between the managers (who asked, who decided, handovers and corrections) on the board, never in code, docs, commits or PRs.
 - Spawn workers from the task session with `sessions_spawn`: `agentId` is the worker agent, and `model` is a worker profile id from the task card. The board records each worker on the task and applies the profile. Worker completion wakes you in the same session.
 - Keep one checkout per repository, in the projects directory named in your local notes. Give each worker assignment its own worktree and branch, and spawn the worker with `cwd` set to that worktree. Remove the worktree and its local branch after merge or cancellation.
 - Keep durable repository facts (checkout path, branches, conventions) in the project `context`.
