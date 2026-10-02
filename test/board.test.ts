@@ -528,7 +528,8 @@ test('a worker that stops without finishing wakes its holder once', async () => 
   h.advance(2 * MINUTE);
   assert.deepEqual((await h.tick()).woken, []);
 
-  // A gateway restart kills the worker; its native session is marked failed.
+  // A gateway restart kills the worker; its native session is marked failed. A worker the
+  // holder stops himself ends the same way, so the wake-up says to ignore that case.
   h.advance(MINUTE);
   Object.assign(h.native.session(childSessionKey), {
     hasActiveRun: false,

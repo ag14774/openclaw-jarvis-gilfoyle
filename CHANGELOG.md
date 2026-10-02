@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.3.1 - 2026-10-02
+
+- The failed-worker wake-up now says "Unless you stopped it". A worker the holder stops himself also ends as failed and causes one wake-up, which should not prompt a re-run.
+
 ## 6.3.0 - 2026-10-02
 
 Protocol 11.6.

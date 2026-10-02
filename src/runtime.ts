@@ -1058,7 +1058,7 @@ export class BoardRuntime {
     );
     const last = this.store.notes(task.id, 1)[0];
     const reason = failedWorker
-      ? `A worker stopped without finishing (${failedWorker}). Check its session and the worktree, then continue.`
+      ? `A worker stopped without finishing (${failedWorker}). Unless you stopped it, check its session and the worktree, then continue.`
       : poked
         ? last && last.author !== role
           ? `New from ${last.author}: ${clip(last.text, 500)}`
