@@ -1,5 +1,10 @@
 # Changelog
 
+## 6.4.1 - 2026-10-03
+
+- Cancelling a task stops its workers with `clearQueued`, so follow-ups already queued for them are dropped too.
+- Removed the deletion of exported transcript files after cleanup. OpenClaw 2026.9.8 no longer returns `exportedPaths`.
+
 ## 6.4.0 - 2026-10-03
 
 Requires OpenClaw 2026.9.8 and Node 24.16+ or 26.1+.

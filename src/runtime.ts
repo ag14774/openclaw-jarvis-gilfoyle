@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { unlink } from 'node:fs/promises';
 import {
   agentForRole,
   isManagerAgent,
@@ -617,7 +616,8 @@ export class BoardRuntime {
   }
   async abortWorkers(task) {
     for (const key of await this.liveWorkers(task).catch(() => task.workers.map((w) => w.key)))
-      await this.rpc('sessions.abort', { key }).catch((error) =>
+      // clearQueued also drops follow-ups already queued for the worker.
+      await this.rpc('sessions.abort', { key, clearQueued: true }).catch((error) =>
         this.log(`Could not stop worker ${key}: ${String(error?.message ?? error).slice(0, 200)}`),
       );
   }
@@ -1132,16 +1132,12 @@ export class BoardRuntime {
             done = false;
             continue;
           }
-          const result = await this.rpc('jarvis-gilfoyle.session.cleanup', {
+          await this.rpc('jarvis-gilfoyle.session.cleanup', {
             agentId: agentForRole(role),
             sessionNamespace,
             sessionKey: key,
             expectedSessionId: session.sessionId,
           });
-          for (const path of result?.exportedPaths ?? [])
-            await unlink(path).catch((error) => {
-              if (error.code !== 'ENOENT') throw error;
-            });
         } catch (error) {
           done = false;
           this.log(`Cleanup of ${key} deferred: ${String(error?.message ?? error).slice(0, 200)}`);

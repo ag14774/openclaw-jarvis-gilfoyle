@@ -1,5 +1,6 @@
 // In-memory stand-in for the native OpenClaw gateway and a harness that drives the plugin
 // through its real registration, hooks and tool. Never touches a real gateway.
+import assert from 'node:assert/strict';
 import plugin, { testHooks } from '../../src/index.ts';
 
 export const EPOCH = Date.parse('2026-09-28T09:00:00Z');
@@ -94,13 +95,14 @@ export async function harness({ config = {} } = {}) {
           native.patches.push(params);
           return { ok: true };
         case 'sessions.abort':
+          assert.deepEqual(Object.keys(params).sort(), ['clearQueued', 'key']);
           native.aborted.push(params.key);
           native.session(params.key).hasActiveRun = false;
           return { ok: true };
         case 'jarvis-gilfoyle.session.cleanup':
           native.cleaned.push(params.sessionKey);
           native.sessions = native.sessions.filter((s) => s.key !== params.sessionKey);
-          return { archivedTranscriptArtifacts: 0, exportedPaths: [] };
+          return { removedEntries: 1, archivedTranscriptArtifacts: 0 };
         default:
           throw new Error(`Unexpected native method ${method}`);
       }
