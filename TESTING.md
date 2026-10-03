@@ -25,7 +25,7 @@
 - private task sessions following the project chat's model choice, the chat's session refreshed only from that chat, and the companion's limits on `sessions.patch` (one setting per call, the model never with admin scope);
 - closed task sessions recreated by late native turns being removed again.
 
-The fakes follow OpenClaw 2026.9.2 as found in its distribution:
+The fakes follow OpenClaw 2026.9.8 as found in its distribution:
 
 - `hasActiveRun` is the live-turn signal;
 - `sessions_spawn` results carry `details.childSessionKey`;

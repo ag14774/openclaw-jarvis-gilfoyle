@@ -13,7 +13,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - Handing a task over or closing it needs a note: what you did, what you found, what you need. If the board says the task changed since you read it, `show` it and decide again.
 - In a private session your turn ends as soon as you reply without a tool call, and nothing happens until the next wake-up. Do not end with what you are about to do; do it. End a turn only when the task is handed over or closed, or you are genuinely waiting.
 - When you are waiting (CI, a worker, a date), add a note or set `check_in_minutes`. A holder who is woken three times without changing the task makes the board tell the user the task is stuck.
-- Nobody sees replies in a private session. End them with `NO_REPLY`. The user is reached only through the board's messages.
+- Nobody sees replies in a private session. End them with one short line on what you did. The user is reached only through the board's messages.
 - Work only on the task's own project. Paused projects get no wake-ups and no new workers.
 
 ## Product manager

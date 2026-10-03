@@ -23,7 +23,7 @@ export function projectRoleContext(config, agentId) {
 }
 
 export const PRIVATE_GUIDANCE =
-  'This is a private task session for one project task. Nobody sees your replies here. Work only on this project, record progress and handovers with project_board, and end with NO_REPLY.';
+  'This is a private task session for one project task. Nobody sees your replies here. Work only on this project, record progress and handovers with project_board, and end with one short line on what you did.';
 
 export function currentConfig(api) {
   try {

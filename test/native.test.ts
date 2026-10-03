@@ -12,8 +12,8 @@ test(
   () => {
     const dist = dirname(fileURLToPath(import.meta.resolve('openclaw')));
     const names = new Set();
-    for (const file of readdirSync(dist).filter(
-      (n) => n.startsWith('method-scopes-') && n.endsWith('.js'),
+    for (const file of readdirSync(dist).filter((n) =>
+      /^(method-scopes|core-method-policy)-.*\.m?js$/.test(n),
     ))
       for (const match of readFileSync(join(dist, file), 'utf8').matchAll(/"([a-z][\w.-]*)"/g))
         names.add(match[1]);

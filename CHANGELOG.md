@@ -1,5 +1,13 @@
 # Changelog
 
+## 6.4.0 - 2026-10-03
+
+Requires OpenClaw 2026.9.8 and Node 24.16+ or 26.1+.
+
+- Private task sessions now end with one short line on what was done, not `NO_REPLY`. From 2026.9.8, internal sessions cannot complete with a silent token. The line is still private: wakes use `deliver:false`, and the send hooks still cancel any user-chat output.
+- A worker counts as stopped without finishing when its session ended with any status other than `done`: failed, killed, interrupted or timed out. 2026.9.8 marks restart-interrupted workers `interrupted`, not `failed`.
+- The native method check also reads 2026.9.8's `.mjs` chunks and its core method table. CI runs Node 26.8.1.
+
 ## 6.3.3 - 2026-10-02
 
 - Skill: after merge or cancellation, engineering also removes the remote branch (`gh pr merge --delete-branch` on merge). Every merged PR in the live test repository had left its branch on GitHub.

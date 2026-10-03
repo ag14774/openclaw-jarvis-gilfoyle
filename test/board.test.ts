@@ -528,12 +528,24 @@ test('a worker that stops without finishing wakes its holder once', async () => 
   h.advance(2 * MINUTE);
   assert.deepEqual((await h.tick()).woken, []);
 
-  // A gateway restart kills the worker; its native session is marked failed. A worker the
-  // holder stops himself ends the same way, so the wake-up says to ignore that case.
+  // A worker that finishes normally is left to OpenClaw's own completion notice.
+  const done = await h.spawn(gKey, { agentId: 'opencode', model: 'astra', task: 'Review' });
+  h.advance(MINUTE);
+  Object.assign(h.native.session(done.childSessionKey), {
+    hasActiveRun: false,
+    status: 'done',
+    endedAt: h.now(),
+  });
+  h.endAllRuns();
+  h.advance(MINUTE);
+  assert.deepEqual((await h.tick()).woken, []);
+
+  // A gateway restart interrupts the other worker (older hosts mark it failed). A worker
+  // the holder stops himself also ends unfinished, so the wake-up says to ignore that case.
   h.advance(MINUTE);
   Object.assign(h.native.session(childSessionKey), {
     hasActiveRun: false,
-    status: 'failed',
+    status: 'interrupted',
     endedAt: h.now(),
   });
   h.advance(MINUTE);

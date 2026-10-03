@@ -765,7 +765,7 @@ export class BoardRuntime {
       task = this.store.task(scope.taskId);
       assert(task.created === scope.created);
     } catch {
-      return 'This private task session no longer has a task. Reply NO_REPLY.';
+      return 'This private task session no longer has a task. Reply with one short line and stop.';
     }
     const project = this.store.project(task.project);
     const you = scope.role;
@@ -1014,7 +1014,7 @@ export class BoardRuntime {
       );
     }
   }
-  // A worker that stopped without finishing (a restart, crash or provider error) wakes its
+  // A worker that ended without finishing (a restart, crash, cancel or provider error) wakes its
   // holder at once, because OpenClaw's own completion notice does not always start a
   // turn. Normal completions are left to that notice. A worker counts once: the wake
   // moves the task's woken time past the worker's end.
@@ -1033,9 +1033,10 @@ export class BoardRuntime {
       for (const task of withWorkers)
         for (const worker of JSON.parse(task.workers).slice(-5)) {
           const row = rows.get(worker.key);
-          // endedAt, not updatedAt: the host touches rows again after a restart.
+          // Ended without finishing: failed, killed, interrupted or timed out. endedAt, not
+          // updatedAt: the host touches rows again after a restart.
           const ended = Number(row?.endedAt);
-          if (row?.status === 'failed' && ended > (task.woken ?? 0) && ended > worker.at)
+          if (row?.status !== 'done' && ended > (task.woken ?? 0) && ended > worker.at)
             failed.set(task.id, worker.key);
         }
     } catch (error) {
@@ -1080,7 +1081,7 @@ export class BoardRuntime {
         deliver: false,
         idempotencyKey: randomUUID(),
         timeout: this.turnTimeoutSeconds,
-        message: `PROJECT TASK ${taskScope(task)}\n${reason}\nThe task card is in your context. Act with project_board; this reply is private. End with NO_REPLY.`,
+        message: `PROJECT TASK ${taskScope(task)}\n${reason}\nThe task card is in your context. Act with project_board; this reply is private. End with one short line on what you did.`,
       });
       return true;
     } catch (error) {

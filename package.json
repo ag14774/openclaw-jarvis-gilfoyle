@@ -1,6 +1,6 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "6.3.3",
+  "version": "6.4.0",
   "description": "A small SQLite project board for a product and an engineering manager agent on OpenClaw",
   "license": "UNLICENSED",
   "type": "module",
@@ -46,13 +46,13 @@
     "url": "https://github.com/ag14774/openclaw-jarvis-gilfoyle/issues"
   },
   "engines": {
-    "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
+    "node": ">=24.16.0 <25 || >=26.1.0"
   },
   "peerDependencies": {
-    "openclaw": "2026.9.2"
+    "openclaw": "2026.9.8"
   },
   "devDependencies": {
-    "openclaw": "2026.9.2",
+    "openclaw": "2026.9.8",
     "prettier": "3.9.7",
     "tsx": "4.23.13",
     "typescript": "5.9.2"
@@ -65,14 +65,14 @@
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.9.2"
+      "pluginApi": ">=2026.9.8"
     },
     "build": {
-      "openclawVersion": "2026.9.2",
-      "pluginSdkVersion": "2026.9.2"
+      "openclawVersion": "2026.9.8",
+      "pluginSdkVersion": "2026.9.8"
     },
     "install": {
-      "minHostVersion": ">=2026.9.2"
+      "minHostVersion": ">=2026.9.8"
     }
   }
 }
