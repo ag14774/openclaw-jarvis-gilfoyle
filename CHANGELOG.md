@@ -1,5 +1,14 @@
 # Changelog
 
+## 6.5.1 - 2026-10-04
+
+Protocol 11.9. Board schema 18: the outbox has a `recorded` column. There is no migration; the operator adds it (`ALTER TABLE outbox ADD COLUMN recorded INTEGER NOT NULL DEFAULT 0`, `UPDATE outbox SET recorded=1`, `PRAGMA user_version=18`).
+
+- A message the board delivers to the project chat is added to the product manager's session for that chat as his own reply: the text, then a `MEDIA:` line per attached file. It uses OpenClaw's transcript writer (`appendSessionTranscriptMessageByIdentity` from the JavaScript-only `plugin-sdk/session-transcript-runtime`) with a stable idempotency key. Native `chat.inject` and delivery copies are display-only and never reach the model; this entry does. The append waits while that session runs a turn and the scan retries it for a day. A failure is logged and never affects delivery. Messages that fell back to the owner DM are not added.
+- Attached files are sent with native `message.action` instead of `send`, which wrote a display-only file-name copy into the chat's session.
+- Removed the 6.5.0 list of recent board messages from the project chat's context; the session now holds them.
+- The native lane also checks that the pinned build exports the transcript writer.
+
 ## 6.5.0 - 2026-10-04
 
 Protocol 11.8. Board schema 17: the outbox has a `files` column. There is no migration; an existing schema 16 board is upgraded by the operator (`ALTER TABLE outbox ADD COLUMN files TEXT NOT NULL DEFAULT '[]'`, then `PRAGMA user_version=17`).

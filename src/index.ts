@@ -104,7 +104,17 @@ const bound = (value) => {
 };
 
 // Test-only injection points. Production leaves every field null.
-export const testHooks = { bridge: null, now: null, manualTicks: false, runtime: null };
+export const testHooks = {
+  bridge: null,
+  now: null,
+  manualTicks: false,
+  runtime: null,
+  appendTranscript: null,
+  publishTranscript: null,
+};
+
+// OpenClaw's own transcript writer (JavaScript-only SDK subpath), loaded on first use.
+const transcripts = () => import('openclaw/plugin-sdk/session-transcript-runtime');
 
 // OpenClaw may register the plugin more than once in one process: the gateway registry
 // runs the hooks while a per-run registry supplies the tool. Registrations with the same
@@ -163,6 +173,14 @@ export default {
             turnTimeoutSeconds: cfg.turnTimeoutSeconds ?? 1800,
             maxWakesPerRole: cfg.maxWakesPerRole ?? 2,
             agentName: (role) => agentLabel(currentConfig(api), agentForRole(role)),
+            appendTranscript:
+              testHooks.appendTranscript ??
+              (async (params) =>
+                (await transcripts()).appendSessionTranscriptMessageByIdentity(params)),
+            publishTranscript:
+              testHooks.publishTranscript ??
+              (async (params) =>
+                (await transcripts()).publishSessionTranscriptUpdateByIdentity(params)),
             ...(testHooks.now ? { now: testHooks.now } : {}),
           },
         );

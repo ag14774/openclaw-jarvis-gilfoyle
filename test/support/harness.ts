@@ -30,6 +30,7 @@ export async function harness({ config = {} } = {}) {
     sessions: [],
     sent: [],
     files: [],
+    transcript: [],
     runs: [],
     aborted: [],
     cleaned: [],
@@ -72,9 +73,10 @@ export async function harness({ config = {} } = {}) {
           if (status === 'sent' || status === 'queued') native.sent.push(params);
           return { status };
         }
-        case 'send':
+        case 'message.action':
+          assert.equal(params.action, 'send');
           native.files.push(params);
-          return { runId: params.idempotencyKey, channel: params.channel, messageId: 'm' };
+          return { ok: true, messageId: 'm' };
         case 'sessions.list':
           return {
             sessions: native.sessions
@@ -113,6 +115,11 @@ export async function harness({ config = {} } = {}) {
     },
   };
   testHooks.bridge = bridge;
+  testHooks.appendTranscript = async (params) => {
+    native.transcript.push(params);
+    return { appended: true, messageId: `t-${native.transcript.length}` };
+  };
+  testHooks.publishTranscript = async () => {};
   testHooks.now = () => clock;
   testHooks.manualTicks = true;
   testHooks.runtime = null;

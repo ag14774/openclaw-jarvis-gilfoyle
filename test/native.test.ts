@@ -20,3 +20,13 @@ test(
     for (const method of COMPANION_METHODS) assert(names.has(method), `${method} missing`);
   },
 );
+
+test(
+  'the transcript writer the board uses exists in the pinned OpenClaw build',
+  { skip: process.env.JG_NATIVE_TEST !== '1' && 'set JG_NATIVE_TEST=1' },
+  async () => {
+    const sdk = await import('openclaw/plugin-sdk/session-transcript-runtime');
+    assert.equal(typeof sdk.appendSessionTranscriptMessageByIdentity, 'function');
+    assert.equal(typeof sdk.publishSessionTranscriptUpdateByIdentity, 'function');
+  },
+);

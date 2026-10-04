@@ -46,7 +46,8 @@ Rules are enforced when they can be checked from the caller, the rows that alrea
 - A task cannot be marked done while its workers run. Cancelling a task aborts them.
 - `use_this_chat` binds only the chat of the message that started the current turn.
 - Messages go only to the project chat, or to the configured owner DM (prefixed with the project name) when the project chat rejects them or keeps failing. The project's chat is never rebound by delivery.
-- `attachments` are up to four existing files (absolute paths, 8 MB each). They follow the message text through native `send`, each with a stable idempotency key, and are read again on every attempt; a failed file retries the whole message. In a chat a project uses, the product manager's context lists what the board sent there in the last day, with the file paths.
+- `attachments` are up to four existing files (absolute paths, 8 MB each). They follow the message text as native message sends, each with a stable idempotency key, and are read again on every attempt; a failed file retries the whole message.
+- A message delivered to the project chat is added to the product manager's session for that chat as his own reply (text, then a `MEDIA:` line per file), through OpenClaw's transcript writer with a stable idempotency key. The chat's history in the Control UI then matches the chat, and the model reads the message in later turns. The append waits while that session runs a turn and is retried by the scan for a day; it never affects delivery. Messages that fell back to the owner DM are not added.
 - Private task sessions never reply into user chats. Runs in sessions of closed tasks are refused, and those sessions are deleted once idle.
 
 Outside the tool and private task sessions the plugin does nothing. In other chats a manager gets only one line saying that its project role adds to its usual role, and the plugin leaves other agents and the product manager's personal-assistant work untouched. In a chat that is also a project chat, the product manager gets one line naming the project and one line per task waiting on the user. Hooks fail open: any hook error is logged and ignored.
@@ -102,7 +103,7 @@ A linked install loads `dist/` when the Gateway starts. After changing source, r
 
 Optional settings: `sessionNamespace` (default `jarvis-gilfoyle`), `scanMs` (60000), `turnTimeoutSeconds` (1800), `maxWakesPerRole` (2) and `enabled`.
 
-Grant `project_board` to both managers. `statePath` must be a new file or an existing board (schema 17); any other database is refused.
+Grant `project_board` to both managers. `statePath` must be a new file or an existing board (schema 18); any other database is refused.
 
 Operator gateway methods: `jarvis-gilfoyle.board.call` (`{operation, input, agentId?}`), `jarvis-gilfoyle.board.tick` and `jarvis-gilfoyle.board.health`.
 

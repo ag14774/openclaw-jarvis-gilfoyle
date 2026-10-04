@@ -2,7 +2,7 @@
 const methods = new Set([
   'conversations.list',
   'conversations.send',
-  'send',
+  'message.action',
   'sessions.list',
   'sessions.create',
   'sessions.abort',

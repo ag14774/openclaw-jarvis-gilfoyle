@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 // The board: projects, tasks (whose turn it is), their notes, and the notification outbox.
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects(
@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS outbox(
   next_at INTEGER NOT NULL,
   error TEXT,
   receipt TEXT,
+  recorded INTEGER NOT NULL DEFAULT 0,
   created INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state, next_at);
 `;

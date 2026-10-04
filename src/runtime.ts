@@ -25,6 +25,14 @@ const ROUTE_CACHE_MS = 24 * 60 * MINUTE;
 const PREFERRED_ATTEMPTS = 3;
 const FALLBACK_ATTEMPTS = 10;
 const ROLES = ['product', 'engineering'];
+const ZERO_USAGE = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 const HOLDERS = ['product', 'engineering', 'user'];
 
 const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
@@ -108,6 +116,10 @@ export class BoardRuntime {
       turnTimeoutSeconds = 1800,
       maxWakesPerRole = 2,
       agentName = (role) => role,
+      appendTranscript = async () => {
+        throw new Error('Transcript append unavailable');
+      },
+      publishTranscript = async () => {},
     } = {},
   ) {
     this.store = store;
@@ -118,6 +130,8 @@ export class BoardRuntime {
     this.turnTimeoutSeconds = turnTimeoutSeconds;
     this.maxWakesPerRole = maxWakesPerRole;
     this.agentName = agentName;
+    this.appendTranscript = appendTranscript;
+    this.publishTranscript = publishTranscript;
     this.sources = new Map(); // session -> newest inbound chat {route, at, used}
     this.turns = new Map(); // session -> the inbound chat of the running turn
     this.captures = new Map(); // session -> route resolution still in progress
@@ -559,8 +573,9 @@ export class BoardRuntime {
   }
   // One attempt for one outbox row. "sent" and "queued" hand the message to OpenClaw's own
   // durable delivery; the same operation id never sends twice. Attached files follow the
-  // text through native send, each with its own idempotency key. The project chat is tried
-  // first, then the owner DM (prefixed with the project name); the route is never rebound.
+  // text as native message sends, each with its own idempotency key. The project chat is
+  // tried first, then the owner DM (prefixed with the project name); the route is never
+  // rebound. A message delivered to the project chat is then added to that chat's session.
   async deliver(id) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
     if (!row || row.state !== 'pending') return row ? { state: row.state } : undefined;
@@ -578,14 +593,17 @@ export class BoardRuntime {
       });
       if (receipt?.status === 'sent' || receipt?.status === 'queued')
         for (const [index, path] of JSON.parse(row.files).entries())
-          await this.rpc('send', {
+          await this.rpc('message.action', {
             channel: route.channel,
-            to: route.target,
+            action: 'send',
             accountId: route.accountId,
-            ...(route.threadId ? { threadId: route.threadId } : {}),
             agentId: topology().productAgentId,
-            buffer: readFileSync(path).toString('base64'),
-            filename: basename(path),
+            params: {
+              to: route.target,
+              ...(route.threadId ? { threadId: route.threadId } : {}),
+              buffer: readFileSync(path).toString('base64'),
+              filename: basename(path),
+            },
             idempotencyKey: `${operation}-file-${index + 1}`,
           });
     } catch (failure) {
@@ -601,6 +619,7 @@ export class BoardRuntime {
         JSON.stringify(receipt),
         row.id,
       );
+      if (!toOwner) await this.record(row.id);
       return { state: status, to: toOwner ? 'owner DM' : chatLabel(project.route) };
     }
     const attempts = row.attempts + 1;
@@ -628,6 +647,55 @@ export class BoardRuntime {
     );
     if (failed) this.log(`Project message ${row.id} could not be delivered: ${error}`);
     return { state: failed ? 'failed' : 'retrying', error };
+  }
+
+  // A message the board delivered to the project chat becomes the product manager's own
+  // reply in his session for that chat, text and MEDIA lines for its files, so the chat's
+  // history (and what the model reads next turn) matches the chat. It waits while that
+  // session runs a turn; the scan retries for a day. Failures never affect delivery.
+  async record(id) {
+    const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
+    const sessionKey = this.store.project(row.project).route?.sessionKey;
+    if (!sessionKey || row.recorded) return;
+    try {
+      const agentId = topology().productAgentId;
+      const session = (await this.sessionRows(agentId, sessionKey)).find(
+        (s) => s.key === sessionKey,
+      );
+      if (!session?.sessionId || rowLive(session, this.now())) return;
+      const files = JSON.parse(row.files).map((path) => `MEDIA:${path}`);
+      const result = await this.appendTranscript({
+        agentId,
+        sessionKey,
+        sessionId: session.sessionId,
+        idempotencyLookup: 'scan-assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: [row.text, ...(files.length ? ['', ...files] : [])].join('\n') },
+          ],
+          api: 'jarvis-gilfoyle',
+          provider: 'jarvis-gilfoyle',
+          model: 'project-board',
+          usage: ZERO_USAGE,
+          stopReason: 'stop',
+          timestamp: row.created,
+          idempotencyKey: `jarvis-gilfoyle-${row.id}-chat`,
+        },
+      });
+      this.store.run('UPDATE outbox SET recorded=1 WHERE id=?', row.id);
+      if (result?.messageId)
+        await this.publishTranscript({
+          agentId,
+          sessionKey,
+          sessionId: session.sessionId,
+          update: { messageId: result.messageId },
+        });
+    } catch (error) {
+      this.log(
+        `Project message ${row.id} not added to the chat session: ${error?.message ?? error}`,
+      );
+    }
   }
 
   // ---- Native session facts ----------------------------------------------------------
@@ -765,9 +833,8 @@ export class BoardRuntime {
     this.wakes.delete(sessionKey);
     for (const key of this.seen.keys()) if (key.startsWith(`${sessionKey}|`)) this.seen.delete(key);
   }
-  // Project context for a product-manager chat that a project uses: which project, any
-  // task waiting on the user's answer, and what the board recently sent there from private
-  // sessions (with file paths, so the files can be opened again). Nothing for other chats.
+  // Project context for a product-manager chat that a project uses: which project, and
+  // any task waiting on the user's answer. Nothing for other chats.
   chatContext(sessionKey) {
     const route = this.turns.get(sessionKey)?.route;
     if (!route) return null;
@@ -782,8 +849,7 @@ export class BoardRuntime {
     if (!projects.length) return null;
     const lines = [];
     for (const project of projects.slice(0, 5)) {
-      const here = project.route?.conversationRef === route.conversationRef;
-      if (here)
+      if (project.route?.conversationRef === route.conversationRef)
         lines.push(
           `This chat is also used as the project chat for "${project.name}" (project ${project.id}).`,
         );
@@ -794,17 +860,6 @@ export class BoardRuntime {
         const last = this.store.notes(task.id, 1)[0];
         lines.push(
           `Waiting on the user: ${project.name} task #${task.id} "${task.title}"${last ? ` — ${clip(last.text, 300)}` : ''}`,
-        );
-      }
-      const sent = this.store.all(
-        `SELECT text,files,created FROM outbox WHERE project=? AND state='handed' AND created>=?${here ? ' AND fallback=0' : ''} ORDER BY id DESC LIMIT 3`,
-        project.id,
-        this.now() - 24 * 60 * MINUTE,
-      );
-      for (const row of sent.reverse()) {
-        const files = JSON.parse(row.files);
-        lines.push(
-          `Sent here by the board ${when(row.created)}: ${clip(row.text, 300)}${files.length ? ` (files: ${files.join(', ')})` : ''}`,
         );
       }
     }
@@ -967,6 +1022,11 @@ export class BoardRuntime {
         const result = await this.deliver(row.id);
         if (result?.state === 'sent' || result?.state === 'queued') summary.delivered++;
       }
+      for (const row of this.store.all(
+        "SELECT id FROM outbox WHERE state='handed' AND fallback=0 AND recorded=0 AND created>=? ORDER BY id LIMIT 20",
+        this.now() - 24 * 60 * MINUTE,
+      ))
+        await this.record(row.id);
       await this.wakeDue(summary);
       summary.cleaned = await this.cleanupClosed();
       this.health.lastScan = this.now();

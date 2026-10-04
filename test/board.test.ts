@@ -663,7 +663,7 @@ test('messages fall back to the owner DM, never rebind, and retry with the same 
   assert.equal(h.runtime.store.get("SELECT state FROM outbox WHERE text='Again'").state, 'handed');
 });
 
-test('files follow their message, retry with it, and the chat lists what was sent', async () => {
+test('files follow their message, and the message joins the project chat’s session', async () => {
   const h = await harness();
   await project(h);
   const dir = mkdtempSync(join(tmpdir(), 'jg-files-'));
@@ -694,8 +694,11 @@ test('files follow their message, retry with it, and the chat lists what was sen
       /sent with a message/,
     );
 
-    // A failed file send retries the whole message with the same identities.
-    h.native.fail.add('send');
+    // A failed file send retries the whole message with the same identities. Meanwhile
+    // Jarvis is talking in the project chat, so its session is busy.
+    const chat = h.native.session(JARVIS_GROUP);
+    chat.hasActiveRun = true;
+    h.native.fail.add('message.action');
     const closed = await h.call('main', jKey, {
       operation: 'update_task',
       status: 'done',
@@ -704,21 +707,22 @@ test('files follow their message, retry with it, and the chat lists what was sen
       attachments: [png],
     });
     assert.equal(closed.message.state, 'retrying');
-    h.native.fail.delete('send');
+    h.native.fail.delete('message.action');
     h.advance(3 * MINUTE);
     await h.tick();
+    assert.equal(h.native.transcript.length, 0);
     const calls = (method, pick) =>
       new Set(h.native.calls.filter(([m]) => m === method).map(([, p]) => pick(p)));
     assert.equal(calls('conversations.send', (p) => p.operationId).size, 1);
-    assert.equal(calls('send', (p) => p.idempotencyKey).size, 1);
+    assert.equal(calls('message.action', (p) => p.idempotencyKey).size, 1);
     const file = h.native.files.at(-1);
     assert.deepEqual(
       [
         file.channel,
-        file.to,
+        file.params.to,
         file.agentId,
-        file.filename,
-        Buffer.from(file.buffer, 'base64').toString(),
+        file.params.filename,
+        Buffer.from(file.params.buffer, 'base64').toString(),
       ],
       ['telegram', 'telegram:-200', 'main', 'architecture.png', 'png-bytes'],
     );
@@ -727,9 +731,25 @@ test('files follow their message, retry with it, and the chat lists what was sen
       'handed',
     );
 
-    // In the project chat Jarvis sees what the board sent there, with the file path.
-    const context = await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
-    assert(context.prependContext.includes(`Here is the architecture. (files: ${png})`));
+    // Once the chat's turn ends, the scan adds the message to that session as Jarvis's own
+    // reply, with a MEDIA line for the file; only once.
+    chat.hasActiveRun = false;
+    await h.tick();
+    await h.tick();
+    assert.equal(h.native.transcript.length, 1);
+    const entry = h.native.transcript[0];
+    assert.deepEqual(
+      [entry.agentId, entry.sessionKey, entry.sessionId, entry.message.role],
+      ['main', JARVIS_GROUP, chat.sessionId, 'assistant'],
+    );
+    assert.equal(entry.message.content[0].text, `Here is the architecture.\n\nMEDIA:${png}`);
+    assert.notEqual(entry.message.provider, 'openclaw');
+
+    // A message sent to the owner DM after a fallback is not added to any session.
+    h.native.sendStatus = (p) => (p.conversationRef === ref('b') ? 'suppressed' : 'sent');
+    await h.call('main', JARVIS_DM, { operation: 'notify', project: 'quote-desk', message: 'DM' });
+    await h.tick();
+    assert.equal(h.native.transcript.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -817,7 +837,7 @@ test('the board file persists across restarts and a foreign database is refused'
   const other = new DatabaseSync(foreign);
   other.exec('PRAGMA user_version=99');
   other.close();
-  assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 17\)/);
+  assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 18\)/);
   rmSync(dir, { recursive: true, force: true });
 });
 
