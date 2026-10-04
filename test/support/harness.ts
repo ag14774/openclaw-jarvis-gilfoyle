@@ -29,6 +29,7 @@ export async function harness({ config = {} } = {}) {
     ],
     sessions: [],
     sent: [],
+    files: [],
     runs: [],
     aborted: [],
     cleaned: [],
@@ -71,6 +72,9 @@ export async function harness({ config = {} } = {}) {
           if (status === 'sent' || status === 'queued') native.sent.push(params);
           return { status };
         }
+        case 'send':
+          native.files.push(params);
+          return { runId: params.idempotencyKey, channel: params.channel, messageId: 'm' };
         case 'sessions.list':
           return {
             sessions: native.sessions

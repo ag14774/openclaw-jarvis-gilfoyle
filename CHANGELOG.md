@@ -1,5 +1,13 @@
 # Changelog
 
+## 6.5.0 - 2026-10-04
+
+Protocol 11.8. Board schema 17: the outbox has a `files` column. There is no migration; an existing schema 16 board is upgraded by the operator (`ALTER TABLE outbox ADD COLUMN files TEXT NOT NULL DEFAULT '[]'`, then `PRAGMA user_version=17`).
+
+- `update_task` messages and `notify` take optional `attachments`: up to four existing files (absolute paths, 8 MB each). The plugin checks them when the message is recorded. It sends them after the text through native `send` to the same chat, each with a stable idempotency key, and reads them again on every attempt. A failed file retries the whole message; the text is not sent twice.
+- In a chat a project uses, the product manager's context lists what the board sent there in the last day (up to three messages per project), with file paths. These messages come from private sessions and are not in that chat's history, so follow-up questions can be answered and files opened again.
+- Skill: files travel as paths in notes; open each image with `view_image` before acting on it or passing it on, and say what it shows; copy files a worker needs into its worktree; commit a diagram's source next to its rendered image.
+
 ## 6.4.2 - 2026-10-03
 
 Protocol 11.7.

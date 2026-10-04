@@ -5,7 +5,7 @@ import { taskSessionKey } from '../src/topology.ts';
 import { companionMethodAllowed, companionScopes } from '../src/bridge-methods.ts';
 import { Store } from '../src/store.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -663,6 +663,78 @@ test('messages fall back to the owner DM, never rebind, and retry with the same 
   assert.equal(h.runtime.store.get("SELECT state FROM outbox WHERE text='Again'").state, 'handed');
 });
 
+test('files follow their message, retry with it, and the chat lists what was sent', async () => {
+  const h = await harness();
+  await project(h);
+  const dir = mkdtempSync(join(tmpdir(), 'jg-files-'));
+  const png = join(dir, 'architecture.png');
+  writeFileSync(png, 'png-bytes');
+  try {
+    // Paths are checked when the message is recorded.
+    const notify = (attachments) =>
+      h.call('main', JARVIS_DM, {
+        operation: 'notify',
+        project: 'quote-desk',
+        message: 'See',
+        attachments,
+      });
+    assert.match((await notify(['relative.png'])).error, /absolute path/);
+    assert.match((await notify([join(dir, 'missing.png')])).error, /not found/);
+    assert.match((await notify([dir])).error, /not a file/);
+    assert.match((await notify([png, png, png, png, png])).error, /at most 4/);
+    const { task } = await h.call('main', JARVIS_DM, {
+      operation: 'add_task',
+      project: 'quote-desk',
+      title: 'Architecture',
+    });
+    const jKey = key(h, 'product', task);
+    assert.match(
+      (await h.call('main', jKey, { operation: 'update_task', note: 'x', attachments: [png] }))
+        .error,
+      /sent with a message/,
+    );
+
+    // A failed file send retries the whole message with the same identities.
+    h.native.fail.add('send');
+    const closed = await h.call('main', jKey, {
+      operation: 'update_task',
+      status: 'done',
+      note: 'Accepted',
+      message: 'Here is the architecture.',
+      attachments: [png],
+    });
+    assert.equal(closed.message.state, 'retrying');
+    h.native.fail.delete('send');
+    h.advance(3 * MINUTE);
+    await h.tick();
+    const calls = (method, pick) =>
+      new Set(h.native.calls.filter(([m]) => m === method).map(([, p]) => pick(p)));
+    assert.equal(calls('conversations.send', (p) => p.operationId).size, 1);
+    assert.equal(calls('send', (p) => p.idempotencyKey).size, 1);
+    const file = h.native.files.at(-1);
+    assert.deepEqual(
+      [
+        file.channel,
+        file.to,
+        file.agentId,
+        file.filename,
+        Buffer.from(file.buffer, 'base64').toString(),
+      ],
+      ['telegram', 'telegram:-200', 'main', 'architecture.png', 'png-bytes'],
+    );
+    assert.equal(
+      h.runtime.store.get("SELECT state FROM outbox WHERE text='Here is the architecture.'").state,
+      'handed',
+    );
+
+    // In the project chat Jarvis sees what the board sent there, with the file path.
+    const context = await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
+    assert(context.prependContext.includes(`Here is the architecture. (files: ${png})`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('use_this_chat binds only the chat of the message that started the turn', async () => {
   const h = await harness();
   await project(h, 'Quote Desk', { session: JARVIS_DM, target: 'telegram:100' });
@@ -745,7 +817,7 @@ test('the board file persists across restarts and a foreign database is refused'
   const other = new DatabaseSync(foreign);
   other.exec('PRAGMA user_version=99');
   other.close();
-  assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 16\)/);
+  assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 17\)/);
   rmSync(dir, { recursive: true, force: true });
 });
 

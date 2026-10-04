@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+import { basename, isAbsolute } from 'node:path';
 import {
   agentForRole,
   isManagerAgent,
@@ -38,6 +40,28 @@ const line = (value, max, name) =>
   text(typeof value === 'string' ? value.replace(/\s+/g, ' ') : value, max, name);
 const optional = (value, max, name) =>
   value === undefined || value === null || value === '' ? undefined : text(value, max, name);
+// Files sent with a message: existing absolute paths, read again at each delivery attempt.
+const MAX_FILES = 4;
+const MAX_FILE_MB = 8;
+const attachments = (value) => {
+  if (value === undefined || value === null) return [];
+  assert(
+    Array.isArray(value) && value.length <= MAX_FILES,
+    `attachments is a list of at most ${MAX_FILES} file paths`,
+  );
+  return value.map((path) => {
+    assert(typeof path === 'string' && isAbsolute(path), 'Each attachment is an absolute path');
+    let stat;
+    try {
+      stat = statSync(path);
+    } catch {
+      assert.fail(`Attachment not found: ${path}`);
+    }
+    assert(stat.isFile(), `Attachment is not a file: ${path}`);
+    assert(stat.size <= MAX_FILE_MB * 1024 * 1024, `Attachment is over ${MAX_FILE_MB} MB: ${path}`);
+    return path;
+  });
+};
 const clip = (value, max) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 const when = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
 const slug = (name) =>
@@ -369,6 +393,8 @@ export class BoardRuntime {
     const project = this.store.project(task.project);
     const note = optional(input.note, 4000, 'note');
     const message = optional(input.message, 4000, 'message');
+    const files = attachments(input.attachments);
+    assert(!files.length || message !== undefined, 'attachments are sent with a message');
     const status = input.status;
     const holder = input.holder;
     assert(
@@ -469,7 +495,7 @@ export class BoardRuntime {
         now,
         task.id,
       );
-      return message && !inChat ? this.store.enqueue(project.id, task.id, message) : null;
+      return message && !inChat ? this.store.enqueue(project.id, task.id, message, files) : null;
     });
     this.markSeen(caller.session, task.id);
     if (status === 'cancelled') await this.abortWorkers(task);
@@ -485,7 +511,7 @@ export class BoardRuntime {
         ? {
             message: {
               state: 'not sent',
-              reason: 'you are in the project chat; say it in your reply',
+              reason: `you are in the project chat; say it in your reply${files.length ? ' with the files attached' : ''}`,
             },
           }
         : {}),
@@ -495,13 +521,14 @@ export class BoardRuntime {
     assert(caller.role === 'product', 'Only the product manager messages the user');
     const project = this.scopeProject(caller, input.project);
     const message = text(input.message ?? input.text, 4000, 'message');
+    const files = attachments(input.attachments);
     let taskId = null;
     if (input.task !== undefined || caller.task) {
       const task = this.scopeTask(caller, input.task);
       assert(task.project === project.id, 'That task belongs to another project');
       taskId = task.id;
     }
-    const id = this.store.enqueue(project.id, taskId, message);
+    const id = this.store.enqueue(project.id, taskId, message, files);
     return { notification: id, ...(await this.deliver(id)) };
   }
 
@@ -531,23 +558,38 @@ export class BoardRuntime {
     return this.ownerRouteCache.route;
   }
   // One attempt for one outbox row. "sent" and "queued" hand the message to OpenClaw's own
-  // durable delivery; the same operation id never sends twice. The project chat is tried
+  // durable delivery; the same operation id never sends twice. Attached files follow the
+  // text through native send, each with its own idempotency key. The project chat is tried
   // first, then the owner DM (prefixed with the project name); the route is never rebound.
   async deliver(id) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
     if (!row || row.state !== 'pending') return row ? { state: row.state } : undefined;
     const project = this.store.project(row.project);
     const toOwner = row.fallback === 1 || !project.route;
+    const operation = `jarvis-gilfoyle-${row.id}-${toOwner ? 'owner' : 'project'}`;
     let receipt, error;
     try {
       const route = toOwner ? await this.ownerRoute() : project.route;
       receipt = await this.rpc('conversations.send', {
         agentId: topology().productAgentId,
-        operationId: `jarvis-gilfoyle-${row.id}-${toOwner ? 'owner' : 'project'}`,
+        operationId: operation,
         conversationRef: route.conversationRef,
         message: toOwner ? `[${project.name}] ${row.text}` : row.text,
       });
+      if (receipt?.status === 'sent' || receipt?.status === 'queued')
+        for (const [index, path] of JSON.parse(row.files).entries())
+          await this.rpc('send', {
+            channel: route.channel,
+            to: route.target,
+            accountId: route.accountId,
+            ...(route.threadId ? { threadId: route.threadId } : {}),
+            agentId: topology().productAgentId,
+            buffer: readFileSync(path).toString('base64'),
+            filename: basename(path),
+            idempotencyKey: `${operation}-file-${index + 1}`,
+          });
     } catch (failure) {
+      receipt = undefined;
       error = String(failure?.message ?? failure)
         .split('\n')[0]
         .slice(0, 300);
@@ -723,8 +765,9 @@ export class BoardRuntime {
     this.wakes.delete(sessionKey);
     for (const key of this.seen.keys()) if (key.startsWith(`${sessionKey}|`)) this.seen.delete(key);
   }
-  // Project context for a product-manager chat that a project uses: which project, and
-  // any task waiting on the user's answer. Nothing for other chats.
+  // Project context for a product-manager chat that a project uses: which project, any
+  // task waiting on the user's answer, and what the board recently sent there from private
+  // sessions (with file paths, so the files can be opened again). Nothing for other chats.
   chatContext(sessionKey) {
     const route = this.turns.get(sessionKey)?.route;
     if (!route) return null;
@@ -739,7 +782,8 @@ export class BoardRuntime {
     if (!projects.length) return null;
     const lines = [];
     for (const project of projects.slice(0, 5)) {
-      if (project.route?.conversationRef === route.conversationRef)
+      const here = project.route?.conversationRef === route.conversationRef;
+      if (here)
         lines.push(
           `This chat is also used as the project chat for "${project.name}" (project ${project.id}).`,
         );
@@ -750,6 +794,17 @@ export class BoardRuntime {
         const last = this.store.notes(task.id, 1)[0];
         lines.push(
           `Waiting on the user: ${project.name} task #${task.id} "${task.title}"${last ? ` — ${clip(last.text, 300)}` : ''}`,
+        );
+      }
+      const sent = this.store.all(
+        `SELECT text,files,created FROM outbox WHERE project=? AND state='handed' AND created>=?${here ? ' AND fallback=0' : ''} ORDER BY id DESC LIMIT 3`,
+        project.id,
+        this.now() - 24 * 60 * MINUTE,
+      );
+      for (const row of sent.reverse()) {
+        const files = JSON.parse(row.files);
+        lines.push(
+          `Sent here by the board ${when(row.created)}: ${clip(row.text, 300)}${files.length ? ` (files: ${files.join(', ')})` : ''}`,
         );
       }
     }

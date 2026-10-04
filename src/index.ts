@@ -77,6 +77,13 @@ const parameters = {
       description:
         'update_task/notify: text for the user, sent to the project chat. Required outside that chat when handing to the user or closing a product task.',
     },
+    attachments: {
+      type: 'array',
+      items: { type: 'string' },
+      maxItems: 4,
+      description:
+        'update_task/notify: absolute paths of up to 4 files (8 MB each) sent after the message. Look at each image before sending it.',
+    },
     check_in_minutes: {
       type: 'integer',
       description: 'update_task: when the holder should be woken to look again (default 60).',

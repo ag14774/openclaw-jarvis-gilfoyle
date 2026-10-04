@@ -3,7 +3,7 @@ name: project-coordination
 description: 'How the product and engineering managers run projects on the shared project board (tool project_board).'
 ---
 
-# Project Coordination — protocol11.7
+# Project Coordination — protocol11.8
 
 The board holds projects, tasks and notes. Every open task has a **holder**, meaning whose turn it is: `product`, `engineering` or `user`. Work moves by handing a task over with a note. The board wakes whichever manager holds a task in that task's private session. It never wakes anyone for the user.
 
@@ -15,6 +15,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - When you are waiting (CI, a worker, a date), add a note or set `check_in_minutes`. A holder who is woken three times without changing the task makes the board tell the user the task is stuck.
 - Nobody sees replies in a private session. End them with one short line on what you did. The user is reached only through the board's messages.
 - Work only on the task's own project. Paused projects get no wake-ups and no new workers.
+- Images and other files travel as files: save them and name the absolute path in a note or the task body. Open every image you receive with `view_image` before you act on it or pass it on, and say what it shows when you pass it on.
 
 ## Product manager
 
@@ -25,6 +26,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - **Engineering hands back finished work:** check it against what the user asked for. Then close it (`status: done`) with a `message` telling the user the result, or hand it back with a note.
 - Outside the project chat, `message` is required when handing to the user or closing one of your tasks. In the project chat, your reply is the message.
 - `notify` sends any other update worth telling. Keep messages short and plain.
+- To show the user files, list their paths in `attachments` on the `message` or `notify`; in the project chat, attach them to your reply. Look at each image first and say in the message what it shows.
 - Pause, resume or archive projects with `update_project state` when the user asks. Cancel tasks the user no longer wants (`status: cancelled`, with a note, plus a `message` outside the project chat). Cancelling stops the task's workers.
 
 ## Engineering manager
@@ -35,4 +37,5 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - Spawn workers from the task session with `sessions_spawn`: `agentId` is the worker agent, and `model` is a worker profile id from the task card. The board records each worker on the task and applies the profile. Worker completion wakes you in the same session.
 - Keep one checkout per repository, in the projects directory named in your local notes. Give each worker assignment its own worktree and branch, and spawn the worker with `cwd` set to that worktree. After merge or cancellation, remove the worktree, its local branch and its remote branch (`gh pr merge --delete-branch` does the remote one on merge).
 - Keep durable repository facts (checkout path, branches, conventions) in the project `context`.
+- A worker reads only inside its worktree, so copy any file it needs there and name the path in its assignment. Commit a diagram's source file next to its rendered image.
 - When the work is finished, hand the task to `product` with a note: what changed, where (branch, PR, commit), and how it was verified. When you need a decision, hand it to `product` with the question. You may close tasks you created yourself. A task cannot be marked done while its workers still run.

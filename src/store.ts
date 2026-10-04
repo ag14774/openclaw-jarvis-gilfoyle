@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 // The board: projects, tasks (whose turn it is), their notes, and the notification outbox.
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects(
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS outbox(
   project TEXT NOT NULL REFERENCES projects(id),
   task INTEGER REFERENCES tasks(id),
   text TEXT NOT NULL,
+  files TEXT NOT NULL DEFAULT '[]',
   fallback INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','handed','failed')),
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -131,14 +132,15 @@ export class Store {
       this.now(),
     );
   }
-  enqueue(project, task, text) {
+  enqueue(project, task, text, files = []) {
     const now = this.now();
     return Number(
       this.run(
-        'INSERT INTO outbox(project,task,text,next_at,created) VALUES(?,?,?,?,?)',
+        'INSERT INTO outbox(project,task,text,files,next_at,created) VALUES(?,?,?,?,?,?)',
         project,
         task ?? null,
         text,
+        JSON.stringify(files),
         now,
         now,
       ).lastInsertRowid,

@@ -13,7 +13,7 @@ The names are thematic; roles map to configured OpenClaw agent IDs.
 - **Projects**: name, free-text context (repositories, conventions), the chat its messages go to, and a state (`active`, `paused`, `archived`).
 - **Tasks**: title, body, status (`open`, `done`, `cancelled`) and a **holder**: whose turn it is (`product`, `engineering` or `user`).
 - **Notes**: an append-only log per task. Handovers and closing always carry one.
-- **Outbox**: messages to the user, delivered with native idempotency, retries and an owner-DM fallback.
+- **Outbox**: messages to the user, optionally with files, delivered with native idempotency, retries and an owner-DM fallback.
 
 A mechanical scan (every 60 seconds by default) wakes whichever manager holds a task, in that task's own private session. It wakes a manager when someone else changed the task, or when the task's check-in time is due (60 minutes, or the holder's `check_in_minutes`). It never wakes anyone for the user, and never interrupts a session that is mid-turn. Each manager runs at most `maxWakesPerRole` private sessions at once. OpenClaw's own completion notice continues the holder's session when a worker ends, including one stopped by a restart; the check-in is the fallback. A holder woken three times without changing the task makes the plugin tell the user once; any change resets this.
 
@@ -23,15 +23,15 @@ Private task sessions of both managers run on the model and thinking level the u
 
 One tool, `project_board`, for both managers:
 
-| Operation        | What it does                                                                            |
-| ---------------- | --------------------------------------------------------------------------------------- |
-| `list`           | Projects with their open tasks, recently closed tasks and undelivered messages.         |
-| `show`           | One task with its notes, or one project with its context.                               |
-| `create_project` | Product only. Uses the chat of the current user message.                                |
-| `update_project` | Name, `state` and `use_this_chat` (product only), or `context` (either manager).        |
-| `add_task`       | New task, held by engineering unless `holder` says otherwise.                           |
-| `update_task`    | `note`, handover (`holder`), close or reopen (`status`), `message`, `check_in_minutes`. |
-| `notify`         | Product only. Message the user in the project chat.                                     |
+| Operation        | What it does                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `list`           | Projects with their open tasks, recently closed tasks and undelivered messages.                                     |
+| `show`           | One task with its notes, or one project with its context.                                                           |
+| `create_project` | Product only. Uses the chat of the current user message.                                                            |
+| `update_project` | Name, `state` and `use_this_chat` (product only), or `context` (either manager).                                    |
+| `add_task`       | New task, held by engineering unless `holder` says otherwise.                                                       |
+| `update_task`    | `note`, handover (`holder`), close or reopen (`status`), `message` with optional `attachments`, `check_in_minutes`. |
+| `notify`         | Product only. Message the user in the project chat, with optional `attachments`.                                    |
 
 ## What the plugin enforces
 
@@ -46,6 +46,7 @@ Rules are enforced when they can be checked from the caller, the rows that alrea
 - A task cannot be marked done while its workers run. Cancelling a task aborts them.
 - `use_this_chat` binds only the chat of the message that started the current turn.
 - Messages go only to the project chat, or to the configured owner DM (prefixed with the project name) when the project chat rejects them or keeps failing. The project's chat is never rebound by delivery.
+- `attachments` are up to four existing files (absolute paths, 8 MB each). They follow the message text through native `send`, each with a stable idempotency key, and are read again on every attempt; a failed file retries the whole message. In a chat a project uses, the product manager's context lists what the board sent there in the last day, with the file paths.
 - Private task sessions never reply into user chats. Runs in sessions of closed tasks are refused, and those sessions are deleted once idle.
 
 Outside the tool and private task sessions the plugin does nothing. In other chats a manager gets only one line saying that its project role adds to its usual role, and the plugin leaves other agents and the product manager's personal-assistant work untouched. In a chat that is also a project chat, the product manager gets one line naming the project and one line per task waiting on the user. Hooks fail open: any hook error is logged and ignored.
@@ -101,7 +102,7 @@ A linked install loads `dist/` when the Gateway starts. After changing source, r
 
 Optional settings: `sessionNamespace` (default `jarvis-gilfoyle`), `scanMs` (60000), `turnTimeoutSeconds` (1800), `maxWakesPerRole` (2) and `enabled`.
 
-Grant `project_board` to both managers. `statePath` must be a new file or an existing board (schema 16); any other database is refused.
+Grant `project_board` to both managers. `statePath` must be a new file or an existing board (schema 17); any other database is refused.
 
 Operator gateway methods: `jarvis-gilfoyle.board.call` (`{operation, input, agentId?}`), `jarvis-gilfoyle.board.tick` and `jarvis-gilfoyle.board.health`.
 
