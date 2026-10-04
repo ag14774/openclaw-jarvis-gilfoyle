@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { AsyncResource } from 'node:async_hooks';
 import { Store } from './store.js';
 import { BoardRuntime } from './runtime.js';
 import { Bridge } from './bridge.js';
@@ -149,6 +150,11 @@ export default {
       owner: null,
     }));
     const bridge = board.bridge;
+    // Writes to a chat's session run in the board service's own async context. Called from a
+    // manager's tool call, OpenClaw's write context for that turn refuses a write to another
+    // session ("session writer claim changed before transcript persistence").
+    const outsideTurns = (write) => (params) =>
+      (board.serviceScope ?? ((run) => run()))(() => write(params));
     const service = Symbol('service');
     let timer;
     // The board opens lazily; a failure is reported by the tool and health and never
@@ -175,12 +181,14 @@ export default {
             agentName: (role) => agentLabel(currentConfig(api), agentForRole(role)),
             appendTranscript:
               testHooks.appendTranscript ??
-              (async (params) =>
-                (await transcripts()).appendSessionTranscriptMessageByIdentity(params)),
+              outsideTurns(async (params) =>
+                (await transcripts()).appendSessionTranscriptMessageByIdentity(params),
+              ),
             publishTranscript:
               testHooks.publishTranscript ??
-              (async (params) =>
-                (await transcripts()).publishSessionTranscriptUpdateByIdentity(params)),
+              outsideTurns(async (params) =>
+                (await transcripts()).publishSessionTranscriptUpdateByIdentity(params),
+              ),
             ...(testHooks.now ? { now: testHooks.now } : {}),
           },
         );
@@ -381,6 +389,7 @@ export default {
       id: 'jarvis-gilfoyle-board',
       start: async () => {
         board.owner = service;
+        board.serviceScope ??= AsyncResource.bind((run) => run());
         bridge.stopped = false;
         if (cfg.enabled === false) return;
         const scan = () => {

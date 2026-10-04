@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.5.4 - 2026-10-04
+
+- Board messages are added to the chat's session from the board service's own async context. Called inside a manager's tool call (or a scan that call requested), OpenClaw's write context for that turn refused the write ("session writer claim changed before transcript persistence"), so in the live run each message was only added by the next periodic scan.
+
 ## 6.5.3 - 2026-10-04
 
 - Skill: `view_image` opens only files in the agent's own workspace and OpenClaw's media folders, so agents copy an image from a project checkout or elsewhere into their workspace first. In the live check Jarvis's `view_image` refused a path outside those folders.
