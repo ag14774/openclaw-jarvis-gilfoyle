@@ -94,6 +94,8 @@ export const conversation = (value) => {
     ...(value.threadId ? { threadId: String(value.threadId) } : {}),
   };
 };
+// The text a chat receives: the owner DM gets the project name first.
+const sentText = (row, project, toOwner) => (toOwner ? `[${project.name}] ${row.text}` : row.text);
 const chatLabel = (route) =>
   route
     ? `${route.channel} ${route.kind === 'direct' ? 'DM' : 'chat'} ${route.target}`
@@ -575,7 +577,7 @@ export class BoardRuntime {
   // durable delivery; the same operation id never sends twice. Attached files follow the
   // text as native message sends, each with its own idempotency key. The project chat is
   // tried first, then the owner DM (prefixed with the project name); the route is never
-  // rebound. A message delivered to the project chat is then added to that chat's session.
+  // rebound. A delivered message is then added to the session of the chat it reached.
   async deliver(id) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
     if (!row || row.state !== 'pending') return row ? { state: row.state } : undefined;
@@ -589,7 +591,7 @@ export class BoardRuntime {
         agentId: topology().productAgentId,
         operationId: operation,
         conversationRef: route.conversationRef,
-        message: toOwner ? `[${project.name}] ${row.text}` : row.text,
+        message: sentText(row, project, toOwner),
       });
       if (receipt?.status === 'sent' || receipt?.status === 'queued')
         for (const [index, path] of JSON.parse(row.files).entries())
@@ -619,7 +621,7 @@ export class BoardRuntime {
         JSON.stringify(receipt),
         row.id,
       );
-      if (!toOwner) await this.record(row.id);
+      await this.record(row.id);
       return { state: status, to: toOwner ? 'owner DM' : chatLabel(project.route) };
     }
     const attempts = row.attempts + 1;
@@ -649,31 +651,45 @@ export class BoardRuntime {
     return { state: failed ? 'failed' : 'retrying', error };
   }
 
-  // A message the board delivered to the project chat becomes the product manager's own
-  // reply in his session for that chat, text and MEDIA lines for its files, so the chat's
-  // history (and what the model reads next turn) matches the chat. It waits while that
-  // session runs a turn; the scan retries for a day. Failures never affect delivery.
+  // A delivered message becomes the product manager's own reply in his session for the chat
+  // it reached (the project chat or the owner DM), as text plus a MEDIA line per file, so
+  // that chat's history and what the model reads next turn match the chat. It waits while
+  // that session runs a turn; the scan retries for a day. Failures never affect delivery.
   async record(id) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
-    const sessionKey = this.store.project(row.project).route?.sessionKey;
-    if (!sessionKey || row.recorded) return;
+    if (row.recorded) return;
+    const project = this.store.project(row.project);
+    const toOwner = row.fallback === 1 || !project.route;
     try {
+      const route = toOwner ? await this.ownerRoute() : project.route;
       const agentId = topology().productAgentId;
-      const session = (await this.sessionRows(agentId, sessionKey)).find(
-        (s) => s.key === sessionKey,
+      const sessions = (
+        await this.sessionRows(agentId, route.target.replace(/^[^:]+:/, ''))
+      ).filter(
+        ({ deliveryContext: to }) =>
+          to?.channel === route.channel &&
+          to.to === route.target &&
+          (to.accountId ?? 'default') === route.accountId &&
+          String(to.threadId ?? '') === String(route.threadId ?? ''),
       );
+      const session = sessions.length === 1 ? sessions[0] : null;
       if (!session?.sessionId || rowLive(session, this.now())) return;
       const files = JSON.parse(row.files).map((path) => `MEDIA:${path}`);
+      const text = [sentText(row, project, toOwner), ...(files.length ? ['', ...files] : [])];
+      // OpenClaw's own transcript writer. Its SDK subpath is JavaScript-only and labelled
+      // private-local ("Private-local after July 2026" in docs/plugins/sdk-subpaths.md), so a
+      // host update may change or remove it: before raising the pinned OpenClaw version, check
+      // that appendSessionTranscriptMessageByIdentity still appends a model-visible assistant
+      // message (only provider "openclaw" with model "gateway-injected" or "delivery-mirror" is
+      // display-only) and run the native test lane, which checks the export.
       const result = await this.appendTranscript({
         agentId,
-        sessionKey,
+        sessionKey: session.key,
         sessionId: session.sessionId,
         idempotencyLookup: 'scan-assistant',
         message: {
           role: 'assistant',
-          content: [
-            { type: 'text', text: [row.text, ...(files.length ? ['', ...files] : [])].join('\n') },
-          ],
+          content: [{ type: 'text', text: text.join('\n') }],
           api: 'jarvis-gilfoyle',
           provider: 'jarvis-gilfoyle',
           model: 'project-board',
@@ -687,7 +703,7 @@ export class BoardRuntime {
       if (result?.messageId)
         await this.publishTranscript({
           agentId,
-          sessionKey,
+          sessionKey: session.key,
           sessionId: session.sessionId,
           update: { messageId: result.messageId },
         });
@@ -1023,7 +1039,7 @@ export class BoardRuntime {
         if (result?.state === 'sent' || result?.state === 'queued') summary.delivered++;
       }
       for (const row of this.store.all(
-        "SELECT id FROM outbox WHERE state='handed' AND fallback=0 AND recorded=0 AND created>=? ORDER BY id LIMIT 20",
+        "SELECT id FROM outbox WHERE state='handed' AND recorded=0 AND created>=? ORDER BY id LIMIT 20",
         this.now() - 24 * 60 * MINUTE,
       ))
         await this.record(row.id);

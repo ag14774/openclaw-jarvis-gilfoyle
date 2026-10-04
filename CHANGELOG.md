@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.5.2 - 2026-10-04
+
+Protocol 11.10.
+
+- A message that fell back to the owner DM is also added to the DM's session, with the project-name prefix it was sent with. The session is found the same way for both chats: the product manager's one session whose native delivery target is that chat.
+- A comment at the transcript append says what to check before raising the pinned OpenClaw version, because its SDK subpath is private-local.
+
 ## 6.5.1 - 2026-10-04
 
 Protocol 11.9. Board schema 18: the outbox has a `recorded` column. There is no migration; the operator adds it (`ALTER TABLE outbox ADD COLUMN recorded INTEGER NOT NULL DEFAULT 0`, `UPDATE outbox SET recorded=1`, `PRAGMA user_version=18`).

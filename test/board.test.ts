@@ -663,7 +663,7 @@ test('messages fall back to the owner DM, never rebind, and retry with the same 
   assert.equal(h.runtime.store.get("SELECT state FROM outbox WHERE text='Again'").state, 'handed');
 });
 
-test('files follow their message, and the message joins the project chat’s session', async () => {
+test('files follow their message, and the message joins the session of the chat it reached', async () => {
   const h = await harness();
   await project(h);
   const dir = mkdtempSync(join(tmpdir(), 'jg-files-'));
@@ -697,6 +697,7 @@ test('files follow their message, and the message joins the project chat’s ses
     // A failed file send retries the whole message with the same identities. Meanwhile
     // Jarvis is talking in the project chat, so its session is busy.
     const chat = h.native.session(JARVIS_GROUP);
+    chat.deliveryContext = { channel: 'telegram', to: 'telegram:-200', accountId: 'default' };
     chat.hasActiveRun = true;
     h.native.fail.add('message.action');
     const closed = await h.call('main', jKey, {
@@ -745,11 +746,14 @@ test('files follow their message, and the message joins the project chat’s ses
     assert.equal(entry.message.content[0].text, `Here is the architecture.\n\nMEDIA:${png}`);
     assert.notEqual(entry.message.provider, 'openclaw');
 
-    // A message sent to the owner DM after a fallback is not added to any session.
+    // A message that fell back to the owner DM joins the DM's session, as sent there.
+    h.native.session(JARVIS_DM).deliveryContext = { channel: 'telegram', to: 'telegram:100' };
     h.native.sendStatus = (p) => (p.conversationRef === ref('b') ? 'suppressed' : 'sent');
     await h.call('main', JARVIS_DM, { operation: 'notify', project: 'quote-desk', message: 'DM' });
-    await h.tick();
-    assert.equal(h.native.transcript.length, 1);
+    assert.deepEqual(
+      [h.native.transcript.at(-1).sessionKey, h.native.transcript.at(-1).message.content[0].text],
+      [JARVIS_DM, '[Quote Desk] DM'],
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
