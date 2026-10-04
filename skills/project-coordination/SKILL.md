@@ -15,7 +15,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - When you are waiting (CI, a worker, a date), add a note or set `check_in_minutes`. A holder who is woken three times without changing the task makes the board tell the user the task is stuck.
 - Nobody sees replies in a private session. End them with one short line on what you did. The user is reached only through the board's messages.
 - Work only on the task's own project. Paused projects get no wake-ups and no new workers.
-- Images and other files travel as files: save them and name the absolute path in a note or the task body. Open every image you receive with `view_image` before you act on it or pass it on, and say what it shows when you pass it on.
+- Images and other files travel as files: save them and name the absolute path in a note or the task body. Open every image you receive with `view_image` before you act on it or pass it on, and say what it shows when you pass it on. `view_image` opens only files in your own workspace and OpenClaw's media folders, so copy an image from anywhere else into your workspace first.
 
 ## Product manager
 

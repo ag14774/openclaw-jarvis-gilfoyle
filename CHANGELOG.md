@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.5.3 - 2026-10-04
+
+- Skill: `view_image` opens only files in the agent's own workspace and OpenClaw's media folders, so agents copy an image from a project checkout or elsewhere into their workspace first. In the live check Jarvis's `view_image` refused a path outside those folders.
+
 ## 6.5.2 - 2026-10-04
 
 Protocol 11.10.
