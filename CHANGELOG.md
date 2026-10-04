@@ -1,5 +1,11 @@
 # Changelog
 
+## 6.4.2 - 2026-10-03
+
+Protocol 11.7.
+
+- Removed the plugin's failed-worker wake-up (added in 6.3.0). On OpenClaw 2026.9.8, native completion resumes the holder's session when a worker is stopped by a restart. In the live test, the plugin's wake-up only caused a duplicate turn. The holder's check-in remains the fallback.
+
 ## 6.4.1 - 2026-10-03
 
 - Cancelling a task stops its workers with `clearQueued`, so follow-ups already queued for them are dropped too.

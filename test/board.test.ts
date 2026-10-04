@@ -504,61 +504,6 @@ test('check_in_minutes schedules the next wake, and running workers do not count
   }
 });
 
-test('a worker that stops without finishing wakes its holder once', async () => {
-  const h = await harness();
-  await project(h);
-  const { task } = await h.call('main', JARVIS_DM, {
-    operation: 'add_task',
-    project: 'quote-desk',
-    title: 'Shortcuts',
-  });
-  await h.tick();
-  const gKey = key(h, 'engineering', task);
-  const { childSessionKey } = await h.spawn(gKey, {
-    agentId: 'opencode',
-    model: 'astra',
-    task: 'Build',
-  });
-  await h.call('gilfoyle', gKey, {
-    operation: 'update_task',
-    note: 'Worker running',
-    check_in_minutes: 30,
-  });
-  h.endAllRuns();
-  h.advance(2 * MINUTE);
-  assert.deepEqual((await h.tick()).woken, []);
-
-  // A worker that finishes normally is left to OpenClaw's own completion notice.
-  const done = await h.spawn(gKey, { agentId: 'opencode', model: 'astra', task: 'Review' });
-  h.advance(MINUTE);
-  Object.assign(h.native.session(done.childSessionKey), {
-    hasActiveRun: false,
-    status: 'done',
-    endedAt: h.now(),
-  });
-  h.endAllRuns();
-  h.advance(MINUTE);
-  assert.deepEqual((await h.tick()).woken, []);
-
-  // A gateway restart interrupts the other worker (older hosts mark it failed). A worker
-  // the holder stops himself also ends unfinished, so the wake-up says to ignore that case.
-  h.advance(MINUTE);
-  Object.assign(h.native.session(childSessionKey), {
-    hasActiveRun: false,
-    status: 'interrupted',
-    endedAt: h.now(),
-  });
-  h.advance(MINUTE);
-  assert.deepEqual((await h.tick()).woken, [task]);
-  assert.match(h.native.runs.at(-1).message, /A worker stopped without finishing/);
-  // The host touches the dead row again after the wake; that is not a new failure.
-  h.endAllRuns();
-  h.advance(MINUTE);
-  h.native.session(childSessionKey).updatedAt = h.now();
-  h.advance(MINUTE);
-  assert.deepEqual((await h.tick()).woken, []);
-});
-
 test('cancelling stops the task’s workers', async () => {
   const h = await harness();
   await project(h);
