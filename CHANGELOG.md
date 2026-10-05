@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.6.0 - 2026-10-05
+
+Protocol 11.11.
+
+- Private sessions of closed tasks are kept for seven days, so the work can be reviewed afterwards, and then deleted once idle. Runs in them stay refused. A task reopened within the week continues in its old session.
+- Skill: one task per piece of work the user asked for (progress through `notify`, questions on the same task, `check_in_minutes` for watching); lasting user direction is recorded where the next reader finds it (repository docs, project `context` or `USER.md`); status answers cover every open task and limitations are stated once; repository files hold current plain-language instructions while evidence goes in the PR and board notes, and a repository skill is one self-contained folder; engineering reviews worker output for proportion and prefers a simpler design to patching a mechanism; work in progress is pushed early as a draft PR.
+
 ## 6.5.4 - 2026-10-04
 
 - Board messages are added to the chat's session from the board service's own async context. Called inside a manager's tool call (or a scan that call requested), OpenClaw's write context for that turn refused the write ("session writer claim changed before transcript persistence"), so in the live run each message was only added by the next periodic scan.

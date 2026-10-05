@@ -116,9 +116,13 @@ test('a request goes from the user to engineering and back, and the user hears t
   assert.equal(sent.message, 'CSV export is live.');
   assert.equal(sent.agentId, 'main');
 
-  // Private replies never reach a chat, and closed task sessions are cleaned up.
+  // Private replies never reach a chat, and closed task sessions are kept for a week,
+  // then cleaned up.
   assert.equal(h.hooks.message_sending({}, { sessionKey: jKey }).cancel, true);
   h.endAllRuns();
+  await h.tick();
+  assert.deepEqual(h.native.cleaned, []);
+  h.advance(7 * 24 * 60 * MINUTE);
   await h.tick();
   assert.deepEqual(h.native.cleaned.sort(), [gKey, jKey].sort());
 

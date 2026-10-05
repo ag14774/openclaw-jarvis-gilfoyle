@@ -22,6 +22,7 @@ const WORKER_GRACE_MS = 2 * MINUTE;
 const STALE_RUN_MS = 6 * 60 * MINUTE;
 const SOURCE_FRESH_MS = 10 * MINUTE;
 const ROUTE_CACHE_MS = 24 * 60 * MINUTE;
+const KEEP_CLOSED_MS = 7 * 24 * 60 * MINUTE;
 const PREFERRED_ATTEMPTS = 3;
 const FALLBACK_ATTEMPTS = 10;
 const ROLES = ['product', 'engineering'];
@@ -1206,12 +1207,14 @@ export class BoardRuntime {
     });
     await this.deliver(id);
   }
-  // Private sessions of closed tasks are deleted once nothing runs in them.
+  // Private sessions of closed tasks are kept for a week so the work can be reviewed,
+  // then deleted once nothing runs in them.
   async cleanupClosed() {
     let cleaned = 0;
     const { sessionNamespace } = topology();
     for (const row of this.store.all(
-      "SELECT * FROM tasks WHERE status<>'open' AND cleaned IS NULL ORDER BY updated LIMIT 10",
+      "SELECT * FROM tasks WHERE status<>'open' AND cleaned IS NULL AND updated<=? ORDER BY updated LIMIT 10",
+      this.now() - KEEP_CLOSED_MS,
     )) {
       let done = true;
       for (const role of ROLES) {
