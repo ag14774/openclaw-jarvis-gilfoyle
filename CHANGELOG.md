@@ -4,7 +4,7 @@
 
 Protocol 11.12. Skill only.
 
-- Engineering writes each worker assignment to stand alone (goal and why, the user's relevant direction and standards, scope and files, how to verify, what to report), because a worker sees only the repository and its assignment.
+- Engineering writes each worker assignment to stand alone (goal and why, the user's relevant direction and standards, scope and files, how to verify, what to report), written the way a developer would brief a coding agent, with nothing about the board, task numbers, managers or profiles, because a worker sees only the repository and its assignment and team details would confuse it.
 - Lasting standards for how the repository is written or built are recorded in the repository's docs and `AGENTS.md`.
 - Project `context` holds lasting facts and the user's direction; status, evidence, hashes and history go in task notes. Context, notes and messages are written in plain sentences.
 - Product checks each requested point against the result itself rather than the handover summary, and says which points are only partly done.
