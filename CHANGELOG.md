@@ -1,5 +1,15 @@
 # Changelog
 
+## 6.6.1 - 2026-10-05
+
+Protocol 11.12. Skill only.
+
+- Engineering writes each worker assignment to stand alone (goal and why, the user's relevant direction and standards, scope and files, how to verify, what to report), because a worker sees only the repository and its assignment.
+- Lasting standards for how the repository is written or built are recorded in the repository's docs and `AGENTS.md`.
+- Project `context` holds lasting facts and the user's direction; status, evidence, hashes and history go in task notes. Context, notes and messages are written in plain sentences.
+- Product checks each requested point against the result itself rather than the handover summary, and says which points are only partly done.
+- Engineering matches testing and hardening to the stakes: development tooling must work in normal use and fail visibly; production code and user data get adversarial testing.
+
 ## 6.6.0 - 2026-10-05
 
 Protocol 11.11.
