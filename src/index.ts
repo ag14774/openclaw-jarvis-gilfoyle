@@ -149,7 +149,6 @@ export default {
       openError: null,
       owner: null,
     }));
-    const bridge = board.bridge;
     // Writes to a chat's session run in the board service's own async context. Called from a
     // manager's tool call, OpenClaw's write context for that turn refuses a write to another
     // session ("session writer claim changed before transcript persistence").
@@ -172,7 +171,7 @@ export default {
         const store = new Store(cfg.statePath, testHooks.now ? { now: testHooks.now } : {});
         board.runtime = new BoardRuntime(
           store,
-          (method, params) => bridge.request(method, params),
+          (method, params) => board.bridge.request(method, params),
           {
             ownerChat: cfg.ownerChat ?? null,
             log: (message) => api.logger?.warn?.(message),
@@ -388,9 +387,22 @@ export default {
     api.registerService({
       id: 'jarvis-gilfoyle-board',
       start: async () => {
+        // A reload starts a new registration's service while an earlier one owns the board.
+        // Objects the earlier code created (its companion process, its runtime) do not work
+        // reliably once that code is retired, so the board starts over with this code.
+        if (board.owner && board.owner !== service) {
+          board.bridge.stop();
+          board.bridge = testHooks.bridge ?? new Bridge();
+          if (board.runtime) {
+            board.runtime.stopped = true;
+            board.runtime.store.close();
+            board.runtime = null;
+          }
+          board.serviceScope = null;
+        }
         board.owner = service;
         board.serviceScope ??= AsyncResource.bind((run) => run());
-        bridge.stopped = false;
+        board.bridge.stopped = false;
         if (cfg.enabled === false) return;
         const scan = () => {
           let r;
@@ -413,7 +425,7 @@ export default {
         // A newer registration that already started keeps the shared board running.
         if (board.owner !== service) return;
         if (board.runtime) board.runtime.stopped = true;
-        bridge.stop();
+        board.bridge.stop();
       },
     });
   },

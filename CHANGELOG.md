@@ -1,5 +1,11 @@
 # Changelog
 
+## 6.6.3 - 2026-10-05
+
+- A plugin reload no longer leaves the board unable to reach the gateway. The board is shared by every registration in the process and survived the reload together with the previous code's companion process and runtime. After the 6.6.1 reload the companion never started again, so for 45 minutes the scan could not see any manager sessions and woke nobody for two new tasks. When a new registration's service starts while an earlier one owns the board, the board now starts over with a new companion and runtime from the new code, so a reload also deploys new runtime code.
+- Health reports a scan that could not see a manager's sessions as `lastError` until a scan succeeds. Before, health said `lastError: null` throughout the outage.
+- A companion that fails reports why (its exit code or error and the last line of its error output) instead of only "interrupted".
+
 ## 6.6.2 - 2026-10-05
 
 Protocol 11.13. Skill only.

@@ -13,9 +13,14 @@ export class Bridge {
     const child = spawn(
       process.execPath,
       [fileURLToPath(new URL('./rpc-bridge.js', import.meta.url))],
-      { stdio: ['pipe', 'pipe', 'ignore'] },
+      { stdio: ['pipe', 'pipe', 'pipe'] },
     );
     this.child = child;
+    // The end of the companion's error output explains a companion that will not start.
+    this.stderr = '';
+    child.stderr.on('data', (chunk) => {
+      this.stderr = (this.stderr + chunk).slice(-300);
+    });
     createInterface({ input: child.stdout }).on('line', (line) => {
       let r;
       try {
@@ -29,18 +34,19 @@ export class Bridge {
       this.pending.delete(r.id);
       r.error ? pending.reject(Error(r.error)) : pending.resolve(r.result);
     });
-    child.on('error', () => {
-      if (this.child === child) this.fail();
+    child.on('error', (error) => {
+      if (this.child === child) this.fail(error.message);
     });
-    child.on('exit', () => {
-      if (this.child === child) this.fail();
+    child.on('exit', (code) => {
+      if (this.child === child) this.fail(`exit ${code}`);
     });
   }
-  fail() {
+  fail(reason = 'stopped') {
     this.child = null;
+    const detail = [reason, this.stderr?.trim().split('\n').at(-1)].filter(Boolean).join(': ');
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
-      p.reject(Error('Gateway companion interrupted; reconcile before retry'));
+      p.reject(Error(`Gateway companion interrupted (${detail}); reconcile before retry`));
     }
     this.pending.clear();
   }

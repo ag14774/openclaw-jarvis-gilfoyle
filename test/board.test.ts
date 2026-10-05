@@ -863,3 +863,76 @@ test('registrations in one process share the board, so a chat seen by the hooks 
   h.runtime.store.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a reload gives the shared board a fresh companion and runtime from the new code', async () => {
+  const { default: plugin, testHooks } = await import('../src/index.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'jg-reload-'));
+  const fakeBridge = (name, seen) => ({
+    stopped: false,
+    request: async (method) => {
+      seen.push(`${name}:${method}`);
+      return { sessions: [], conversations: [] };
+    },
+    stop() {
+      this.stopped = true;
+      seen.push(`${name}:stop`);
+    },
+  });
+  const register = () => {
+    const services = [];
+    plugin.register({
+      pluginConfig: {
+        statePath: join(dir, 'state.sqlite'),
+        productAgentId: 'main',
+        engineeringAgentId: 'gilfoyle',
+        ownerChat: { channel: 'telegram', accountId: 'default', to: 'telegram:100' },
+        scanMs: 3_600_000,
+      },
+      config: {},
+      logger: { warn() {} },
+      registerTool() {},
+      registerGatewayMethod() {},
+      registerService: (service) => services.push(service),
+      on() {},
+    });
+    return services[0];
+  };
+  const seen = [];
+  try {
+    testHooks.bridge = fakeBridge('old', seen);
+    const first = register();
+    await first.start();
+    const before = testHooks.runtime;
+    assert.ok(before);
+
+    testHooks.bridge = fakeBridge('new', seen);
+    const second = register();
+    seen.length = 0;
+    await second.start();
+    await first.stop();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The new service's first scan goes through the new companion only.
+    assert.deepEqual(seen, ['old:stop', 'new:conversations.list']);
+    assert.ok(before.stopped);
+    assert.notEqual(testHooks.runtime, before);
+    await second.stop();
+  } finally {
+    testHooks.bridge = null;
+    testHooks.runtime = null;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('health shows a scan that cannot see the holder sessions, and clears once it can', async () => {
+  const h = await harness();
+  await project(h);
+  await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
+  await h.call('main', JARVIS_GROUP, { operation: 'add_task', title: 'Pricing page' });
+  h.endTurn('main', JARVIS_GROUP);
+  h.native.fail.add('sessions.list');
+  await h.tick();
+  assert.match(h.runtime.healthReport().lastError, /Cannot see engineering sessions/);
+  h.native.fail.delete('sessions.list');
+  await h.tick();
+  assert.equal(h.runtime.healthReport().lastError, null);
+});

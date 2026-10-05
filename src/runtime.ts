@@ -1027,6 +1027,7 @@ export class BoardRuntime {
     if (this.stopped || this.ticking) return { skipped: true };
     this.ticking = true;
     const summary = { delivered: 0, woken: [], stalled: [], cleaned: 0 };
+    this.scanProblem = null;
     try {
       if (!this.ownerRouteCache && this.ownerChat)
         await this.ownerRoute().catch((error) =>
@@ -1047,7 +1048,7 @@ export class BoardRuntime {
       await this.wakeDue(summary);
       summary.cleaned = await this.cleanupClosed();
       this.health.lastScan = this.now();
-      this.health.lastError = null;
+      this.health.lastError = this.scanProblem?.slice(0, 300) ?? null;
     } catch (error) {
       this.health.lastError = String(error?.message ?? error).slice(0, 300);
       throw error;
@@ -1080,7 +1081,9 @@ export class BoardRuntime {
             .map((row) => row.key),
         );
       } catch (error) {
-        this.log(`Cannot see ${role} sessions: ${error?.message ?? error}`);
+        const problem = `Cannot see ${role} sessions: ${error?.message ?? error}`;
+        this.scanProblem ??= problem;
+        this.log(problem);
       }
     }
     for (const row of due) {
