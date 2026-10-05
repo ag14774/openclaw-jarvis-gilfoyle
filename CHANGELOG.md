@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.6.4 - 2026-10-05
+
+- The board recovers by itself from a gateway companion that keeps failing. The companion process was already restarted on the next request after a crash, but when restarting did not help (as in the 6.6.1 reload outage) every scan kept failing until someone noticed. When the companion has given no answer for five minutes, the scan now replaces it and the runtime with fresh ones from the current code, logs that it did, and tries again; it repeats after another five minutes if needed.
+
 ## 6.6.3 - 2026-10-05
 
 - A plugin reload no longer leaves the board unable to reach the gateway. The board is shared by every registration in the process and survived the reload together with the previous code's companion process and runtime. After the 6.6.1 reload the companion never started again, so for 45 minutes the scan could not see any manager sessions and woke nobody for two new tasks. When a new registration's service starts while an earlier one owns the board, the board now starts over with a new companion and runtime from the new code, so a reload also deploys new runtime code.

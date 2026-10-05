@@ -121,6 +121,7 @@ const transcripts = () => import('openclaw/plugin-sdk/session-transcript-runtime
 // runs the hooks while a per-run registry supplies the tool. Registrations with the same
 // configuration share one board, so a turn's chat, the scan and the bridge are not split
 // between them. An in-memory board belongs to its own registration.
+const COMPANION_RESET_MS = 5 * 60 * 1000;
 const boards = (globalThis[Symbol.for('jarvis-gilfoyle.boards')] ??= new Map());
 const sharedBoard = (cfg, create) => {
   if (cfg.statePath === ':memory:') return create();
@@ -384,27 +385,40 @@ export default {
       if (isPrivateSession(ctx.sessionKey)) r.requestTick();
     });
 
+    // Replaces the board's companion process and runtime with new ones from this code.
+    const startOver = () => {
+      board.bridge.stop();
+      board.bridge = testHooks.bridge ?? new Bridge();
+      if (board.runtime) {
+        board.runtime.stopped = true;
+        board.runtime.store.close();
+        board.runtime = null;
+      }
+      board.serviceScope = null;
+    };
     api.registerService({
       id: 'jarvis-gilfoyle-board',
       start: async () => {
         // A reload starts a new registration's service while an earlier one owns the board.
         // Objects the earlier code created (its companion process, its runtime) do not work
         // reliably once that code is retired, so the board starts over with this code.
-        if (board.owner && board.owner !== service) {
-          board.bridge.stop();
-          board.bridge = testHooks.bridge ?? new Bridge();
-          if (board.runtime) {
-            board.runtime.stopped = true;
-            board.runtime.store.close();
-            board.runtime = null;
-          }
-          board.serviceScope = null;
-        }
+        if (board.owner && board.owner !== service) startOver();
         board.owner = service;
         board.serviceScope ??= AsyncResource.bind((run) => run());
         board.bridge.stopped = false;
         if (cfg.enabled === false) return;
         const scan = () => {
+          // A companion that has not answered for several minutes is not recovering by
+          // restarting its process, so the board starts over; the next scan tries again.
+          const failingSince = board.bridge.failingSince;
+          const now = (testHooks.now ?? Date.now)();
+          if (failingSince != null && now - failingSince >= COMPANION_RESET_MS) {
+            api.logger?.warn?.(
+              `Gateway companion has not answered for ${Math.round((now - failingSince) / 60000)} minutes; starting the board over`,
+            );
+            startOver();
+            board.serviceScope = AsyncResource.bind((run) => run());
+          }
           let r;
           try {
             r = get();

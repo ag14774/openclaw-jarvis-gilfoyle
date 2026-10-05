@@ -936,3 +936,62 @@ test('health shows a scan that cannot see the holder sessions, and clears once i
   await h.tick();
   assert.equal(h.runtime.healthReport().lastError, null);
 });
+
+test('a companion that has not answered for five minutes is replaced by a fresh board', async () => {
+  const { default: plugin, testHooks } = await import('../src/index.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'jg-recover-'));
+  const seen = [];
+  const fakeBridge = (name) => ({
+    stopped: false,
+    failingSince: null,
+    request: async (method) => {
+      seen.push(`${name}:${method}`);
+      return { sessions: [], conversations: [] };
+    },
+    stop() {
+      this.stopped = true;
+      seen.push(`${name}:stop`);
+    },
+  });
+  let service;
+  let clock = Date.now();
+  try {
+    const stuck = fakeBridge('stuck');
+    testHooks.bridge = stuck;
+    testHooks.now = () => clock;
+    plugin.register({
+      pluginConfig: {
+        statePath: join(dir, 'state.sqlite'),
+        productAgentId: 'main',
+        engineeringAgentId: 'gilfoyle',
+        ownerChat: { channel: 'telegram', accountId: 'default', to: 'telegram:100' },
+        scanMs: 20,
+      },
+      config: {},
+      logger: { warn() {} },
+      registerTool() {},
+      registerGatewayMethod() {},
+      registerService: (s) => (service = s),
+      on() {},
+    });
+    await service.start();
+    const before = testHooks.runtime;
+    stuck.failingSince = clock;
+    testHooks.bridge = fakeBridge('fresh');
+    clock += 4 * MINUTE;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.ok(!seen.includes('stuck:stop'));
+    clock += 2 * MINUTE;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.ok(seen.includes('stuck:stop'));
+    assert.ok(seen.includes('fresh:conversations.list'));
+    assert.ok(before.stopped);
+    assert.notEqual(testHooks.runtime, before);
+    await service.stop();
+  } finally {
+    testHooks.bridge = null;
+    testHooks.runtime = null;
+    testHooks.now = null;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

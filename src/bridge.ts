@@ -6,6 +6,8 @@ export class Bridge {
     this.pending = new Map();
     this.counter = 0;
     this.stopped = false;
+    // When requests began failing without an answer in between; null while answers arrive.
+    this.failingSince = null;
   }
   start() {
     if (this.stopped) throw Error('Gateway companion is stopping');
@@ -28,6 +30,7 @@ export class Bridge {
       } catch {
         return;
       }
+      this.failingSince = null;
       const pending = this.pending.get(r.id);
       if (!pending) return;
       clearTimeout(pending.timer);
@@ -43,6 +46,7 @@ export class Bridge {
   }
   fail(reason = 'stopped') {
     this.child = null;
+    if (!this.stopped) this.failingSince ??= Date.now();
     const detail = [reason, this.stderr?.trim().split('\n').at(-1)].filter(Boolean).join(': ');
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
@@ -56,6 +60,7 @@ export class Bridge {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.failingSince ??= Date.now();
         reject(Error('Gateway companion timeout; reconcile before retry'));
       }, 25000);
       this.pending.set(id, { resolve, reject, timer });
