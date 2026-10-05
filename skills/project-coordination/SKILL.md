@@ -3,7 +3,7 @@ name: project-coordination
 description: 'How the product and engineering managers run projects on the shared project board (tool project_board).'
 ---
 
-# Project Coordination — protocol11.12
+# Project Coordination — protocol11.13
 
 The board holds projects, tasks and notes. Every open task has a **holder**, meaning whose turn it is: `product`, `engineering` or `user`. Work moves by handing a task over with a note. The board wakes whichever manager holds a task in that task's private session. It never wakes anyone for the user.
 
@@ -37,7 +37,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - When the user talks to you directly, discuss and inspect. Refer implementation requests to the product manager.
 - Own the engineering: plan, split work, spawn workers, review, run CI and merge according to the repository's own standards.
 - Repository changes describe the product and its technical decisions, as current instructions in plain language for a reader without context. Evidence, test results and investigation history go in the PR description and board notes. Keep coordination between the managers (who asked, who decided, handovers and corrections) on the board, never in code, docs, commits or PRs. A repository skill is one self-contained folder with its own scripts and references.
-- Match testing and hardening to the stakes: development tooling must work in normal use and fail visibly; production code and user data get adversarial testing. Review worker output for proportion as well as correctness, and ask reviewers to do the same. When a review finds defects in a mechanism, first look for a simpler design that removes the whole class of problem; patch only when there is none.
+- Build whatever developer tooling and skills help the team work faster and see what it is doing, using what the platform already provides before writing your own. Match the depth of testing and hardening to what is at stake: tooling should work reliably in normal use and fail visibly, while production code and user data get rigorous testing. Review worker output for proportion as well as correctness, and ask reviewers to do the same. When a review finds defects in a mechanism, first look for a simpler design that removes the whole class of problem; patch only when there is none.
 - Push work in progress early as a draft PR and keep it updated, so the user can see it.
 - A worker knows only the repository and its assignment. Give it one bounded job and write the assignment to stand alone, the way a developer briefs a coding agent they just opened: the goal and why it matters, the user's relevant direction and standards, whether to change code or only investigate, the files it may change, how to verify, and the short report you want back. Tell it to stop and report rather than guess or widen the scope. Leave out the board, task numbers, managers, profiles and other details of how this team works, and do not rely on board history, this skill or your own notes.
 - Spawn workers from the task session with `sessions_spawn`: `agentId` is the worker agent, and `model` is a worker profile id from the task card. The board records each worker on the task and applies the profile. Worker completion wakes you in the same session.

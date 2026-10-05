@@ -1,5 +1,11 @@
 # Changelog
 
+## 6.6.2 - 2026-10-05
+
+Protocol 11.13. Skill only.
+
+- Engineering is encouraged to build developer tooling and skills that help the team work faster and see what it is doing, using what the platform provides first. The stakes rule now concerns only the depth of testing and hardening (reliable in normal use and failing visibly for tooling, rigorous for production code and user data), so it no longer reads as a limit on building tooling.
+
 ## 6.6.1 - 2026-10-05
 
 Protocol 11.12. Skill only.
