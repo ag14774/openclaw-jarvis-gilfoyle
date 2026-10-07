@@ -12,6 +12,7 @@
     "dist/",
     "src/",
     "skills/",
+    "docs/",
     "openclaw.plugin.json",
     "README.md",
     "TESTING.md",
