@@ -36,6 +36,10 @@ const ZERO_USAGE = {
 };
 const HOLDERS = ['product', 'engineering', 'user'];
 
+// Native sessions_spawn reads agentId as a trimmed string.
+export const spawnAgentId = (params) =>
+  typeof params?.agentId === 'string' ? params.agentId.trim() : undefined;
+
 const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 export function text(value, max, name) {
   assert(typeof value === 'string', `${name} must be text`);
@@ -808,31 +812,70 @@ export class BoardRuntime {
     }
     return live;
   }
-  // Admission counts direct engineering launches, not descendant activity. Unlike
-  // lifecycle display, missing/unknown state and stale-but-active rows cannot free
-  // admission. Parent provenance also keeps product/personal launches out of scope.
+  // Admission observes current direct engineering workers, not perpetual history or
+  // descendant activity. A missing historical row is not proof of a physical stop.
+  // Recent records bridge native visibility; history remains append-only.
   async runningBoardWorkers() {
     const { workerAgentId } = topology();
     const counted = new Set();
-    const records = () =>
-      this.store.all("SELECT id,created,workers FROM tasks WHERE workers<>'[]' ORDER BY id");
+    const records = () => this.store.all('SELECT id,created,workers FROM tasks ORDER BY id');
     const tasks = records();
+    const parents = new Set(tasks.map((row) => taskSessionKey('engineering', row)));
+    const sessions = new Map();
+    let offset = 0;
+    for (;;) {
+      const result = await this.rpc('sessions.list', {
+        agentId: workerAgentId,
+        archived: 'all',
+        limit: 200,
+        offset,
+      });
+      assert(
+        Array.isArray(result?.sessions) && typeof result.hasMore === 'boolean',
+        'Worker session list unavailable or incomplete',
+      );
+      for (const session of result.sessions) sessions.set(session.key, session);
+      if (!result.hasMore) break;
+      assert(
+        result.sessions.length &&
+          Number.isSafeInteger(result.nextOffset) &&
+          result.nextOffset > offset,
+        'Worker session list pagination unconfirmed',
+      );
+      offset = result.nextOffset;
+    }
+    for (const session of sessions.values()) {
+      if (!session.key?.startsWith(`agent:${workerAgentId}:`)) continue;
+      // Known other parents are outside this count; idle rows need no parent proof.
+      if (
+        session.hasActiveRun === false ||
+        (typeof session.spawnedBy === 'string' &&
+          session.spawnedBy &&
+          !parents.has(session.spawnedBy))
+      )
+        continue;
+      assert(
+        typeof session.hasActiveRun === 'boolean' &&
+          typeof session.spawnedBy === 'string' &&
+          session.spawnedBy.length,
+        `Worker ${session.key} native activity or parent unknown`,
+      );
+      counted.add(session.key);
+    }
     for (const row of tasks) {
       for (const worker of JSON.parse(row.workers)) {
-        if (!worker.key.startsWith(`agent:${workerAgentId}:`) || counted.has(worker.key)) continue;
-        const session = (
-          await this.sessionRows(workerAgentId, worker.key, { archived: 'all' })
-        ).find((session) => session.key === worker.key);
+        if (
+          !worker.key.startsWith(`agent:${workerAgentId}:`) ||
+          counted.has(worker.key) ||
+          this.now() - worker.at >= WORKER_GRACE_MS
+        )
+          continue;
+        const session = sessions.get(worker.key);
         assert(
-          session &&
-            typeof session.hasActiveRun === 'boolean' &&
-            typeof session.spawnedBy === 'string' &&
-            session.spawnedBy.length,
-          `Worker ${worker.key} native activity or parent unknown`,
+          typeof session?.spawnedBy === 'string' && session.spawnedBy.length,
+          `Worker ${worker.key} native parent unknown during visibility grace`,
         );
-        if (session.spawnedBy !== taskSessionKey('engineering', row)) continue;
-        if (session.hasActiveRun || this.now() - worker.at < WORKER_GRACE_MS)
-          counted.add(worker.key);
+        if (session.spawnedBy === taskSessionKey('engineering', row)) counted.add(worker.key);
       }
     }
     assert(
@@ -1107,7 +1150,7 @@ export class BoardRuntime {
         blockReason: `Project ${project.name} is ${project.state}; no new workers.`,
       };
     const { workerAgentId, workerProfiles, workerRuntime, workerLimit } = topology();
-    if (params.agentId !== workerAgentId) return undefined;
+    if (spawnAgentId(params) !== workerAgentId) return undefined;
     if (!workerProfiles.length) {
       assert(scope.role !== 'engineering', 'Worker profiles unavailable');
       return undefined;
@@ -1146,6 +1189,7 @@ export class BoardRuntime {
     return {
       params: {
         ...params,
+        agentId: workerAgentId,
         model: profile.model,
         ...(profile.thinking ? { thinking: profile.thinking } : {}),
         runtime: workerRuntime,

@@ -77,16 +77,19 @@ export async function harness({ config = {} } = {}) {
           assert.equal(params.action, 'send');
           native.files.push(params);
           return { ok: true, messageId: 'm' };
-        case 'sessions.list':
+        case 'sessions.list': {
+          const matches = native.sessions.filter(
+            (s) =>
+              s.key.startsWith(`agent:${params.agentId}:`) && s.key.includes(params.search ?? ''),
+          );
+          const offset = params.offset ?? 0;
+          const end = offset + (params.limit ?? 200);
           return {
-            sessions: native.sessions
-              .filter(
-                (s) =>
-                  s.key.startsWith(`agent:${params.agentId}:`) &&
-                  s.key.includes(params.search ?? ''),
-              )
-              .map((s) => ({ ...s })),
+            sessions: matches.slice(offset, end).map((s) => ({ ...s })),
+            hasMore: end < matches.length,
+            nextOffset: end < matches.length ? end : null,
           };
+        }
         case 'sessions.create':
           native.session(params.key);
           return {};
@@ -153,10 +156,10 @@ export async function harness({ config = {} } = {}) {
     ...config,
   };
   // Registers the plugin as OpenClaw does; returns the tool factory and hooks it received.
-  const register = (into = hooks) => {
+  const register = (into = hooks, cfg = pluginConfig) => {
     let made;
     plugin.register({
-      pluginConfig,
+      pluginConfig: cfg,
       config: {
         agents: {
           entries: { main: { identity: { name: 'Jarvis' } }, gilfoyle: { name: 'Gilfoyle' } },
@@ -192,9 +195,9 @@ export async function harness({ config = {} } = {}) {
     },
     // A further registration in the same process, as OpenClaw makes for agent runs.
     registerAgain: () => register({}),
-    registerHooks() {
+    registerHooks(cfg = pluginConfig) {
       const hooks = {};
-      const tool = register(hooks);
+      const tool = register(hooks, cfg);
       return { hooks, tool, service: hooks.service };
     },
     tool(agentId, sessionKey) {

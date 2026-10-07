@@ -33,15 +33,21 @@ The fakes follow OpenClaw 2026.9.8 as found in its distribution:
 - a repeated `operationId` does not send twice.
 
 `test/admission.test.ts` drives real before/after hooks with fake native RPC. It
-covers limit-one concurrency, shared registrations, exact invocation matching,
+covers limit-one concurrency, shared registrations with reordered nested JSON
+properties, native-trimmed targets and scoped unavailable-board refusals, exact invocation matching,
 scoped native count errors/unknowns, accepted recording, missing/error post-hooks,
 same-parent overlap and late/unrelated hooks, direct-parent versus descendant
-scope, closed/cancelled occupancy, lifecycle/record changes during native reads,
+scope, observed unrecorded workers across all task/project statuses, native cleanup
+of completed history (including a fresh process), recent-record visibility grace,
+native pagination past idle history and unknown/nonadvancing pagination,
+closed/cancelled occupancy, lifecycle/record changes during native reads,
 and reload custody. A second SQLite connection writes during a suspended RPC to
 check that no transaction spans the wait. A hook-timeout ordering model confirms
 that its continuing callback retains custody. A disposable second-process test
 demonstrates the restart limitation: unrecorded custody is lost, not recovered.
-These are mocked behavior/fault-boundary tests, not live worker or hard-cap evidence.
+The deterministic input-rejection regression documents the unresolved custody
+blocker; it does not demonstrate recovery. These are mocked behavior/fault-boundary
+tests, not live worker or hard-cap evidence.
 
 ## Native Integration
 

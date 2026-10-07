@@ -7,7 +7,7 @@ import test from 'node:test';
 import { harness, MINUTE } from './support/harness.ts';
 import { taskSessionKey } from '../src/topology.ts';
 import { Store } from '../src/store.ts';
-import { testHooks } from '../src/index.ts';
+import plugin, { testHooks } from '../src/index.ts';
 
 const params = { agentId: 'opencode', model: 'probe', task: 'Fake only' };
 const worker = {
@@ -96,6 +96,82 @@ test('shared registrations keep custody through acceptance and recording, not on
   assert.ok((await before(ctx(1), params, other.hooks)).params);
 });
 
+test('equal JSON configuration with reordered nested object properties shares admission custody', async (t) => {
+  const { h, path, before, after, accepted, ctx, tasks } = await fixture(t, { file: true });
+  const other = h.registerHooks({
+    worker: {
+      profiles: [{ model: 'fake/model', id: 'probe' }],
+      limit: 1,
+      runtime: 'acp',
+      agentId: 'opencode',
+    },
+    ownerChat: { to: 'telegram:100', accountId: 'default', channel: 'telegram' },
+    engineeringAgentId: 'gilfoyle',
+    productAgentId: 'main',
+    scanMs: 3_600_000,
+    statePath: path,
+  });
+  const decisions = await Promise.all([before(), before(ctx(1), params, other.hooks)]);
+  assert.equal(decisions.filter((decision) => decision?.params).length, 1);
+  assert.match(decisions.find((decision) => decision?.block).blockReason, /pending or unconfirmed/);
+  await after(ctx(), accepted(), other.hooks);
+  assert.equal(h.runtime.store.task(tasks[0]).workers.length, 1);
+  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /limit 1/);
+});
+
+test('native-trimmed configured target shares the gate and receives the configured profile', async (t) => {
+  const { before, after, accepted, ctx } = await fixture(t);
+  const spaced = { ...params, agentId: ' \topencode\n ' };
+  const decisions = await Promise.all([before(ctx(), spaced), before(ctx(1), params)]);
+  assert.equal(decisions.filter((decision) => decision?.params).length, 1);
+  assert.equal(decisions[0].params.agentId, 'opencode');
+  assert.equal(decisions[0].params.model, 'fake/model');
+  assert.match(decisions[1].blockReason, /pending or unconfirmed/);
+  await after(ctx(), accepted());
+  assert.match((await before(ctx(1), spaced)).blockReason, /limit 1/);
+});
+
+test('native-trimmed target profile refusal consumes no claim', async (t) => {
+  const { before } = await fixture(t);
+  assert.match(
+    (await before(undefined, { ...params, agentId: ' opencode ', model: 'bad' })).blockReason,
+    /profile id/,
+  );
+  assert.ok((await before()).params);
+});
+
+test('unavailable board refuses both exact and native-trimmed configured targets', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'jg-admission-unavailable-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const hooks = {};
+  plugin.register({
+    pluginConfig: {
+      statePath: dir, // A directory cannot be opened as the SQLite board.
+      productAgentId: 'main',
+      engineeringAgentId: 'gilfoyle',
+      worker,
+    },
+    logger: { warn() {} },
+    registerTool() {},
+    registerService() {},
+    registerGatewayMethod() {},
+    on: (name, fn) => (hooks[name] = fn),
+  });
+  for (const agentId of ['opencode', ' opencode ']) {
+    const decision = await hooks.before_tool_call(
+      { toolName: 'sessions_spawn', params: { ...params, agentId } },
+      {
+        agentId: 'gilfoyle',
+        sessionKey: 'agent:gilfoyle:jarvis-gilfoyle:task-1-1',
+        runId: 'parent-run',
+        toolCallId: `call-${agentId}`,
+      },
+    );
+    assert.equal(decision.block, true);
+    assert.match(decision.blockReason, /Worker admission unavailable.*Project board unavailable/);
+  }
+});
+
 test('same-parent/same-turn overlap and late/unrelated post-hooks never unlock a newer claim', async (t) => {
   const { h, before, after, accepted, ctx } = await fixture(t);
   assert.ok((await before()).params);
@@ -147,10 +223,11 @@ test('event-only invocation IDs correlate; conflicting IDs refuse before acquiri
 
 for (const state of [
   'error',
-  'missing',
   'unknown',
   'missing-parent',
   'malformed-list',
+  'nonadvancing-page',
+  'unknown-completeness',
   'stale-active',
 ])
   test(`native count ${state} cannot fail open or free active occupancy`, async (t) => {
@@ -159,10 +236,22 @@ for (const state of [
     const row = h.native.session(result.childSessionKey);
     h.advance(3 * MINUTE);
     if (state === 'error') h.native.fail.add('sessions.list');
-    if (state === 'missing') h.native.sessions = [];
     if (state === 'unknown') delete row.hasActiveRun;
     if (state === 'missing-parent') delete row.spawnedBy;
     if (state === 'malformed-list') h.bridge.request = async () => ({});
+    if (state === 'nonadvancing-page' || state === 'unknown-completeness') {
+      const request = h.bridge.request.bind(h.bridge);
+      h.bridge.request = async (method, p) => {
+        const result = await request(method, p);
+        if (method === 'sessions.list') {
+          if (state === 'nonadvancing-page') {
+            result.hasMore = true;
+            result.nextOffset = p.offset;
+          } else delete result.hasMore;
+        }
+        return result;
+      };
+    }
     if (state === 'stale-active') h.advance(7 * 60 * MINUTE);
     const blocked = await before(ctx(1));
     assert.ok(blocked.block);
@@ -181,6 +270,105 @@ for (const state of [
       undefined,
     );
   });
+
+test('native cleanup of completed archived history permits new work without deleting board history', async (t) => {
+  const { h, path, keys, tasks, project, call, before, ctx } = await fixture(t, { file: true });
+  const launched = await h.spawn(keys[0], params);
+  h.advance(61 * MINUTE);
+  h.native.session(launched.childSessionKey).hasActiveRun = false;
+  for (let i = 0; i < tasks.length; i++) {
+    const result = await call({
+      operation: 'update_task',
+      task: tasks[i],
+      status: i === 0 ? 'done' : 'cancelled',
+      note: 'Finished',
+      message: 'Finished',
+    });
+    assert.ok(!result.error, result.error);
+  }
+  assert.ok(!(await call({ operation: 'update_project', project, state: 'archived' })).error);
+  const nextProject = (await call({ operation: 'create_project', name: 'Next' })).project;
+  const nextTask = (await call({ operation: 'add_task', project: nextProject, title: 'New work' }))
+    .task;
+  const nextKey = taskSessionKey('engineering', h.runtime.store.task(nextTask));
+  const history = h.runtime.store.task(tasks[0]).workers;
+  h.native.sessions = h.native.sessions.filter((row) => row.key !== launched.childSessionKey);
+  for (const minutes of [0, 5, 1440]) {
+    h.advance(minutes * MINUTE);
+    const context = { ...ctx(), sessionKey: nextKey, toolCallId: `retry-${minutes}` };
+    const grant = await before(context);
+    assert.ok(grant.params, JSON.stringify(grant));
+    const result = {
+      details: { status: 'accepted', childSessionKey: `agent:opencode:acp:next-${minutes}` },
+    };
+    Object.assign(h.native.session(result.details.childSessionKey), {
+      spawnedBy: nextKey,
+      hasActiveRun: false,
+    });
+    await h.hooks.after_tool_call({ toolName: 'sessions_spawn', params, result }, context);
+    h.advance(3 * MINUTE);
+  }
+  assert.deepEqual(h.runtime.store.task(tasks[0]).workers, history);
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '--input-type=module',
+      '-e',
+      `
+      import assert from 'node:assert/strict';
+      import { harness } from './test/support/harness.ts';
+      const h = await harness({ config: { statePath: ${JSON.stringify(path)}, worker: ${JSON.stringify(worker)} } });
+      h.advance(2 * 24 * 60 * 60 * 1000);
+      const result = await h.hooks.before_tool_call(
+        { toolName: 'sessions_spawn', params: ${JSON.stringify(params)} },
+        { agentId: 'gilfoyle', sessionKey: ${JSON.stringify(nextKey)}, runId: 'fresh', toolCallId: 'fresh' },
+      );
+      assert.ok(result.params, JSON.stringify(result));
+      assert.equal(h.runtime.store.task(${tasks[0]}).workers.length, 1);
+      h.runtime.store.close();
+    `,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.equal(child.status, 0, child.stderr);
+});
+
+test('missing recent native parent refuses during visibility grace but never settles history', async (t) => {
+  const { h, keys, tasks, before, ctx } = await fixture(t);
+  await h.spawn(keys[0], params);
+  const history = h.runtime.store.task(tasks[0]).workers;
+  h.native.sessions = [];
+  assert.match((await before(ctx(1))).blockReason, /parent unknown during visibility grace/);
+  h.advance(3 * MINUTE);
+  assert.ok((await before(ctx(1))).params);
+  assert.deepEqual(h.runtime.store.task(tasks[0]).workers, history);
+});
+
+test('native observation pages past idle history and counts an older active direct worker', async (t) => {
+  const { h, keys, before, ctx } = await fixture(t);
+  for (let i = 0; i < 201; i++) h.native.session(`agent:opencode:acp:idle-${i}`);
+  Object.assign(h.native.session('agent:opencode:acp:older-active'), {
+    hasActiveRun: true,
+    spawnedBy: keys[0],
+  });
+  assert.match((await before(ctx(1))).blockReason, /limit 1/);
+  const pages = h.native.calls.filter(([method]) => method === 'sessions.list');
+  assert.equal(pages.length, 2);
+  assert.equal(pages[1][1].offset, 200);
+  h.native.session('agent:opencode:acp:older-active').hasActiveRun = false;
+  assert.ok((await before(ctx(1, 'retry'))).params);
+});
+
+test('a deterministic native input error without plugin-visible no-effect proof remains a blocker', async (t) => {
+  const { h, before, after, ctx } = await fixture(t);
+  assert.ok((await before(ctx(), { ...params, taskName: 'BAD NAME' })).params);
+  await after(ctx(), { details: { status: 'error', error: 'Native input rejection' } });
+  h.advance(1440 * MINUTE);
+  assert.equal(h.native.sessions.length, 0);
+  assert.match((await before(ctx(1))).blockReason, /pending or unconfirmed/);
+});
 
 for (const outcome of ['missing', 'error', 'isError', 'unknown', 'wrong-child', 'record-failure'])
   test(`post-hook ${outcome} retains explicit custody without automatic unlock`, async (t) => {
@@ -256,6 +444,38 @@ for (const status of ['cancelled', 'done'])
     h.runtime.store.run('UPDATE tasks SET status=?,holder=NULL WHERE id=?', status, tasks[0]);
     h.advance(3 * MINUTE);
     assert.match((await before(ctx(1))).blockReason, /limit 1/);
+  });
+
+for (const status of ['open', 'cancelled', 'done'])
+  test(`observed direct workers on ${status} tasks count even without a worker record`, async (t) => {
+    const { h, tasks, keys, before, ctx, project } = await fixture(t);
+    h.runtime.store.run('UPDATE tasks SET status=? WHERE id=?', status, tasks[0]);
+    Object.assign(h.native.session('agent:opencode:acp:unrecorded'), {
+      hasActiveRun: true,
+      spawnedBy: keys[0],
+    });
+    // Task/project status does not settle a natively active direct worker.
+    if (status !== 'open')
+      h.runtime.store.run("UPDATE projects SET state='archived' WHERE id=?", project);
+    const otherProject = (
+      await h.call('main', 'agent:main:operator', {
+        operation: 'create_project',
+        name: 'Active project',
+      })
+    ).project;
+    const otherTask = (
+      await h.call('main', 'agent:main:operator', {
+        operation: 'add_task',
+        project: otherProject,
+        title: 'Waiting',
+      })
+    ).task;
+    const context = {
+      ...ctx(1),
+      sessionKey: taskSessionKey('engineering', h.runtime.store.task(otherTask)),
+    };
+    assert.equal(h.runtime.store.task(tasks[0]).workers.length, 0);
+    assert.match((await before(context)).blockReason, /limit 1/);
   });
 
 test('product launches and worker descendants do not consume engineering direct-worker capacity', async (t) => {

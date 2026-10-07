@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { AsyncResource } from 'node:async_hooks';
 import { Store } from './store.js';
-import { BoardRuntime } from './runtime.js';
+import { BoardRuntime, spawnAgentId } from './runtime.js';
 import { Bridge } from './bridge.js';
 import { agentLabel, currentConfig, PRIVATE_GUIDANCE, projectRoleContext } from './role-context.js';
 import {
@@ -123,9 +123,20 @@ const transcripts = () => import('openclaw/plugin-sdk/session-transcript-runtime
 // between them. An in-memory board belongs to its own registration.
 const COMPANION_RESET_MS = 5 * 60 * 1000;
 const boards = (globalThis[Symbol.for('jarvis-gilfoyle.boards')] ??= new Map());
+// Configuration is JSON: object insertion order is irrelevant, array order is not.
+const configIdentity = (cfg) =>
+  JSON.stringify(cfg, (_key, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.keys(value)
+            .sort()
+            .map((key) => [key, value[key]]),
+        )
+      : value,
+  );
 const sharedBoard = (cfg, create) => {
   if (cfg.statePath === ':memory:') return create();
-  const key = JSON.stringify(cfg);
+  const key = configIdentity(cfg);
   if (!boards.has(key)) boards.set(key, create());
   return boards.get(key);
 };
@@ -380,7 +391,7 @@ export default {
       const covered =
         event?.toolName === 'sessions_spawn' &&
         agentOf(ctx) === cfg.engineeringAgentId &&
-        event.params?.agentId === cfg.worker?.agentId;
+        spawnAgentId(event.params) === cfg.worker?.agentId;
       if (covered) {
         const blocked = (reason) => ({ block: true, blockReason: reason });
         if (board.admission)
