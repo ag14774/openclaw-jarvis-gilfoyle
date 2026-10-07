@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.png" width="600" alt="Pixel-art Jarvis robot and long-haired Gilfoyle android engineer flanking a coral claw" />
+  <img src="https://ageorgiou.com/openclaw-jarvis-gilfoyle/assets/logo.png" width="600" alt="Pixel-art Jarvis robot and long-haired Gilfoyle android engineer flanking a coral claw" />
 </p>
 
 <h1 align="center">OpenClaw Jarvis-Gilfoyle</h1>
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ageorgiou.com/openclaw-jarvis-gilfoyle/">Documentation</a> · <a href="#quick-setup">Setup</a> · <a href="#everyday-workflow">Usage</a> · <a href="#safety-and-limitations">Safety</a> · <a href="docs/board-reference.md">Board reference</a> · <a href="#development">Development</a> · <a href="CHANGELOG.md">Changelog</a>
+  <a href="https://ageorgiou.com/openclaw-jarvis-gilfoyle/">Documentation</a> · <a href="#quick-setup">Setup</a> · <a href="#everyday-workflow">Usage</a> · <a href="#safety-and-limitations">Safety</a> · <a href="https://ageorgiou.com/openclaw-jarvis-gilfoyle/board-reference/">Board reference</a> · <a href="#development">Development</a> · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 A small, personal-use OpenClaw plugin that coordinates a product manager (Jarvis) and an engineering manager (Gilfoyle). A shared SQLite board keeps projects, tasks, notes and user messages; private task sessions let the managers follow up and delegate to workers.
@@ -22,7 +22,7 @@ You talk to product in the project chat. Product records the request, engineerin
 
 ## Quick setup
 
-Use **OpenClaw `2026.9.8`** and Node.js with `node:sqlite`: **`>=24.16.0 <25 || >=26.1.0`** ([CI](.github/workflows/ci.yml) uses `26.8.1`). From a local checkout you have access to:
+Use **OpenClaw `2026.9.8`** and Node.js with `node:sqlite`: **`>=24.16.0 <25 || >=26.1.0`** ([CI](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/.github/workflows/ci.yml) uses `26.8.1`). From a local checkout you have access to:
 
 ```bash
 npm ci
@@ -83,7 +83,7 @@ Restart the Gateway to load the plugin:
 openclaw gateway restart
 ```
 
-A linked install loads `dist/` at Gateway startup; **rebuild and restart after source changes**. See the [configuration reference](docs/board-reference.md#configuration) for optional settings and [plugin schema](openclaw.plugin.json) for the authoritative shape.
+A linked install loads `dist/` at Gateway startup; **rebuild and restart after source changes**. See the [configuration reference](https://ageorgiou.com/openclaw-jarvis-gilfoyle/board-reference/#configuration) for optional settings and [plugin schema](openclaw.plugin.json) for the authoritative shape.
 
 ## Everyday workflow
 
@@ -93,18 +93,18 @@ A linked install loads `dist/` at Gateway startup; **rebuild and restart after s
 
 By default, the board scans every **60 seconds** for changed tasks or due check-ins (normally **60 minutes**). It wakes the holding manager without interrupting an active turn; user-held tasks get no automatic wakes. Use `/model` and `/think` in the project chat to choose settings for both managers' private task sessions; otherwise agent defaults apply.
 
-The [board reference](docs/board-reference.md) covers all seven `project_board` operations, handover rules, scheduling, delivery and operator methods.
+The [board reference](https://ageorgiou.com/openclaw-jarvis-gilfoyle/board-reference/) covers all seven `project_board` operations, handover rules, scheduling, delivery and operator methods.
 
 ## Safety and limitations
 
 - **Trusted host, not a sandbox.** Private task-session replies are suppressed from user chats. Hook errors are logged and ignored, except that a worker launch from a task session is refused while the running workers cannot be counted. Keep OpenClaw tool permissions and worker isolation in place; keep the board, transcripts and attachment files on a trusted host.
 - **Scoped coordination.** Only product controls project lifecycle, chat binding and user messages. Private task sessions are scoped to their project; stale handovers require a reread. The plugin does not constrain other agents or product's personal-assistant work.
-- **Workers and pauses.** Running workers prevent `done`; cancellation stops them, and the scan retries until each is confirmed stopped. Pausing stops automatic wakes and new workers, but does not stop existing workers. `worker.limit` counts the workers the engineering manager launched from task sessions that are running now, plus launches still starting; a launch whose completion never arrives stops counting after 16 minutes. The count lives in the gateway process, so it is a coordination limit, not a hard cap across restarts. See the [worker guards](docs/board-reference.md#worker-and-messaging-guards).
+- **Workers and pauses.** Running workers prevent `done`; cancellation stops them, and the scan retries until each is confirmed stopped. Pausing stops automatic wakes and new workers, but does not stop existing workers. `worker.limit` counts the workers the engineering manager launched from task sessions that are running now, plus launches still starting; a launch whose completion never arrives stops counting after 16 minutes. The count lives in the gateway process, so it is a coordination limit, not a hard cap across restarts. See the [worker guards](https://ageorgiou.com/openclaw-jarvis-gilfoyle/board-reference/#worker-and-messaging-guards).
 - **Delivery and retention.** Messages retry to the project chat with an owner-DM fallback; once the text is delivered, attachments are retried in the same chat. Delivery can still fail: check board/health output for undelivered messages. Attachment files must remain available until delivery finishes. SQLite survives restarts; closed-task private sessions are kept for seven days, then removed once idle.
 
-See [enforcement and delivery rules](docs/board-reference.md#enforcement) for exact boundaries and [testing limitations](TESTING.md#native-integration) for live models, real channels and real-Gateway cleanup.
+See [enforcement and delivery rules](https://ageorgiou.com/openclaw-jarvis-gilfoyle/board-reference/#enforcement) for exact boundaries and [testing limitations](TESTING.md#native-integration) for live models, real channels and real-Gateway cleanup.
 
-For consistent private board snapshots and safe staged verification, see [backup and recovery](docs/recovery.md). The operator utility never replaces the live board.
+For consistent private board snapshots and safe staged verification, see [backup and recovery](https://ageorgiou.com/openclaw-jarvis-gilfoyle/recovery/). The operator utility never replaces the live board.
 
 ## Development
 
@@ -116,4 +116,4 @@ npm test
 npm run pack:check
 ```
 
-[TESTING.md](TESTING.md) explains the checks and their side effects. [CI](.github/workflows/ci.yml) runs the checks above; native integration is optional on manual dispatch. Browse the [source](src/index.ts), [coordination skill](skills/project-coordination/SKILL.md) and [changelog](CHANGELOG.md) for implementation details and changes.
+[TESTING.md](TESTING.md) explains the checks and their side effects. [CI](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/.github/workflows/ci.yml) runs the checks above; native integration is optional on manual dispatch. Browse the [source](src/index.ts), [coordination skill](skills/project-coordination/SKILL.md) and [changelog](CHANGELOG.md) for implementation details and changes.
