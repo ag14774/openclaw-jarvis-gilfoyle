@@ -711,7 +711,9 @@ test('files follow their message, and the message joins the session of the chat 
       message: 'Here is the architecture.',
       attachments: [png],
     });
-    assert.equal(closed.message.state, 'retrying');
+    // The text is delivered; only the file is retried, in the same chat.
+    assert.equal(closed.message.state, 'sent');
+    assert.match(closed.message.error, /Attachments not delivered yet/);
     h.native.fail.delete('message.action');
     h.advance(3 * MINUTE);
     await h.tick();

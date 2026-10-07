@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { AsyncResource } from 'node:async_hooks';
 import { Store } from './store.js';
-import { BoardRuntime, spawnAgentId } from './runtime.js';
+import { BoardRuntime } from './runtime.js';
 import { Bridge } from './bridge.js';
 import { agentLabel, currentConfig, PRIVATE_GUIDANCE, projectRoleContext } from './role-context.js';
 import {
@@ -108,7 +108,7 @@ const bound = (value) => {
 export const testHooks = {
   bridge: null,
   now: null,
-  admissionNow: null,
+  launchNow: null,
   manualTicks: false,
   runtime: null,
   appendTranscript: null,
@@ -123,40 +123,20 @@ const transcripts = () => import('openclaw/plugin-sdk/session-transcript-runtime
 // configuration share one board, so a turn's chat, the scan and the bridge are not split
 // between them. An in-memory board belongs to its own registration.
 const COMPANION_RESET_MS = 5 * 60 * 1000;
-// OpenClaw 2026.9.8: ACP dispatch request timeout 10s, native subagent request
-// timeout capped at 5m, cloud sessions-spawn request timeout 15m by default.
-// Allow another minute for hooks/recording.
-// This is a recovery deadline, not an end-to-end launch or worker-stop bound.
-const LAUNCH_ADMISSION_MS = 16 * 60 * 1000;
+// A worker launch whose after_tool_call never comes stops counting after this long; the
+// longest native spawn request wait (cloud sessions, 15 minutes) plus a minute.
+const LAUNCH_MS = 16 * 60 * 1000;
 const boards = (globalThis[Symbol.for('jarvis-gilfoyle.boards')] ??= new Map());
-// Configuration is JSON: object insertion order is irrelevant, array order is not.
-const configIdentity = (cfg) =>
-  JSON.stringify(cfg, (_key, value) =>
-    value && typeof value === 'object' && !Array.isArray(value)
-      ? Object.fromEntries(
-          Object.keys(value)
-            .sort()
-            .map((key) => [key, value[key]]),
-        )
-      : value,
-  );
 const sharedBoard = (cfg, create) => {
   if (cfg.statePath === ':memory:') return create();
-  const key = configIdentity(cfg);
+  const key = JSON.stringify(cfg);
   if (!boards.has(key)) boards.set(key, create());
   return boards.get(key);
 };
-// Native hooks expose these IDs optionally. Never match a launch by parent alone:
-// several overlapping calls can share one task session and even one turn.
-const spawnIdentity = (event, ctx) => {
-  const ids = ['runId', 'toolCallId'].map((field) => {
-    if (event?.[field] && ctx?.[field] && event[field] !== ctx[field]) return null;
-    const value = ctx?.[field] ?? event?.[field];
-    return typeof value === 'string' && value.length ? value : null;
-  });
-  return ids.every(Boolean)
-    ? JSON.stringify([ctx.sessionKey, ctx.sessionId ?? null, ...ids])
-    : null;
+// One tool call: several launches can share a task session and a turn.
+const launchId = (event, ctx) => {
+  const call = ctx?.toolCallId ?? event?.toolCallId;
+  return call ? JSON.stringify([ctx?.sessionKey, ctx?.runId ?? event?.runId ?? null, call]) : null;
 };
 
 export default {
@@ -179,12 +159,9 @@ export default {
       openError: null,
       owner: null,
     }));
-    // Process-local monotonic time survives runtime replacement and wall-clock rollback.
-    const admissionNow = testHooks.admissionNow ?? (() => performance.now());
-    // Retained pre-expiry claims have no acquisition time: adopt a deadline once,
-    // starting at this registration, and preserve it through later registrations.
-    if (board.admission && board.admission.expiresAt === undefined)
-      board.admission.expiresAt = admissionNow() + LAUNCH_ADMISSION_MS;
+    // Launches in progress outlive a runtime replacement; monotonic time ignores clock changes.
+    board.launches ??= new Map();
+    const launchNow = testHooks.launchNow ?? (() => performance.now());
     // Writes to a chat's session run in the board service's own async context. Called from a
     // manager's tool call, OpenClaw's write context for that turn refuses a write to another
     // session ("session writer claim changed before transcript persistence").
@@ -400,57 +377,33 @@ export default {
     });
     on('before_tool_call', (event, ctx) => {
       if (!isManagerAgent(agentOf(ctx)) || !isPrivateSession(ctx?.sessionKey)) return;
-      const covered =
-        event?.toolName === 'sessions_spawn' &&
-        agentOf(ctx) === cfg.engineeringAgentId &&
-        spawnAgentId(event.params) === cfg.worker?.agentId;
-      if (covered) {
-        const blocked = (reason) => ({ block: true, blockReason: reason });
-        if (board.admission && admissionNow() >= board.admission.expiresAt) board.admission = null;
-        if (board.admission)
-          return blocked(
-            'Worker launch invocation is pending; retry after its matching completion hook or 16-minute admission expiry.',
-          );
-        const identity = spawnIdentity(event, ctx);
-        if (!identity)
-          return blocked('Worker admission needs native runId and toolCallId; spawn refused.');
-        // Board-owned, acquired synchronously before get/count can await. startOver
-        // replaces runtime/bridge but preserves the claim and its original deadline.
-        const claim = { identity, granted: false, expiresAt: admissionNow() + LAUNCH_ADMISSION_MS };
-        board.admission = claim;
-        return (async () => {
-          try {
-            const r = get();
-            const result = await r.beforeToolCall(event, ctx);
-            // A timed-out host wait can leave this callback running. It may neither
-            // grant expired/replaced ownership nor release a newer caller's claim.
-            if (board.admission !== claim || admissionNow() >= claim.expiresAt) {
-              if (board.admission === claim) board.admission = null;
-              return blocked('Worker admission expired or replaced while checking workers; retry.');
-            }
-            if (result?.block || board.runtime !== r) {
-              if (board.admission === claim) board.admission = null;
-              return result?.block
-                ? result
-                : blocked('Board reloaded while checking workers; retry.');
-            }
-            claim.granted = true;
-            return result;
-          } catch (error) {
-            // No launch permission was returned: this is a known prelaunch failure.
-            if (board.admission === claim) board.admission = null;
-            return blocked(
-              `Worker admission unavailable; retry: ${String(error?.message ?? error).slice(0, 300)}`,
-            );
-          }
-        })();
-      }
-      return get().beforeToolCall(event, ctx);
+      if (event?.toolName !== 'sessions_spawn' || agentOf(ctx) !== cfg.engineeringAgentId)
+        return get().beforeToolCall(event, ctx);
+      // Earlier launches still in progress count towards the limit. This one is added
+      // before the count can await, so parallel launches see each other.
+      const now = launchNow();
+      for (const [id, expires] of board.launches) if (now >= expires) board.launches.delete(id);
+      const launching = board.launches.size;
+      const id = launchId(event, ctx);
+      if (id) board.launches.set(id, now + LAUNCH_MS);
+      const done = () => id && board.launches.delete(id);
+      return (async () => {
+        try {
+          const result = await get().beforeToolCall(event, ctx, launching);
+          // Only a permitted worker launch stays in progress until its after_tool_call.
+          if (!result?.params) done();
+          return result;
+        } catch (error) {
+          done();
+          return {
+            block: true,
+            blockReason: `Cannot check running workers; try again shortly: ${String(error?.message ?? error).slice(0, 300)}`,
+          };
+        }
+      })();
     });
     on('after_tool_call', (event, ctx) => {
       if (event?.toolName !== 'sessions_spawn' || !isPrivateSession(ctx?.sessionKey)) return;
-      const claim = board.admission;
-      const matching = claim?.granted && claim.identity === spawnIdentity(event, ctx);
       try {
         let details = event.result?.details;
         if (!details?.childSessionKey)
@@ -459,18 +412,10 @@ export default {
           } catch {
             details = null;
           }
-        const child = details?.childSessionKey;
-        if (typeof child === 'string' && child.startsWith('agent:'))
-          assert(get().recordWorker(ctx.sessionKey, child), 'worker recording unconfirmed');
-      } catch (error) {
-        api.logger?.warn?.(
-          `Worker recording failed: ${String(error?.message ?? error).slice(0, 300)}`,
-        );
+        if (details?.childSessionKey) get().recordWorker(ctx.sessionKey, details.childSessionKey);
       } finally {
-        // This hook completes the matching invocation, not proof of no native effect.
-        // Record known children first, even on errors; failed recording is visible but
-        // cannot retain completed-call serialization. Late/unrelated hooks only record.
-        if (matching && board.admission === claim) board.admission = null;
+        const id = launchId(event, ctx);
+        if (id) board.launches.delete(id);
       }
     });
     on('agent_end', (_event, ctx) => {

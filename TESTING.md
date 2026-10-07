@@ -32,29 +32,11 @@ The fakes follow OpenClaw 2026.9.8 as found in its distribution:
 - `conversations.send` receipts are `sent`, `queued`, `suppressed` or `unknown`, and `queued` means durably queued;
 - a repeated `operationId` does not send twice.
 
-`test/admission.test.ts` drives real before/after hooks with fake native RPC. It
-covers limit-one concurrency, shared registrations with reordered nested JSON
-properties, native-trimmed targets and scoped unavailable-board refusals, exact invocation matching,
-scoped native count errors/unknowns, completion-based release and known-child recording even on errors,
-same-parent overlap and late/unrelated hooks, direct-parent versus descendant
-scope, observed unrecorded workers across all task/project statuses, native cleanup
-of completed history (including a fresh process), recent-record visibility grace,
-native pagination past idle history and unknown/nonadvancing pagination,
-closed/cancelled occupancy, lifecycle/record changes during native reads,
-and reload serialization with the original expiry deadline. A self-contained upgrade regression arranges a retained legacy claim without expiry in the shared disposable board and models the relevant old completion-hook behavior from `c132af9:src/index.ts`. It checks expiry exactly 16 minutes after deadline adoption, preservation through another registration/reload, and late old-hook recording without replacement release. This focused baseline model needs no Git history; independent reproduction using the actual baseline registration remains review evidence rather than automated-suite evidence. A second SQLite connection writes during a suspended RPC to
-check that no transaction spans the wait. A hook-timeout ordering model confirms
-that its continuing callback stays locked before expiry without a completion hook. Matching
-completions with empty/missing results release. Missing hooks recover lazily at the
-exact 16-minute boundary, including across cancelled turns and reload; an injected
-monotonic clock verifies that wall-clock rollback does not extend expiry. Suspended
-old prelaunch callbacks refuse after expiry with no replacement, with a newer pending
-claim, and after a newer completion. Late old completions record known children
-without releasing replacement claims;
-recording failures are reported and release completed calls. A disposable
-second-process test demonstrates the restart limitation: unfinished-call
-serialization is lost, not recovered. A completed input rejection permits the
-next valid fake spawn. These are mocked behavior/fault-boundary tests, not live
-worker or hard-cap evidence.
+`test/admission.test.ts` drives the real `before_tool_call` and `after_tool_call` hooks with fake native sessions: simultaneous launches at the last free slot, parallel launches in one turn while there is room, refused and failed launches not holding a slot, a launch whose completion never arrives counting for 16 minutes, which running workers count, a worker target written in another case, and waiting out a full limit with ordinary check-ins.
+
+`test/reliability.test.ts` drives the runtime directly with fake native calls that assert no SQLite transaction spans an await: changes made while a completion checks the workers, stopping a cancelled task's workers until they are confirmed stopped (and then no more checks), failed and timed-out wakes, actions made during a wake dispatch, attachments retried in the chat that received the text, simultaneous deliveries of one message, and refusal of a foreign database file.
+
+These are mocked behavior tests, not live worker or hard-limit evidence.
 
 ## Native Integration
 

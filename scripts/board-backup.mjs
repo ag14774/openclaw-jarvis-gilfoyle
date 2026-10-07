@@ -21,6 +21,7 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 // Schema 18's structural admission check; deliberately independent of the mutating Store.
+// Column order is not checked: older boards gained some columns at the end.
 const columns = {
   projects: 'id:TEXT name:TEXT context:TEXT route:TEXT state:TEXT created:INTEGER updated:INTEGER',
   tasks:
@@ -59,8 +60,9 @@ function inspect(db) {
         .prepare(`PRAGMA table_info(${table})`)
         .all()
         .map((row) => `${row.name}:${row.type}`)
+        .sort()
         .join(' '),
-      expected,
+      expected.split(' ').sort().join(' '),
       `Unexpected ${table} columns`,
     );
   }

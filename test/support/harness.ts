@@ -125,7 +125,7 @@ export async function harness({ config = {} } = {}) {
   };
   testHooks.publishTranscript = async () => {};
   testHooks.now = () => clock;
-  testHooks.admissionNow = () => admissionClock;
+  testHooks.launchNow = () => admissionClock;
   testHooks.manualTicks = true;
   testHooks.runtime = null;
   const hooks = {};
