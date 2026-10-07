@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-setup">Setup</a> · <a href="#everyday-workflow">Usage</a> · <a href="#safety-and-limitations">Safety</a> · <a href="docs/board-reference.md">Board reference</a> · <a href="#development">Development</a> · <a href="CHANGELOG.md">Changelog</a>
+  <a href="https://ageorgiou.com/openclaw-jarvis-gilfoyle/">Documentation</a> · <a href="#quick-setup">Setup</a> · <a href="#everyday-workflow">Usage</a> · <a href="#safety-and-limitations">Safety</a> · <a href="docs/board-reference.md">Board reference</a> · <a href="#development">Development</a> · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 A small, personal-use OpenClaw plugin that coordinates a product manager (Jarvis) and an engineering manager (Gilfoyle). A shared SQLite board keeps projects, tasks, notes and user messages; private task sessions let the managers follow up and delegate to workers.

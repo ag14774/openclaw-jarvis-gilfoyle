@@ -8,4 +8,6 @@ Keep SQLite transactions synchronous; revalidate decisions after native awaits b
 
 Use fake native APIs and disposable files for regression coverage. Run npm run format:check, npm run check, npm test, npm run test:native and npm run pack:check. Native tests inspect the pinned package, not a live gateway. Build transpiles with noCheck; it is not static type verification. Report mocked, native-export, CI and live evidence separately. Live gateway/install changes, channel sends, production deployment and repository visibility changes need separate authorization.
 
+Public documentation uses standard Zensical and publishes from accepted main changes through GitHub Pages Actions. Keep the plugin repository private, preserve account custom-domain routing, and scan documentation and generated assets for private content before publishing. README links the verified documentation site without embedded preview screenshots.
+
 Repository docs state current behavior and limitations. Keep test evidence and investigation details in PRs, not runtime policy. Preserve unrelated changes, branding, license/privacy choices and append-only history.
