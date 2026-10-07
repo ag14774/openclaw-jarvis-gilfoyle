@@ -1,22 +1,28 @@
-# OpenClaw Jarvis-Gilfoyle
-
 <p align="center">
   <img src="docs/assets/logo.png" width="600" alt="Pixel-art Jarvis robot and long-haired Gilfoyle android engineer flanking a coral claw" />
 </p>
 
-A small, personal-use OpenClaw plugin for coordinating a product-manager agent and an engineering-manager agent. A shared SQLite board tracks requests, handovers and messages; private task sessions let the managers follow up and delegate work.
+<h1 align="center">OpenClaw Jarvis-Gilfoyle</h1>
 
-```text
-user <-> product manager (Jarvis) <-> project board <-> engineering manager (Gilfoyle) -> workers
-```
+<p align="center">Two manager agents, one shared board, clear handovers.</p>
 
-The names are thematic; roles map to your configured agent IDs. This repository is private and the package is `UNLICENSED`.
+<p align="center">
+  <a href="package.json"><img src="https://img.shields.io/badge/OpenClaw-2026.9.8-ef6b57" alt="OpenClaw compatibility: 2026.9.8" /></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/Node.js-%3E%3D24.16.0%20%3C25%20%7C%7C%20%3E%3D26.1.0-43853d" alt="Node.js requirement: >=24.16.0 <25 or >=26.1.0" /></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/Repository-private-6b7280" alt="Private repository" /></a>
+</p>
 
-[Releases](https://github.com/ag14774/openclaw-jarvis-gilfoyle/releases) · [CI](https://github.com/ag14774/openclaw-jarvis-gilfoyle/actions/workflows/ci.yml) · [Board reference](docs/board-reference.md) · [Changelog](CHANGELOG.md)
+<p align="center">
+  <a href="#quick-setup">Setup</a> · <a href="#everyday-workflow">Usage</a> · <a href="#safety-and-limitations">Safety</a> · <a href="docs/board-reference.md">Board reference</a> · <a href="#development">Development</a> · <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+A small, personal-use OpenClaw plugin that coordinates a product manager (Jarvis) and an engineering manager (Gilfoyle). A shared SQLite board keeps projects, tasks, notes and user messages; private task sessions let the managers follow up and delegate to workers.
+
+You talk to product in the project chat. Product records the request, engineering does the work, and product brings back results or questions. The names are thematic: roles map to your configured agent IDs. **This repository is private; the package is `UNLICENSED`.**
 
 ## Quick setup
 
-Use **OpenClaw `2026.9.8`** and Node.js with `node:sqlite`: `>=24.16.0 <25 || >=26.1.0` (CI uses `26.8.1`). Run these commands from a local checkout you have access to:
+Use **OpenClaw `2026.9.8`** and Node.js with `node:sqlite`: **`>=24.16.0 <25 || >=26.1.0`** ([CI](.github/workflows/ci.yml) uses `26.8.1`). From a local checkout you have access to:
 
 ```bash
 npm ci
@@ -24,7 +30,10 @@ npm run build
 openclaw plugins install --link . --force --accept-capabilities
 ```
 
-Add the following entry to your OpenClaw configuration. Replace the database path, agent IDs, owner DM and worker model with your own values. The three agent IDs must be distinct and refer to agents you have configured; the model must be available to your worker.
+Add a `jarvis-gilfoyle` entry to your OpenClaw configuration. Replace the database path, agent IDs, owner DM and worker model below. All three agent IDs must be distinct and configured; the model must be available to your worker.
+
+<details>
+<summary>Required configuration example</summary>
 
 ```json
 {
@@ -62,41 +71,40 @@ Add the following entry to your OpenClaw configuration. Replace the database pat
 }
 ```
 
-Grant `project_board` to both managers in their tool permissions, and make the bundled [project-coordination skill](skills/project-coordination/SKILL.md) available to them. For `runtime: "acp"`, configure the worker's ACP runtime in OpenClaw; `"subagent"` is also supported.
+</details>
 
-Use a new database file or an existing **schema 18** board at `statePath`; there is no automatic migration. Do not point it at an unrelated database. Then restart the Gateway:
+- **Permissions:** grant `project_board` to both managers and make the [coordination skill](skills/project-coordination/SKILL.md) available to them. Enable both hook permissions shown above: `allowConversationAccess` and `allowPromptInjection`.
+- **Workers:** configure the worker's ACP runtime in OpenClaw for `runtime: "acp"`; `"subagent"` is also supported.
+- **Storage:** use a dedicated new SQLite file or an existing **schema 18** board at the absolute `statePath`. There is **no automatic migration**; never use an unrelated database.
+
+Restart the Gateway to load the plugin:
 
 ```bash
 openclaw gateway restart
 ```
 
-A linked install loads `dist/` at Gateway startup. After source changes, rebuild and restart. Optional scan, timeout and concurrency settings are in the [configuration reference](docs/board-reference.md#configuration).
+A linked install loads `dist/` at Gateway startup; **rebuild and restart after source changes**. See the [configuration reference](docs/board-reference.md#configuration) for optional settings and [plugin schema](openclaw.plugin.json) for the authoritative shape.
 
 ## Everyday workflow
 
-1. **Start in the project chat.** Ask the product manager to create a project and record its context. The board binds messages to that chat.
-2. **Request work.** Product adds a task, held by engineering by default. Engineering works in the task's private session, delegates to workers and hands the result back with a note.
-3. **Answer questions in the chat.** Product hands the same task to the user with a message when input is needed, then passes the answer back to engineering.
-4. **Review and finish.** Product checks the result, closes the task and tells you what changed. Progress updates use `notify`; handovers and closing require notes.
+1. **Start in the project chat.** Ask product to create a project and record its context; messages are bound to that chat.
+2. **Request work.** Product adds a task for engineering, which works in a private task session, delegates to workers and hands back a result with a note.
+3. **Answer and review.** Product brings questions to you in the chat, passes answers back, then checks the result, closes the task and tells you what changed.
 
-The board scans every **60 seconds** by default. It wakes the manager holding a changed task or a due check-in (normally **60 minutes**), without interrupting an active turn. Tasks held by the user get no automatic wake-ups. Set `/model` and `/think` in the project chat to choose settings for both managers' private task sessions; otherwise their agent defaults apply.
+By default, the board scans every **60 seconds** for changed tasks or due check-ins (normally **60 minutes**). It wakes the holding manager without interrupting an active turn; user-held tasks get no automatic wakes. Use `/model` and `/think` in the project chat to choose settings for both managers' private task sessions; otherwise agent defaults apply.
 
-See the [board reference](docs/board-reference.md) for all seven `project_board` operations, scheduling, delivery and operator methods.
+The [board reference](docs/board-reference.md) covers all seven `project_board` operations, handover rules, scheduling, delivery and operator methods.
 
 ## Safety and limitations
 
-- **Role and project checks:** only product controls project names, lifecycle, chat binding and user messages. Private task sessions are scoped to their own project; stale handover decisions must reread the task.
-- **Worker lifecycle:** configured worker profiles and a shared worker limit govern delegation from task sessions. Running workers prevent `done`; cancellation aborts them. Paused projects get no automatic wakes or new workers, but pausing does not abort existing workers.
-- **User delivery:** board messages use the project chat, with retries and a configured owner-DM fallback. Attachments are up to four existing absolute-path files, 8 MB each, read again on each attempt. Delivery can still fail; inspect board/health output rather than assuming receipt.
-- **Private is a session role, not a sandbox:** task-session replies are suppressed from user chats, but hooks fail open (errors are logged and ignored). These guards do not replace OpenClaw tool permissions or worker isolation; agent judgment is guided by the skill.
-- **Storage and retention:** the SQLite board survives restarts. Closed-task private sessions are kept for seven days, then removed once idle. Keep the board and transcripts in your trusted local environment.
+- **Trusted host, not a sandbox.** Private task-session replies are suppressed from user chats, but **hooks fail open**: errors are logged and ignored. Keep OpenClaw tool permissions and worker isolation in place; keep the board, transcripts and attachment files on a trusted host.
+- **Scoped coordination.** Only product controls project lifecycle, chat binding and user messages. Private task sessions are scoped to their project; stale handovers require a reread. The plugin does not constrain other agents or product's personal-assistant work.
+- **Workers and pauses.** Running workers prevent `done`; cancellation aborts them. Pausing stops automatic wakes and new workers, but does not abort existing workers. Profile and shared-limit guards apply to the configured worker agent.
+- **Delivery and retention.** Messages retry to the project chat with an owner-DM fallback, but can still fail: check board/health output for undelivered messages. Attachment files must remain available until delivery finishes. SQLite survives restarts; closed-task private sessions are kept for seven days, then removed once idle.
 
-The [full enforcement and delivery rules](docs/board-reference.md#enforcement) include required messages, chat-binding restrictions, transcript recording and the scope of worker guards. [Testing limitations](TESTING.md#native-integration) cover live models, real channels and real-Gateway cleanup.
+See [enforcement and delivery rules](docs/board-reference.md#enforcement) for exact boundaries and [testing limitations](TESTING.md#native-integration) for live models, real channels and real-Gateway cleanup.
 
-For private, consistent board snapshots and a separately verified staged copy, see
-[backup and recovery](docs/recovery.md). The operator utility never replaces the
-live board. See the [read-only capacity assessment](docs/capacity-assessment.md)
-for the check-then-spawn race, native limit scopes and procedure-first recommendation.
+For consistent private board snapshots and safe staged verification, see [backup and recovery](docs/recovery.md). The operator utility never replaces the live board.
 
 ## Development
 
@@ -108,4 +116,4 @@ npm test
 npm run pack:check
 ```
 
-[TESTING.md](TESTING.md) describes behavioral and native checks. [CI](.github/workflows/ci.yml) runs the checks above; its optional native job runs on manual dispatch. See the [plugin schema](openclaw.plugin.json), [source](src/index.ts), [coordination skill](skills/project-coordination/SKILL.md) and [changelog](CHANGELOG.md) for implementation details and changes.
+[TESTING.md](TESTING.md) explains the checks and their side effects. [CI](.github/workflows/ci.yml) runs the checks above; native integration is optional on manual dispatch. Browse the [source](src/index.ts), [coordination skill](skills/project-coordination/SKILL.md) and [changelog](CHANGELOG.md) for implementation details and changes.
