@@ -808,6 +808,39 @@ export class BoardRuntime {
     }
     return live;
   }
+  // Admission counts direct engineering launches, not descendant activity. Unlike
+  // lifecycle display, missing/unknown state and stale-but-active rows cannot free
+  // admission. Parent provenance also keeps product/personal launches out of scope.
+  async runningBoardWorkers() {
+    const { workerAgentId } = topology();
+    const counted = new Set();
+    const records = () =>
+      this.store.all("SELECT id,created,workers FROM tasks WHERE workers<>'[]' ORDER BY id");
+    const tasks = records();
+    for (const row of tasks) {
+      for (const worker of JSON.parse(row.workers)) {
+        if (!worker.key.startsWith(`agent:${workerAgentId}:`) || counted.has(worker.key)) continue;
+        const session = (
+          await this.sessionRows(workerAgentId, worker.key, { archived: 'all' })
+        ).find((session) => session.key === worker.key);
+        assert(
+          session &&
+            typeof session.hasActiveRun === 'boolean' &&
+            typeof session.spawnedBy === 'string' &&
+            session.spawnedBy.length,
+          `Worker ${worker.key} native activity or parent unknown`,
+        );
+        if (session.spawnedBy !== taskSessionKey('engineering', row)) continue;
+        if (session.hasActiveRun || this.now() - worker.at < WORKER_GRACE_MS)
+          counted.add(worker.key);
+      }
+    }
+    assert(
+      JSON.stringify(records()) === JSON.stringify(tasks),
+      'Worker records changed while counting; retry',
+    );
+    return counted.size;
+  }
   async abortWorkers(task) {
     for (const worker of task.workers) {
       const key = worker.key;
@@ -843,14 +876,16 @@ export class BoardRuntime {
     if (!scope || typeof childSessionKey !== 'string' || !childSessionKey.startsWith('agent:'))
       return;
     const task = this.store.task(scope.taskId);
-    if (task.workers.some((worker) => worker.key === childSessionKey)) return;
+    assert(task.created === scope.created, 'Worker parent belongs to a removed task');
+    if (task.workers.some((worker) => worker.key === childSessionKey)) return true;
     this.store.run(
       "UPDATE tasks SET workers=?,idle_wakes=0,check_at=CASE WHEN status='cancelled' THEN ? ELSE check_at END WHERE id=?",
-      JSON.stringify([...task.workers, { key: childSessionKey, at: this.now() }].slice(-50)),
+      JSON.stringify([...task.workers, { key: childSessionKey, at: this.now() }]),
       this.now(),
       task.id,
     );
     if (task.status === 'cancelled') this.requestTick();
+    return true;
   }
 
   // ---- Hook support (private sessions and project chats only) -----------------------
@@ -1050,6 +1085,7 @@ export class BoardRuntime {
     let task, project;
     try {
       task = this.store.task(scope.taskId);
+      assert(task.created === scope.created);
       project = this.store.project(task.project);
     } catch {
       return { block: true, blockReason: 'This private session has no task.' };
@@ -1071,7 +1107,11 @@ export class BoardRuntime {
         blockReason: `Project ${project.name} is ${project.state}; no new workers.`,
       };
     const { workerAgentId, workerProfiles, workerRuntime, workerLimit } = topology();
-    if (params.agentId !== workerAgentId || !workerProfiles.length) return undefined;
+    if (params.agentId !== workerAgentId) return undefined;
+    if (!workerProfiles.length) {
+      assert(scope.role !== 'engineering', 'Worker profiles unavailable');
+      return undefined;
+    }
     const profile =
       workerProfiles.find((p) => p.id === params.model) ??
       workerProfiles.find(
@@ -1083,16 +1123,26 @@ export class BoardRuntime {
         block: true,
         blockReason: `Set model to a worker profile id: ${workerProfiles.map((p) => p.id).join(', ')}.`,
       };
-    let running = 0;
-    for (const row of this.store.all("SELECT * FROM tasks WHERE status='open' AND workers<>'[]'"))
-      running += (await this.liveWorkers({ ...row, workers: JSON.parse(row.workers) })).filter(
-        (key) => key.startsWith(`agent:${workerAgentId}:`),
-      ).length;
-    if (running >= workerLimit)
-      return {
-        block: true,
-        blockReason: `${running} workers are already running (limit ${workerLimit}); wait for one to finish.`,
-      };
+    if (scope.role === 'engineering') {
+      const running = await this.runningBoardWorkers();
+      // Count may await slow native reads. Pausing/cancelling during it must win.
+      const current = this.store.task(task.id);
+      const currentProject = this.store.project(task.project);
+      if (
+        current.created !== scope.created ||
+        current.status !== 'open' ||
+        currentProject.state !== 'active'
+      )
+        return {
+          block: true,
+          blockReason: 'Task or project changed while checking workers; read it again.',
+        };
+      if (running >= workerLimit)
+        return {
+          block: true,
+          blockReason: `${running} workers are already running (limit ${workerLimit}); wait for one to finish.`,
+        };
+    }
     return {
       params: {
         ...params,

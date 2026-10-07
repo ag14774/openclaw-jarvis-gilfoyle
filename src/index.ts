@@ -129,6 +129,18 @@ const sharedBoard = (cfg, create) => {
   if (!boards.has(key)) boards.set(key, create());
   return boards.get(key);
 };
+// Native hooks expose these IDs optionally. Never match a launch by parent alone:
+// several overlapping calls can share one task session and even one turn.
+const spawnIdentity = (event, ctx) => {
+  const ids = ['runId', 'toolCallId'].map((field) => {
+    if (event?.[field] && ctx?.[field] && event[field] !== ctx[field]) return null;
+    const value = ctx?.[field] ?? event?.[field];
+    return typeof value === 'string' && value.length ? value : null;
+  });
+  return ids.every(Boolean)
+    ? JSON.stringify([ctx.sessionKey, ctx.sessionId ?? null, ...ids])
+    : null;
+};
 
 export default {
   id: 'jarvis-gilfoyle',
@@ -365,6 +377,44 @@ export default {
     });
     on('before_tool_call', (event, ctx) => {
       if (!isManagerAgent(agentOf(ctx)) || !isPrivateSession(ctx?.sessionKey)) return;
+      const covered =
+        event?.toolName === 'sessions_spawn' &&
+        agentOf(ctx) === cfg.engineeringAgentId &&
+        event.params?.agentId === cfg.worker?.agentId;
+      if (covered) {
+        const blocked = (reason) => ({ block: true, blockReason: reason });
+        if (board.admission)
+          return blocked(
+            'Worker admission is pending or unconfirmed; retry after its matching accepted result is recorded. Missing/error hooks can leave it blocked for this process; elapsed time and reload do not clear it.',
+          );
+        const identity = spawnIdentity(event, ctx);
+        if (!identity)
+          return blocked('Worker admission needs native runId and toolCallId; spawn refused.');
+        // Board-owned, acquired synchronously before get/count can await. startOver
+        // replaces runtime/bridge but must never reset unresolved launch custody.
+        const claim = { identity, granted: false };
+        board.admission = claim;
+        return (async () => {
+          try {
+            const r = get();
+            const result = await r.beforeToolCall(event, ctx);
+            if (result?.block || board.runtime !== r) {
+              if (board.admission === claim) board.admission = null;
+              return result?.block
+                ? result
+                : blocked('Board reloaded while checking workers; retry.');
+            }
+            claim.granted = true;
+            return result;
+          } catch (error) {
+            // No launch permission was returned: this is a known prelaunch failure.
+            if (board.admission === claim) board.admission = null;
+            return blocked(
+              `Worker admission unavailable; retry: ${String(error?.message ?? error).slice(0, 300)}`,
+            );
+          }
+        })();
+      }
       return get().beforeToolCall(event, ctx);
     });
     on('after_tool_call', (event, ctx) => {
@@ -376,6 +426,28 @@ export default {
         } catch {
           details = null;
         }
+      const claim = board.admission;
+      const matching = claim?.granted && claim.identity === spawnIdentity(event, ctx);
+      if (matching) {
+        try {
+          const child = details?.childSessionKey;
+          if (
+            event.error ||
+            event.result?.isError ||
+            details?.status !== 'accepted' ||
+            typeof child !== 'string' ||
+            !child.startsWith(`agent:${cfg.worker.agentId}:`)
+          )
+            throw new Error('native launch result missing, failed or unknown');
+          assert(get().recordWorker(ctx.sessionKey, child), 'worker recording unconfirmed');
+          if (board.admission === claim) board.admission = null;
+          return;
+        } catch (error) {
+          api.logger?.warn?.(
+            `Worker admission remains unconfirmed: ${String(error?.message ?? error).slice(0, 300)}; no automatic unlock`,
+          );
+        }
+      }
       if (details?.childSessionKey) get().recordWorker(ctx.sessionKey, details.childSessionKey);
     });
     on('agent_end', (_event, ctx) => {

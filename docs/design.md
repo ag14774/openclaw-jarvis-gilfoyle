@@ -17,7 +17,7 @@ Mechanical checks stay close to the facts already available: roles, project scop
 
 Private task sessions are a coordination role, **not hostile multi-tenant containment**. They suppress intentional user-chat replies and scope board operations to the task's project. Task-session `sessions_send` is restricted to that task's workers and direct `message` calls are refused.
 
-Hooks **fail open**: errors are logged and ignored. Worker profile/concurrency checks apply to spawns targeting the configured worker agent, not every possible agent. Outside board operations and private-session guards, the product manager's personal-assistant work and other agents are unaffected.
+Hook errors are normally logged and ignored. Engineering's direct configured-worker admission instead refuses unknown state and holds a same-process gate through matching accepted-result recording; uncertain results can strand it, and process restart loses pending custody. It is not a restart-safe hard cap. Profiles apply to the configured worker agent; this admission gate and limit exclude product/personal launches and descendants. See the [worker guard boundaries](board-reference.md#worker-and-messaging-guards). Outside board operations and private-session guards, the product manager's personal-assistant work and other agents are unaffected.
 
 Host tool permissions, credentials, filesystem access and worker isolation remain OpenClaw/operator responsibilities. Cooperative workers can share the host's credential and failure boundary. Use separate containment for untrusted code; a private session name cannot supply it. Production and spending decisions are not plugin-enforced approval gates.
 
