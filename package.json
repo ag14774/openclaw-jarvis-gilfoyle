@@ -12,7 +12,6 @@
     "dist/",
     "src/",
     "skills/",
-    "docs/",
     "scripts/board-backup.mjs",
     "openclaw.plugin.json",
     "README.md",
