@@ -1,0 +1,45 @@
+[project]
+site_name = "Jarvis-Gilfoyle"
+site_description = "A small project board for cooperative OpenClaw agents."
+# Conventional Pages candidate only; deployment eligibility and live URL are unverified.
+site_url = "https://ag14774.github.io/openclaw-jarvis-gilfoyle/"
+docs_dir = "docs"
+site_dir = "site"
+dev_addr = "127.0.0.1:8000"
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "Workflow" = "workflow.md" },
+  { "Board reference" = "board-reference.md" },
+  { "Design and boundaries" = "design.md" },
+  { "Operations" = "operations.md" },
+  { "Documentation" = "documentation.md" },
+]
+
+[project.theme]
+variant = "modern"
+language = "en"
+logo = "assets/logo.png"
+favicon = "assets/logo.png"
+font = false
+features = ["navigation.footer", "navigation.top", "search.highlight", "content.code.copy"]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "indigo"
+accent = "teal"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "red"
+accent = "teal"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true

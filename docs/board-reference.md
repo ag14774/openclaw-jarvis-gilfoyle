@@ -1,8 +1,8 @@
 # Board reference
 
-[Back to README](../README.md)
+[Documentation home](index.md) · [Repository README](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/README.md)
 
-Detailed behavior of the `project_board` tool and its private task sessions. The bundled [project-coordination skill](../skills/project-coordination/SKILL.md) describes agent judgment and the working protocol; the rules below describe checks the plugin can enforce from callers, board rows and native calls.
+Detailed behavior of the `project_board` tool and its private task sessions. The bundled [project-coordination skill](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/skills/project-coordination/SKILL.md) describes agent judgment and the working protocol; the rules below describe checks the plugin can enforce from callers, board rows and native calls.
 
 ## Board records
 
@@ -72,7 +72,7 @@ Outside the board tool and private task-session guards, the plugin adds only bri
 
 ## Configuration
 
-Required configuration is shown in the [README](../README.md#quick-setup); the authoritative shape is [openclaw.plugin.json](../openclaw.plugin.json).
+Required configuration is shown in [getting started](getting-started.md#configure-the-plugin); the authoritative shape is [openclaw.plugin.json](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/openclaw.plugin.json).
 
 | Setting                                                  | Default / constraint                                                                                                       |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -100,4 +100,4 @@ SQLite uses WAL, full synchronous writes and foreign keys. New parent directorie
 | `jarvis-gilfoyle.board.tick`   | Runs a scan. Requires `operator.admin`.                                                                                                       |
 | `jarvis-gilfoyle.board.health` | Reports enabled/registry state, scan health and counts of projects, open/stalled tasks and pending/failed messages. Requires `operator.read`. |
 
-See [TESTING.md](../TESTING.md) for checks and live-integration limitations, and the [changelog](../CHANGELOG.md) for historical schema changes.
+See [TESTING.md](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/TESTING.md) for checks and live-integration limitations, and the [changelog](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/CHANGELOG.md) for historical schema changes.

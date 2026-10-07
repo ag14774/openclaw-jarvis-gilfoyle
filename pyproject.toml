@@ -1,0 +1,9 @@
+[project]
+name = "jarvis-gilfoyle-docs"
+version = "0.1.0"
+description = "Documentation build environment for OpenClaw Jarvis-Gilfoyle"
+requires-python = ">=3.13,<3.14"
+dependencies = ["zensical==0.0.68"]
+
+[tool.uv]
+package = false
