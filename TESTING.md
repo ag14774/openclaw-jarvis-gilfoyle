@@ -64,7 +64,7 @@ launch a worker or read real board/session data.
 `scripts/board-backup.mjs` is the only operator script included in the package.
 `backup` and `stage` create a new private directory with a database and report;
 `verify` opens the explicitly supplied file read-only. See
-[recovery](docs/recovery.md) for prerequisites, read-only WAL coordination caveats
+[recovery](https://ageorgiou.com/openclaw-jarvis-gilfoyle/recovery/) for prerequisites, read-only WAL coordination caveats
 and the separately authorized boundary before any live replacement. This is local
 SQLite restore-readability evidence, not a live/off-host/full-host recovery test.
 

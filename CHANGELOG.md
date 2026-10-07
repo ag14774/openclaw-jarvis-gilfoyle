@@ -8,7 +8,7 @@
 - A wake that could not be dispatched keeps its poke and idle count and is retried after five minutes, so dispatch failures no longer lead to a stall report. A timed-out dispatch whose turn started counts as a wake. An action on the task during the dispatch keeps its own check-in, and the holder's own action answers an outstanding poke.
 - Once a message's text is delivered it never falls back to the owner DM: attachments are retried in the same chat, and if they keep failing the message stays delivered with the error recorded. Simultaneous deliveries of one message send it once.
 - A non-empty database file that is not a board is refused without being changed.
-- Documentation site (Zensical, published to GitHub Pages from `main`), a reworked README, and `scripts/board-backup.mjs` with [backup and recovery](docs/recovery.md) guidance.
+- Documentation site (Zensical, published to GitHub Pages from `main`), a reworked README, and `scripts/board-backup.mjs` with [backup and recovery](https://ageorgiou.com/openclaw-jarvis-gilfoyle/recovery/) guidance.
 
 ## 6.6.4 - 2026-10-05
 
