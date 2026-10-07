@@ -1,5 +1,9 @@
 # OpenClaw Jarvis-Gilfoyle
 
+<p align="center">
+  <img src="docs/assets/logo.png" width="600" alt="Pixel-art Jarvis robot and long-haired Gilfoyle android engineer flanking a coral claw" />
+</p>
+
 A small, personal-use OpenClaw plugin for coordinating a product-manager agent and an engineering-manager agent. A shared SQLite board tracks requests, handovers and messages; private task sessions let the managers follow up and delegate work.
 
 ```text
