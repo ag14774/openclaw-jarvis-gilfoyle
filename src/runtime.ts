@@ -140,6 +140,7 @@ export class BoardRuntime {
     this.captures = new Map(); // session -> route resolution still in progress
     this.routeCache = new Map();
     this.wakes = new Map(); // session -> dispatch time (until the run shows up as live)
+    this.deliveries = new Map(); // outbox id -> the whole in-flight attempt, including fallback
     this.seen = new Map(); // "session|task" -> newest note id read or written in this turn
     this.ownerRouteCache = null;
     this.stopped = false;
@@ -362,7 +363,7 @@ export class BoardRuntime {
       // Resuming a project asks whoever holds each open task to look again.
       if (changes.state === 'active' && project.state !== 'active')
         this.store.run(
-          "UPDATE tasks SET poked=?,idle_wakes=0,stalled=NULL WHERE project=? AND status='open' AND holder IN ('product','engineering')",
+          "UPDATE tasks SET poked=?,woken=NULL,idle_wakes=0,stalled=NULL WHERE project=? AND status='open' AND holder IN ('product','engineering')",
           now,
           project.id,
         );
@@ -407,6 +408,7 @@ export class BoardRuntime {
   }
   async updateTask(caller, input) {
     const task = this.scopeTask(caller, input.task);
+    const lastNote = this.latestNote(task.id)?.id ?? 0;
     const project = this.store.project(task.project);
     const note = optional(input.note, 4000, 'note');
     const message = optional(input.message, 4000, 'message');
@@ -496,18 +498,31 @@ export class BoardRuntime {
       );
     }
     const now = this.now();
-    // The holder is asked to look when someone else changed its task.
+    // Someone else's change asks the holder to look; the holder's own action answers
+    // an outstanding poke, including when its turn acts before dispatch acknowledges.
     const poke = ROLES.includes(newHolder) && newHolder !== caller.role;
     const outbox = this.store.tx(() => {
+      // The notification waiver and lifecycle checks also depend on the project.
+      const currentProject = this.store.project(project.id);
+      assert(
+        this.taskUnchanged(task, lastNote) &&
+          currentProject.state === project.state &&
+          JSON.stringify(currentProject.route) === JSON.stringify(project.route),
+        `Task #${task.id} or its project changed while checking workers; read it with show, then decide again`,
+      );
       if (note) this.store.note(task.id, caller.role, note);
       this.store.run(
-        `UPDATE tasks SET status=?,holder=?,poked=CASE WHEN ? THEN ? ELSE poked END,check_at=?,
+        `UPDATE tasks SET status=?,holder=?,poked=CASE WHEN ? THEN ? ELSE NULL END,woken=NULL,check_at=?,
            idle_wakes=0,stalled=NULL,cleaned=CASE WHEN ? THEN NULL ELSE cleaned END,updated=? WHERE id=?`,
         closing ? status : 'open',
         newHolder,
         poke ? 1 : 0,
         now,
-        closing ? null : now + (checkIn ?? CHECK_IN_MINUTES) * MINUTE,
+        closing
+          ? status === 'cancelled'
+            ? now + WAKE_RETRY_MINUTES * MINUTE
+            : null
+          : now + (checkIn ?? CHECK_IN_MINUTES) * MINUTE,
         reopening ? 1 : 0,
         now,
         task.id,
@@ -515,7 +530,7 @@ export class BoardRuntime {
       return message && !inChat ? this.store.enqueue(project.id, task.id, message, files) : null;
     });
     this.markSeen(caller.session, task.id);
-    if (status === 'cancelled') await this.abortWorkers(task);
+    if (status === 'cancelled') await this.abortWorkers(this.store.task(task.id));
     const delivery = outbox ? await this.deliver(outbox) : undefined;
     this.requestTick();
     const updated = this.store.task(task.id);
@@ -574,27 +589,76 @@ export class BoardRuntime {
     this.ownerRouteCache = { route: conversation(matches[0]), at: this.now() };
     return this.ownerRouteCache.route;
   }
+  // Coalesce callers for the entire attempt and fallback sequence. Recursive fallback
+  // uses deliverAttempt directly so it never waits on its own in-flight promise.
+  deliver(id) {
+    if (this.deliveries.has(id)) return this.deliveries.get(id);
+    const pending = this.deliverAttempt(id).finally(() => this.deliveries.delete(id));
+    this.deliveries.set(id, pending);
+    return pending;
+  }
   // One attempt for one outbox row. "sent" and "queued" hand the message to OpenClaw's own
   // durable delivery; the same operation id never sends twice. Attached files follow the
   // text as native message sends, each with its own idempotency key. The project chat is
   // tried first, then the owner DM (prefixed with the project name); the route is never
   // rebound. A delivered message is then added to the session of the chat it reached.
-  async deliver(id) {
+  async deliverAttempt(id) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
     if (!row || row.state !== 'pending') return row ? { state: row.state } : undefined;
     const project = this.store.project(row.project);
-    const toOwner = row.fallback === 1 || !project.route;
-    const operation = `jarvis-gilfoyle-${row.id}-${toOwner ? 'owner' : 'project'}`;
-    let receipt, error;
+    let delivery = row.receipt ? JSON.parse(row.receipt) : null;
+    let toOwner = delivery?.toOwner ?? (row.fallback === 1 || !project.route);
+    let operation =
+      delivery?.operationId ?? `jarvis-gilfoyle-${row.id}-${toOwner ? 'owner' : 'project'}`;
+    // Older partial sends discarded their text receipt on file failure. Neither a
+    // rebind nor native idempotency can reconstruct that destination safely here.
+    if (
+      (!delivery && row.attempts > 0) ||
+      (delivery &&
+        (typeof delivery.sentText !== 'string' ||
+          !delivery.operationId ||
+          typeof delivery.toOwner !== 'boolean'))
+    ) {
+      const error = `Delivered destination or text unknown (${delivery ? 'legacy receipt' : 'legacy attempt without receipt'})`;
+      this.store.run("UPDATE outbox SET state='failed',error=? WHERE id=?", error, id);
+      this.log(`Project message ${id} could not be delivered: ${error}`);
+      return { state: 'failed', error };
+    }
+    if (!delivery) {
+      // Save identity and wording before route lookup, too. Its failure is retryable
+      // without mistaking a new unsent message for an uncertain legacy partial send.
+      delivery = { sentText: sentText(row, project, toOwner), operationId: operation, toOwner };
+      this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(delivery), id);
+    }
+    let error;
     try {
-      const route = toOwner ? await this.ownerRoute() : project.route;
-      receipt = await this.rpc('conversations.send', {
-        agentId: topology().productAgentId,
-        operationId: operation,
-        conversationRef: route.conversationRef,
-        message: sentText(row, project, toOwner),
-      });
-      if (receipt?.status === 'sent' || receipt?.status === 'queued')
+      if (!delivery.destination) {
+        const route = delivery.toOwner ? await this.ownerRoute() : project.route;
+        // Freeze an attempted send as well as its eventual receipt: native retries with
+        // the same identity may return an earlier result after a rebind or name change.
+        delivery = { ...delivery, destination: route };
+        this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(delivery), id);
+      }
+      assert(
+        delivery.destination && typeof delivery.sentText === 'string',
+        'Delivered destination or text unknown (legacy receipt); cannot safely retry',
+      );
+      const route = delivery.destination;
+      operation = delivery.operationId;
+      toOwner = delivery.toOwner;
+      if (delivery.status !== 'sent' && delivery.status !== 'queued') {
+        const receipt = await this.rpc('conversations.send', {
+          agentId: topology().productAgentId,
+          operationId: operation,
+          conversationRef: route.conversationRef,
+          message: delivery.sentText,
+        });
+        // Commit text acceptance before attachments. A file failure must never move
+        // already-delivered text (or the remaining files) to another destination.
+        delivery = { ...receipt, ...delivery, status: receipt?.status };
+        this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(delivery), id);
+      }
+      if (delivery.status === 'sent' || delivery.status === 'queued')
         for (const [index, path] of JSON.parse(row.files).entries())
           await this.rpc('message.action', {
             channel: route.channel,
@@ -610,34 +674,34 @@ export class BoardRuntime {
             idempotencyKey: `${operation}-file-${index + 1}`,
           });
     } catch (failure) {
-      receipt = undefined;
       error = String(failure?.message ?? failure)
         .split('\n')[0]
         .slice(0, 300);
     }
-    const status = receipt?.status;
-    if (status === 'sent' || status === 'queued') {
+    const status = delivery?.status;
+    const textAccepted = status === 'sent' || status === 'queued';
+    if (textAccepted && !error) {
       this.store.run(
         "UPDATE outbox SET state='handed',receipt=?,error=NULL,attempts=attempts+1 WHERE id=?",
-        JSON.stringify(receipt),
+        JSON.stringify(delivery),
         row.id,
       );
       await this.record(row.id);
-      return { state: status, to: toOwner ? 'owner DM' : chatLabel(project.route) };
+      return { state: status, to: toOwner ? 'owner DM' : chatLabel(delivery.destination) };
     }
     const attempts = row.attempts + 1;
     error ??=
       status === 'suppressed'
         ? 'The chat rejected the message'
         : `Delivery ${status ?? 'unconfirmed'}`;
-    if (!toOwner && (status === 'suppressed' || attempts >= PREFERRED_ATTEMPTS)) {
+    if (!textAccepted && !toOwner && (status === 'suppressed' || attempts >= PREFERRED_ATTEMPTS)) {
       this.store.run(
-        'UPDATE outbox SET fallback=1,attempts=0,next_at=?,error=? WHERE id=?',
+        'UPDATE outbox SET fallback=1,receipt=NULL,attempts=0,next_at=?,error=? WHERE id=?',
         this.now(),
         error,
         row.id,
       );
-      return this.deliver(row.id);
+      return this.deliverAttempt(row.id);
     }
     const failed = status === 'suppressed' || attempts >= FALLBACK_ATTEMPTS;
     this.store.run(
@@ -659,10 +723,13 @@ export class BoardRuntime {
   async record(id) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
     if (row.recorded) return;
-    const project = this.store.project(row.project);
-    const toOwner = row.fallback === 1 || !project.route;
     try {
-      const route = toOwner ? await this.ownerRoute() : project.route;
+      const receipt = row.receipt ? JSON.parse(row.receipt) : null;
+      assert(
+        receipt?.destination && typeof receipt.sentText === 'string',
+        'Delivered destination or text unknown (legacy receipt)',
+      );
+      const route = receipt.destination;
       const agentId = topology().productAgentId;
       const sessions = (
         await this.sessionRows(agentId, route.target.replace(/^[^:]+:/, ''))
@@ -676,7 +743,7 @@ export class BoardRuntime {
       const session = sessions.length === 1 ? sessions[0] : null;
       if (!session?.sessionId || rowLive(session, this.now())) return;
       const files = JSON.parse(row.files).map((path) => `MEDIA:${path}`);
-      const text = [sentText(row, project, toOwner), ...(files.length ? ['', ...files] : [])];
+      const text = [receipt.sentText, ...(files.length ? ['', ...files] : [])];
       // OpenClaw's own transcript writer. Its SDK subpath is JavaScript-only and labelled
       // private-local ("Private-local after July 2026" in docs/plugins/sdk-subpaths.md), so a
       // host update may change or remove it: before raising the pinned OpenClaw version, check
@@ -742,11 +809,34 @@ export class BoardRuntime {
     return live;
   }
   async abortWorkers(task) {
-    for (const key of await this.liveWorkers(task).catch(() => task.workers.map((w) => w.key)))
+    for (const worker of task.workers) {
+      const key = worker.key;
+      let session;
+      try {
+        session = (await this.sessionRows(/^agent:([^:]+):/.exec(key)?.[1], key)).find(
+          (row) => row.key === key,
+        );
+      } catch (error) {
+        this.log(
+          `Worker ${key} stop unconfirmed: ${String(error?.message ?? error).slice(0, 200)}`,
+        );
+      }
+      // Only explicit native inactivity, after spawn grace, confirms a stop. Missing or
+      // unreadable rows remain uncertain and are retried, even after an abort succeeds.
+      if (
+        this.now() - worker.at >= WORKER_GRACE_MS &&
+        session?.hasActiveRun === false &&
+        session.hasActiveSubagentRun !== true
+      )
+        continue;
+      if (!session || session.hasActiveRun === undefined)
+        this.log(`Worker ${key} stop unconfirmed: native state unknown`);
+      if (this.store.task(task.id).status !== 'cancelled') return;
       // clearQueued also drops follow-ups already queued for the worker.
       await this.rpc('sessions.abort', { key, clearQueued: true }).catch((error) =>
         this.log(`Could not stop worker ${key}: ${String(error?.message ?? error).slice(0, 200)}`),
       );
+    }
   }
   recordWorker(sessionKey, childSessionKey) {
     const scope = parseTaskSession(sessionKey);
@@ -755,10 +845,12 @@ export class BoardRuntime {
     const task = this.store.task(scope.taskId);
     if (task.workers.some((worker) => worker.key === childSessionKey)) return;
     this.store.run(
-      'UPDATE tasks SET workers=?,idle_wakes=0 WHERE id=?',
+      "UPDATE tasks SET workers=?,idle_wakes=0,check_at=CASE WHEN status='cancelled' THEN ? ELSE check_at END WHERE id=?",
       JSON.stringify([...task.workers, { key: childSessionKey, at: this.now() }].slice(-50)),
+      this.now(),
       task.id,
     );
+    if (task.status === 'cancelled') this.requestTick();
   }
 
   // ---- Hook support (private sessions and project chats only) -----------------------
@@ -840,6 +932,18 @@ export class BoardRuntime {
     return this.store.get(
       'SELECT id,author,text FROM notes WHERE task=? ORDER BY id DESC LIMIT 1',
       taskId,
+    );
+  }
+  // Revalidate row facts and note identity synchronously at a mutation boundary, never
+  // by timestamp alone (two legitimate changes can occur in the same millisecond).
+  taskUnchanged(task, lastNote) {
+    const current = this.store.task(task.id);
+    return (
+      Object.keys(task).every((field) =>
+        field === 'workers'
+          ? JSON.stringify(current.workers) === JSON.stringify(task.workers)
+          : current[field] === task[field],
+      ) && (this.latestNote(task.id)?.id ?? 0) === lastNote
     );
   }
   markSeen(sessionKey, taskId) {
@@ -1045,6 +1149,21 @@ export class BoardRuntime {
         this.now() - 24 * 60 * MINUTE,
       ))
         await this.record(row.id);
+      // check_at is the next cancelled-worker inspection, not closed-session cleanup.
+      // Claim at most ten oldest-due rows before RPC so failures cannot starve later rows.
+      for (const row of this.store.all(
+        "SELECT id FROM tasks WHERE status='cancelled' AND workers<>'[]' AND (check_at IS NULL OR check_at<=?) ORDER BY COALESCE(check_at,0),id LIMIT 10",
+        this.now(),
+      )) {
+        const task = this.store.task(row.id);
+        if (task.status !== 'cancelled') continue;
+        this.store.run(
+          "UPDATE tasks SET check_at=? WHERE id=? AND status='cancelled'",
+          this.now() + WAKE_RETRY_MINUTES * MINUTE,
+          task.id,
+        );
+        await this.abortWorkers(task);
+      }
       await this.wakeDue(summary);
       summary.cleaned = await this.cleanupClosed();
       this.health.lastScan = this.now();
@@ -1065,8 +1184,11 @@ export class BoardRuntime {
        ORDER BY t.updated`,
     );
     const due = tasks.filter(
-      (task) => task.poked !== null || (task.check_at !== null && now >= task.check_at),
+      (task) =>
+        (task.poked !== null && (task.woken === null || task.poked > task.woken)) ||
+        (task.check_at !== null && now >= task.check_at),
     );
+    const notes = new Map(due.map((task) => [task.id, this.latestNote(task.id)?.id ?? 0]));
     for (const [session, at] of this.wakes)
       if (now - at >= WAKE_GRACE_MS) this.wakes.delete(session);
     if (!due.length) return;
@@ -1088,6 +1210,7 @@ export class BoardRuntime {
     }
     for (const row of due) {
       const task = { ...row, workers: JSON.parse(row.workers) };
+      const lastNote = notes.get(task.id);
       const role = task.holder;
       if (!live[role]) continue;
       const key = taskSessionKey(role, task);
@@ -1105,12 +1228,12 @@ export class BoardRuntime {
       } catch {
         workers = task.workers.length;
       }
+      if (!this.taskUnchanged(task, lastNote)) continue;
       if (!poked && !workers && task.idle_wakes >= STALL_WAKES) {
-        await this.reportStall(task);
-        summary.stalled.push(task.id);
+        if (await this.reportStall(task, lastNote)) summary.stalled.push(task.id);
         continue;
       }
-      if (await this.wake(task, role, key, poked, workers)) {
+      if (await this.wake(task, role, key, poked, workers, lastNote)) {
         live[role].add(key);
         summary.woken.push(task.id);
       }
@@ -1145,18 +1268,7 @@ export class BoardRuntime {
       );
     }
   }
-  async wake(task, role, key, poked, workers) {
-    const now = this.now();
-    this.wakes.set(key, now);
-    // The poke this wake answers is cleared; a newer one (changed meanwhile) stays.
-    this.store.run(
-      'UPDATE tasks SET woken=?,check_at=?,idle_wakes=idle_wakes+?,poked=CASE WHEN poked=? THEN NULL ELSE poked END WHERE id=?',
-      now,
-      now + CHECK_IN_MINUTES * MINUTE,
-      workers ? 0 : 1,
-      task.poked,
-      task.id,
-    );
+  async wake(task, role, key, poked, workers, lastNote) {
     const last = this.store.notes(task.id, 1)[0];
     const reason = poked
       ? last && last.author !== role
@@ -1172,34 +1284,100 @@ export class BoardRuntime {
         label: clip(`Task #${task.id}: ${task.title}`, 80),
       }).catch(() => undefined);
       await this.followChatModel(task, role, key);
-      await this.rpc('agent', {
-        agentId: agentForRole(role),
-        sessionKey: key,
-        deliver: false,
-        idempotencyKey: randomUUID(),
-        timeout: this.turnTimeoutSeconds,
-        message: `PROJECT TASK ${taskScope(task)}\n${reason}\nThe task card is in your context. Act with project_board; this reply is private. End with one short line on what you did.`,
+      const now = this.now();
+      const claimed = this.store.tx(() => {
+        if (
+          !this.taskUnchanged(task, lastNote) ||
+          this.store.project(task.project).state !== 'active'
+        )
+          return null;
+        // woken times the dispatch attempt; failure retains the poke and idle count.
+        this.store.run(
+          'UPDATE tasks SET woken=?,check_at=? WHERE id=?',
+          now,
+          now + WAKE_RETRY_MINUTES * MINUTE,
+          task.id,
+        );
+        return this.store.task(task.id);
+      });
+      if (!claimed) return false;
+      this.wakes.set(key, now);
+      let accepted = false;
+      try {
+        await this.rpc('agent', {
+          agentId: agentForRole(role),
+          sessionKey: key,
+          deliver: false,
+          idempotencyKey: randomUUID(),
+          timeout: this.turnTimeoutSeconds,
+          message: `PROJECT TASK ${taskScope(task)}\n${reason}\nThe task card is in your context. Act with project_board; this reply is private. End with one short line on what you did.`,
+        });
+        accepted = true;
+      } catch (error) {
+        const problem = `Could not wake ${role} for task #${task.id}: ${String(error?.message ?? error).slice(0, 200)}`;
+        this.log(problem);
+        this.scanProblem ??= problem;
+        // A timeout may have started the turn. Use native evidence before another try.
+        accepted = await this.sessionRows(agentForRole(role), key)
+          .then((rows) =>
+            rowLive(
+              rows.find((row) => row.key === key),
+              this.now(),
+            ),
+          )
+          .catch(() => false);
+      }
+      if (!accepted) {
+        this.wakes.delete(key);
+        return false;
+      }
+      this.store.tx(() => {
+        if (!this.taskUnchanged(claimed, lastNote)) {
+          const current = this.store.task(task.id);
+          // A holder may have acted before acknowledgement. Clear only the answered
+          // poke, preserving its new idle count. Task actions reset woken, even in
+          // the same millisecond, so they invalidate this claim and keep their check-in.
+          if (
+            current.status === 'open' &&
+            current.holder === role &&
+            current.woken === claimed.woken &&
+            current.poked === claimed.poked
+          )
+            this.store.run(
+              'UPDATE tasks SET poked=NULL,check_at=CASE WHEN check_at=? THEN ? ELSE check_at END WHERE id=?',
+              claimed.check_at,
+              now + CHECK_IN_MINUTES * MINUTE,
+              task.id,
+            );
+          return;
+        }
+        this.store.run(
+          'UPDATE tasks SET check_at=?,idle_wakes=idle_wakes+?,poked=NULL WHERE id=?',
+          now + CHECK_IN_MINUTES * MINUTE,
+          workers ? 0 : 1,
+          task.id,
+        );
       });
       return true;
     } catch (error) {
       this.wakes.delete(key);
-      this.store.run(
-        'UPDATE tasks SET check_at=? WHERE id=?',
-        now + WAKE_RETRY_MINUTES * MINUTE,
-        task.id,
-      );
       this.log(
         `Could not wake ${role} for task #${task.id}: ${String(error?.message ?? error).slice(0, 200)}`,
       );
       return false;
     }
   }
-  async reportStall(task) {
+  async reportStall(task, lastNote) {
     const project = this.store.project(task.project);
     const last = this.store.notes(task.id, 1)[0];
     const who = this.agentName(task.holder);
     const message = `${project.name}: task #${task.id} "${task.title}" is waiting on ${who} and nothing has changed after ${STALL_WAKES} check-ins.${last ? ` Last note (${last.author}): ${clip(last.text, 500)}` : ''}`;
     const id = this.store.tx(() => {
+      if (
+        !this.taskUnchanged(task, lastNote) ||
+        this.store.project(task.project).state !== 'active'
+      )
+        return null;
       this.store.run('UPDATE tasks SET stalled=? WHERE id=?', this.now(), task.id);
       this.store.note(
         task.id,
@@ -1208,7 +1386,9 @@ export class BoardRuntime {
       );
       return this.store.enqueue(project.id, task.id, message);
     });
+    if (!id) return false;
     await this.deliver(id);
+    return true;
   }
   // Private sessions of closed tasks are kept for a week so the work can be reviewed,
   // then deleted once nothing runs in them.

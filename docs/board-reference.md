@@ -31,7 +31,7 @@ Both managers use one tool, `project_board`, with an `operation` and its fields.
 
 A mechanical scan (every 60 seconds by default) wakes whichever manager holds an open task in an active project, in that task's own private session. It wakes a manager when someone else changed the task or the check-in time is due. It never wakes anyone for the user and avoids interrupting a session reported as mid-turn. Each manager runs at most `maxWakesPerRole` private sessions at once.
 
-OpenClaw's completion notice continues the holder's session when a worker ends, including one stopped by a restart; the check-in is the fallback. After three wakes without a task change and with no running workers, the scan reports the stall to the user once and stops automatic wakes for that task until an update resets it.
+OpenClaw's completion notice continues the holder's session when a worker ends, including one stopped by a restart; the check-in is the fallback. Failed dispatches keep the outstanding change and retry at the existing five-minute cadence without consuming inactivity allowance. Accepted dispatches count only if the task has not changed meanwhile; an ambiguous dispatch is checked against native session liveness before retry. After three accepted wakes without a task change and with no running workers, the scan reports the stall to the user once and stops automatic wakes for that task until an update resets it.
 
 Both managers' private task sessions follow the model and thinking level selected in the project chat (`/model`, `/think`), read at every wake. Without a selection they use the agents' defaults. If copying the settings fails, the plugin logs it and proceeds. The source chat session is the one OpenClaw routed the binding message to; each later user message in that chat refreshes it if changed. Messages in other chats never change it. `/new` and `/reset` keep the session and choice.
 
@@ -42,9 +42,9 @@ Both managers' private task sessions follow the model and thinking level selecte
 - Only product creates or renames projects, pauses, resumes or archives them, binds chats, messages the user, hands tasks to the user, reopens tasks and closes tasks it created. Engineering may close only tasks it created. Both managers may update project context.
 - Handing a task to the user or closing a product-created task requires a `message` in the same call. The message is queued in the same transaction as the change. In the project's own chat, the manager's reply is the message; `update_task` does not send it a second time, and files must be attached to that reply.
 - Handovers and closing require a note. Closed tasks are read-only until product reopens them.
-- Engineering hands over or closes only tasks it holds. A handover, close or reopen is refused if a newer note arrived since the calling session last read the task in this turn; reread with `show` and decide again.
+- Engineering hands over or closes only tasks it holds. A handover, close or reopen is refused if a newer note arrived since the calling session last read the task in this turn; reread with `show` and decide again. After asynchronous worker inspection, current task row facts and latest note identity are revalidated in the mutation transaction, so stale decisions cannot overwrite newer changes.
 - A private task session sees and changes only its own project.
-- A task cannot be marked `done` while its workers run. Cancelling aborts workers and clears their queued follow-ups.
+- A task cannot be marked `done` while its workers run. Cancelling aborts workers and clears their queued follow-ups. Scans retry recorded workers on cancelled tasks using `check_at` at five-minute intervals, inspecting at most ten oldest-due tasks per scan; late worker records schedule immediate inspection. Unknown native state is not confirmed termination. This inspection is separate from seven-day private-session cleanup.
 - Pausing stops automatic wakes and new worker spawns, not existing workers. Resuming prompts the holders of open tasks to look again. Archiving requires all tasks to be closed or cancelled.
 - Runs in closed-task private sessions are refused. Both managers' sessions are kept for seven days for review, then deleted once idle; reopening within that period can continue in the old sessions.
 
@@ -62,7 +62,7 @@ Both managers' private task sessions follow the model and thinking level selecte
 - Native idempotency keys keep retries from intentionally sending duplicates. Delivery has finite retries and can become failed; `list` and health expose undelivered messages and failures.
 - Attachments are up to four existing files (absolute paths, 8 MB each). They follow the text as native message sends, each with a stable idempotency key, and are read again on every attempt. A failed file retries the whole message; idempotency protects text already sent. Files must remain available until delivery finishes.
 - A delivered message is added as the product manager's own reply to the session for the chat it reached (project chat or owner DM): the text as sent, then one `MEDIA:` line per file. OpenClaw's transcript writer uses a stable idempotency key so the Control UI history and later model context reflect the delivered message.
-- Transcript append waits while that session runs a turn and is retried by the scan for a day. An append failure is logged and never affects delivery.
+- The existing receipt JSON preserves the attempted destination, native operation identity and exact text; accepted text and its remaining attachments stay at that destination across project rebinding or renaming. Future new messages still resolve the current binding. Transcript append waits while that destination session runs a turn and is retried by the scan for a day. Legacy receipts or partial attempts without a recoverable destination remain visibly uncertain rather than guessing from the current binding. An append failure is logged and never affects delivery.
 
 ### Scope and failure behavior
 
@@ -90,7 +90,7 @@ Required configuration is shown in [getting started](getting-started.md#configur
 
 The entry's `enabled` switch and hook permissions are OpenClaw settings, separate from the plugin's `config.enabled`. Managers need `project_board` permission; their other tools and worker runtime remain host configuration.
 
-SQLite uses WAL, full synchronous writes and foreign keys. New parent directories use mode `0700`, and the database file is set to `0600`. The store accepts `user_version` 0 or 18; other versions are refused. Version checking is not a general database-identity check, so always use a dedicated board file, never an unrelated database.
+SQLite uses WAL, full synchronous writes and foreign keys. New parent directories use mode `0700`, and the database file is set to `0600`. The store accepts an empty schema-zero database or schema 18; nonempty schema-zero files and other versions are refused before board DDL, chmod or journal changes. Version 18 is not a comprehensive database-identity check, so always use a dedicated board file, never an unrelated database. See [backup and staged recovery](recovery.md) for the standalone operator utility and its separate verification boundary.
 
 ## Operator methods
 
