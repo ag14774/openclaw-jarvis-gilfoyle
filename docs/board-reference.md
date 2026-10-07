@@ -58,7 +58,7 @@ Both managers' private task sessions follow the model and thinking level selecte
 - From task sessions, `sessions_send` may reach only that task's own workers by session key; the `message` tool is refused. Private task-session replies never intentionally go into user chats; board messages are the user-facing path.
 - `use_this_chat` binds only the chat of the user message that started the current turn, never an arbitrary supplied destination.
 
-When registration encounters a retained claim from before admission expiry was introduced, with no `expiresAt`, it adopts a monotonic deadline once, 16 minutes from that registration. The legacy acquisition time is unavailable, so this interval starts at adoption rather than acquisition. Every later registration, reload and companion recovery preserves that adopted deadline; existing deadlines are also preserved.
+When registration encounters a retained claim from before admission expiry was introduced, with no `expiresAt`, it adopts a monotonic deadline once, 16 minutes from that registration. The legacy acquisition time is unavailable, so this interval starts at adoption rather than acquisition. Every later registration, reload and companion recovery preserves that adopted deadline; existing deadlines are also preserved. Complete the normal service reload when upgrading: registration alone cannot retrofit ownership checks into a suspended pre-upgrade callback. Service reload replaces the runtime, causing that old prelaunch callback to refuse when it resumes.
 
 ### Delivery and chat history
 
