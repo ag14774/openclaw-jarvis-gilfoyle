@@ -1,7 +1,7 @@
 [project]
 site_name = "Jarvis-Gilfoyle"
 site_description = "A small project board for cooperative OpenClaw agents."
-# Conventional Pages candidate only; deployment eligibility and live URL are unverified.
+# Project Pages inherits the account custom domain; keep the repository base path.
 site_url = "https://ageorgiou.com/openclaw-jarvis-gilfoyle/"
 docs_dir = "docs"
 site_dir = "site"
