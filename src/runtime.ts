@@ -597,20 +597,36 @@ export class BoardRuntime {
     let toOwner = delivery?.toOwner ?? (row.fallback === 1 || !project.route);
     let operation =
       delivery?.operationId ?? `jarvis-gilfoyle-${row.id}-${toOwner ? 'owner' : 'project'}`;
+    // Older partial sends discarded their text receipt on file failure. Neither a
+    // rebind nor native idempotency can reconstruct that destination safely here.
+    if (
+      (!delivery && row.attempts > 0) ||
+      (delivery &&
+        (typeof delivery.sentText !== 'string' ||
+          !delivery.operationId ||
+          typeof delivery.toOwner !== 'boolean'))
+    ) {
+      const error = `Delivered destination or text unknown (${delivery ? 'legacy receipt' : 'legacy attempt without receipt'})`;
+      this.store.run("UPDATE outbox SET state='failed',error=? WHERE id=?", error, id);
+      this.log(`Project message ${id} could not be delivered: ${error}`);
+      return { state: 'failed', error };
+    }
+    if (!delivery) {
+      // Save identity and wording before route lookup, too. Its failure is retryable
+      // without mistaking a new unsent message for an uncertain legacy partial send.
+      delivery = { sentText: sentText(row, project, toOwner), operationId: operation, toOwner };
+      this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(delivery), id);
+    }
     let error;
     try {
-      if (!delivery) {
-        const route = toOwner ? await this.ownerRoute() : project.route;
+      if (!delivery.destination) {
+        const route = delivery.toOwner ? await this.ownerRoute() : project.route;
         // Freeze an attempted send as well as its eventual receipt: native retries with
         // the same identity may return an earlier result after a rebind or name change.
-        delivery = JSON.parse(
+        const saved = JSON.parse(
           this.store.get('SELECT receipt FROM outbox WHERE id=?', id).receipt ?? 'null',
-        ) ?? {
-          destination: route,
-          sentText: sentText(row, project, toOwner),
-          operationId: operation,
-          toOwner,
-        };
+        );
+        delivery = saved?.destination ? saved : { ...delivery, destination: route };
         this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(delivery), id);
       }
       assert(

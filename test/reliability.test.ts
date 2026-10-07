@@ -565,6 +565,52 @@ test('legacy delivered receipts leave transcript destination uncertainty visible
   assert(h.native.logs.some((line) => /destination or text unknown.*legacy receipt/.test(line)));
 });
 
+test('legacy pending attempts without receipts refuse to guess a text or attachment destination', async (t) => {
+  const h = fixture(t);
+  h.store.run('UPDATE projects SET route=? WHERE id=?', JSON.stringify(rebound), 'p');
+  for (const receipt of [
+    null,
+    JSON.stringify({ status: 'sent' }),
+    JSON.stringify({ status: 'unknown' }),
+  ]) {
+    const id = h.store.enqueue('p', null, 'Legacy partial', ['/unknown/legacy-file']);
+    h.store.run('UPDATE outbox SET attempts=1,receipt=? WHERE id=?', receipt, id);
+    const result = await h.runtime.deliver(id);
+    assert.equal(result.state, 'failed');
+    assert.match(result.error, /unknown.*legacy/);
+    assert.equal(h.store.get('SELECT receipt FROM outbox WHERE id=?', id).receipt, receipt);
+  }
+  assert.equal(h.native.calls.length, 0);
+  assert.equal(h.native.transcripts.length, 0);
+});
+
+test('new messages recover from failed route lookup without being mistaken for legacy partial sends', async (t) => {
+  const h = fixture(t);
+  h.store.run('UPDATE projects SET route=NULL WHERE id=?', 'p');
+  let first = true;
+  h.native.hook = (method, params, next) => {
+    if (method === 'conversations.list' && first) {
+      first = false;
+      throw Error('lookup offline');
+    }
+    return next();
+  };
+  const id = h.store.enqueue('p', null, 'Hello');
+  assert.equal((await h.runtime.deliver(id)).state, 'retrying');
+  assert.equal(h.native.sends.length, 0);
+  h.store.run(
+    'UPDATE projects SET route=?,name=? WHERE id=?',
+    JSON.stringify(rebound),
+    'Changed',
+    'p',
+  );
+  h.advance(2 * MINUTE);
+  await h.runtime.tick();
+  assert.equal(h.store.get('SELECT state FROM outbox WHERE id=?', id).state, 'handed');
+  assert.equal(h.native.sends[0].conversationRef, owner.conversationRef);
+  assert.equal(h.native.sends[0].message, '[Original] Hello');
+});
+
 test('partial attachment delivery never falls back or changes successful text destination on retry', async (t) => {
   const h = fixture(t);
   const dir = mkdtempSync(join(tmpdir(), 'jg-partial-'));
@@ -637,7 +683,16 @@ test('late concurrent delivery failure cannot discard accepted text and trigger 
   const file = join(dir, 'file.txt');
   writeFileSync(file, 'bytes');
   const id = h.store.enqueue('p', null, 'Already sent', [file]);
-  h.store.run('UPDATE outbox SET attempts=2 WHERE id=?', id);
+  h.store.run(
+    'UPDATE outbox SET attempts=2,receipt=? WHERE id=?',
+    JSON.stringify({
+      destination: group,
+      sentText: 'Already sent',
+      toOwner: false,
+      operationId: `jarvis-gilfoyle-${id}-project`,
+    }),
+    id,
+  );
   const g = gate();
   let first = true;
   h.native.hook = async (method, params, next) => {
