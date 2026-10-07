@@ -10,6 +10,7 @@ import { Store } from '../src/store.ts';
 import plugin, { testHooks } from '../src/index.ts';
 
 const params = { agentId: 'opencode', model: 'probe', task: 'Fake only' };
+const ADMISSION_MS = 16 * MINUTE;
 const worker = {
   agentId: 'opencode',
   runtime: 'acp',
@@ -432,7 +433,7 @@ for (const failure of ['throw', 'unconfirmed'])
     assert.ok((await before(ctx(1, 'retry'))).params);
   });
 
-test('absent completion survives cancelled turn, elapsed time and reload; matching empty completion releases', async (t) => {
+test('absent completion survives cancelled turn and reload until original expiry', async (t) => {
   const { h, before, after, ctx, call, tasks } = await fixture(t, { file: true });
   const other = h.registerHooks();
   t.after(async () => {
@@ -452,13 +453,77 @@ test('absent completion survives cancelled turn, elapsed time and reload; matchi
     note: 'Stop',
     message: 'Stopped',
   });
-  h.advance(24 * 60 * MINUTE);
+  h.advance(ADMISSION_MS - 1);
   await h.endTurn('gilfoyle', ctx().sessionKey);
   await other.service.start();
   assert.match((await before(ctx(1), params, other.hooks)).blockReason, /invocation is pending/);
-  await after(ctx(), undefined); // old registration observes actual call completion
+  h.advance(1);
   assert.ok((await before(ctx(1), params, other.hooks)).params);
+  await after(ctx(), undefined); // old completion cannot release the replacement
+  assert.match(
+    (await before(ctx(1, 'next'), params, other.hooks)).blockReason,
+    /invocation is pending/,
+  );
 });
+
+test('missing completion recovers exactly at expiry; late old child records without releasing newer claim', async (t) => {
+  const { h, before, after, accepted, ctx, tasks } = await fixture(t);
+  assert.ok((await before()).params);
+  h.advance(ADMISSION_MS - 1);
+  assert.match((await before(ctx(1, 'early'))).blockReason, /invocation is pending/);
+  h.advance(1);
+  assert.ok((await before(ctx(1, 'new'))).params);
+  await after(ctx(), accepted());
+  assert.equal(h.runtime.store.task(tasks[0]).workers.length, 1);
+  assert.match((await before(ctx(0, 'third'))).blockReason, /invocation is pending/);
+  await after(ctx(1, 'new'), undefined);
+  assert.match((await before(ctx(0, 'third'))).blockReason, /limit 1/);
+});
+
+test('wall-clock rollback does not extend process-local admission expiry', async (t) => {
+  const { h, before, ctx } = await fixture(t);
+  assert.ok((await before()).params);
+  h.advance(-24 * 60 * MINUTE);
+  h.advance(ADMISSION_MS - 1);
+  assert.match((await before(ctx(1))).blockReason, /invocation is pending/);
+  h.advance(1);
+  assert.ok((await before(ctx(1))).params);
+});
+
+for (const replacement of ['none', 'pending'])
+  test(`suspended prelaunch callback cannot grant at expiry with ${replacement} replacement`, async (t) => {
+    const { h, before, ctx, slowCount } = await fixture(t);
+    const slow = slowCount();
+    const old = before();
+    await slow.entered;
+    h.advance(ADMISSION_MS);
+    let newer;
+    if (replacement !== 'none') newer = before(ctx(1, 'new'));
+    slow.resume();
+    assert.match((await old).blockReason, /expired or replaced/);
+    if (newer) assert.ok((await newer).params);
+    const next = await before(ctx(0, 'next'));
+    if (replacement === 'pending') assert.match(next.blockReason, /invocation is pending/);
+    else assert.ok(next.params);
+  });
+
+for (const completed of [false, true])
+  test(`expired old callback resuming after newer grant (completed=${completed}) cannot reacquire permission`, async (t) => {
+    const { h, before, after, ctx, slowCount } = await fixture(t);
+    const request = h.bridge.request.bind(h.bridge);
+    const slow = slowCount();
+    const old = before();
+    await slow.entered;
+    h.advance(ADMISSION_MS);
+    h.bridge.request = request; // Only the old callback remains suspended.
+    assert.ok((await before(ctx(1, 'new'))).params);
+    if (completed) await after(ctx(1, 'new'), undefined);
+    slow.resume();
+    assert.match((await old).blockReason, /expired or replaced/);
+    const next = await before(ctx(0, 'next'));
+    if (completed) assert.ok(next.params);
+    else assert.match(next.blockReason, /invocation is pending/);
+  });
 
 test('matching completion releases serialization but unavailable current native count still refuses', async (t) => {
   const { h, before, after, ctx } = await fixture(t);

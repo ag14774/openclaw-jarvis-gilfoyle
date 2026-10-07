@@ -108,6 +108,7 @@ const bound = (value) => {
 export const testHooks = {
   bridge: null,
   now: null,
+  admissionNow: null,
   manualTicks: false,
   runtime: null,
   appendTranscript: null,
@@ -122,6 +123,11 @@ const transcripts = () => import('openclaw/plugin-sdk/session-transcript-runtime
 // configuration share one board, so a turn's chat, the scan and the bridge are not split
 // between them. An in-memory board belongs to its own registration.
 const COMPANION_RESET_MS = 5 * 60 * 1000;
+// OpenClaw 2026.9.8: ACP dispatch request timeout 10s, native subagent request
+// timeout capped at 5m, cloud sessions-spawn request timeout 15m by default.
+// Allow another minute for hooks/recording.
+// This is a recovery deadline, not an end-to-end launch or worker-stop bound.
+const LAUNCH_ADMISSION_MS = 16 * 60 * 1000;
 const boards = (globalThis[Symbol.for('jarvis-gilfoyle.boards')] ??= new Map());
 // Configuration is JSON: object insertion order is irrelevant, array order is not.
 const configIdentity = (cfg) =>
@@ -173,6 +179,8 @@ export default {
       openError: null,
       owner: null,
     }));
+    // Process-local monotonic time survives runtime replacement and wall-clock rollback.
+    const admissionNow = testHooks.admissionNow ?? (() => performance.now());
     // Writes to a chat's session run in the board service's own async context. Called from a
     // manager's tool call, OpenClaw's write context for that turn refuses a write to another
     // session ("session writer claim changed before transcript persistence").
@@ -394,21 +402,28 @@ export default {
         spawnAgentId(event.params) === cfg.worker?.agentId;
       if (covered) {
         const blocked = (reason) => ({ block: true, blockReason: reason });
+        if (board.admission && admissionNow() >= board.admission.expiresAt) board.admission = null;
         if (board.admission)
           return blocked(
-            'Worker launch invocation is pending; retry after its matching completion hook. Elapsed time and reload do not clear an unfinished call.',
+            'Worker launch invocation is pending; retry after its matching completion hook or 16-minute admission expiry.',
           );
         const identity = spawnIdentity(event, ctx);
         if (!identity)
           return blocked('Worker admission needs native runId and toolCallId; spawn refused.');
         // Board-owned, acquired synchronously before get/count can await. startOver
-        // replaces runtime/bridge but must never reset an unfinished invocation.
-        const claim = { identity, granted: false };
+        // replaces runtime/bridge but preserves the claim and its original deadline.
+        const claim = { identity, granted: false, expiresAt: admissionNow() + LAUNCH_ADMISSION_MS };
         board.admission = claim;
         return (async () => {
           try {
             const r = get();
             const result = await r.beforeToolCall(event, ctx);
+            // A timed-out host wait can leave this callback running. It may neither
+            // grant expired/replaced ownership nor release a newer caller's claim.
+            if (board.admission !== claim || admissionNow() >= claim.expiresAt) {
+              if (board.admission === claim) board.admission = null;
+              return blocked('Worker admission expired or replaced while checking workers; retry.');
+            }
             if (result?.block || board.runtime !== r) {
               if (board.admission === claim) board.admission = null;
               return result?.block

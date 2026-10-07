@@ -9,6 +9,7 @@ export const ref = (c) => `conv_${c.repeat(32)}`;
 
 export async function harness({ config = {} } = {}) {
   let clock = EPOCH;
+  let admissionClock = 0;
   const native = {
     conversations: [
       // The owner's DM with the product manager, and a project group.
@@ -124,6 +125,7 @@ export async function harness({ config = {} } = {}) {
   };
   testHooks.publishTranscript = async () => {};
   testHooks.now = () => clock;
+  testHooks.admissionNow = () => admissionClock;
   testHooks.manualTicks = true;
   testHooks.runtime = null;
   const hooks = {};
@@ -188,6 +190,7 @@ export async function harness({ config = {} } = {}) {
     hooks,
     advance(ms) {
       clock += ms;
+      admissionClock += Math.max(0, ms);
     },
     now: () => clock,
     get runtime() {
