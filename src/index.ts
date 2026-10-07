@@ -396,13 +396,13 @@ export default {
         const blocked = (reason) => ({ block: true, blockReason: reason });
         if (board.admission)
           return blocked(
-            'Worker admission is pending or unconfirmed; retry after its matching accepted result is recorded. Missing/error hooks can leave it blocked for this process; elapsed time and reload do not clear it.',
+            'Worker launch invocation is pending; retry after its matching completion hook. Elapsed time and reload do not clear an unfinished call.',
           );
         const identity = spawnIdentity(event, ctx);
         if (!identity)
           return blocked('Worker admission needs native runId and toolCallId; spawn refused.');
         // Board-owned, acquired synchronously before get/count can await. startOver
-        // replaces runtime/bridge but must never reset unresolved launch custody.
+        // replaces runtime/bridge but must never reset an unfinished invocation.
         const claim = { identity, granted: false };
         board.admission = claim;
         return (async () => {
@@ -430,36 +430,29 @@ export default {
     });
     on('after_tool_call', (event, ctx) => {
       if (event?.toolName !== 'sessions_spawn' || !isPrivateSession(ctx?.sessionKey)) return;
-      let details = event.result?.details;
-      if (!details?.childSessionKey)
-        try {
-          details = JSON.parse(event.result?.content?.[0]?.text ?? 'null');
-        } catch {
-          details = null;
-        }
       const claim = board.admission;
       const matching = claim?.granted && claim.identity === spawnIdentity(event, ctx);
-      if (matching) {
-        try {
-          const child = details?.childSessionKey;
-          if (
-            event.error ||
-            event.result?.isError ||
-            details?.status !== 'accepted' ||
-            typeof child !== 'string' ||
-            !child.startsWith(`agent:${cfg.worker.agentId}:`)
-          )
-            throw new Error('native launch result missing, failed or unknown');
+      try {
+        let details = event.result?.details;
+        if (!details?.childSessionKey)
+          try {
+            details = JSON.parse(event.result?.content?.[0]?.text ?? 'null');
+          } catch {
+            details = null;
+          }
+        const child = details?.childSessionKey;
+        if (typeof child === 'string' && child.startsWith('agent:'))
           assert(get().recordWorker(ctx.sessionKey, child), 'worker recording unconfirmed');
-          if (board.admission === claim) board.admission = null;
-          return;
-        } catch (error) {
-          api.logger?.warn?.(
-            `Worker admission remains unconfirmed: ${String(error?.message ?? error).slice(0, 300)}; no automatic unlock`,
-          );
-        }
+      } catch (error) {
+        api.logger?.warn?.(
+          `Worker recording failed: ${String(error?.message ?? error).slice(0, 300)}`,
+        );
+      } finally {
+        // This hook completes the matching invocation, not proof of no native effect.
+        // Record known children first, even on errors; failed recording is visible but
+        // cannot retain completed-call serialization. Late/unrelated hooks only record.
+        if (matching && board.admission === claim) board.admission = null;
       }
-      if (details?.childSessionKey) get().recordWorker(ctx.sessionKey, details.childSessionKey);
     });
     on('agent_end', (_event, ctx) => {
       if (!isManagerAgent(agentOf(ctx))) return;

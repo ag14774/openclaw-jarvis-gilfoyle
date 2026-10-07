@@ -35,19 +35,21 @@ The fakes follow OpenClaw 2026.9.8 as found in its distribution:
 `test/admission.test.ts` drives real before/after hooks with fake native RPC. It
 covers limit-one concurrency, shared registrations with reordered nested JSON
 properties, native-trimmed targets and scoped unavailable-board refusals, exact invocation matching,
-scoped native count errors/unknowns, accepted recording, missing/error post-hooks,
+scoped native count errors/unknowns, completion-based release and known-child recording even on errors,
 same-parent overlap and late/unrelated hooks, direct-parent versus descendant
 scope, observed unrecorded workers across all task/project statuses, native cleanup
 of completed history (including a fresh process), recent-record visibility grace,
 native pagination past idle history and unknown/nonadvancing pagination,
 closed/cancelled occupancy, lifecycle/record changes during native reads,
-and reload custody. A second SQLite connection writes during a suspended RPC to
+and reload serialization. A second SQLite connection writes during a suspended RPC to
 check that no transaction spans the wait. A hook-timeout ordering model confirms
-that its continuing callback retains custody. A disposable second-process test
-demonstrates the restart limitation: unrecorded custody is lost, not recovered.
-The deterministic input-rejection regression documents the unresolved custody
-blocker; it does not demonstrate recovery. These are mocked behavior/fault-boundary
-tests, not live worker or hard-cap evidence.
+that its continuing callback stays locked without a completion hook. Matching
+completions with empty/missing results release, while an absent hook does not;
+recording failures are reported and release completed calls. A disposable
+second-process test demonstrates the restart limitation: unfinished-call
+serialization is lost, not recovered. A completed input rejection permits the
+next valid fake spawn. These are mocked behavior/fault-boundary tests, not live
+worker or hard-cap evidence.
 
 ## Native Integration
 

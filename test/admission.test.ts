@@ -70,7 +70,7 @@ test('limit=1 concurrent real hook spawns admit and record exactly one fake work
   const { h, keys, tasks } = await fixture(t);
   const results = await Promise.all(keys.map((key) => h.spawn(key, params)));
   assert.equal(results.filter((r) => r.childSessionKey).length, 1);
-  assert.match(results.find((r) => r.blocked).blocked, /pending or unconfirmed.*retry/);
+  assert.match(results.find((r) => r.blocked).blocked, /invocation is pending.*retry/);
   assert.equal(h.native.sessions.filter((s) => s.hasActiveRun).length, 1);
   assert.equal(
     tasks.reduce((sum, id) => sum + h.runtime.store.task(id).workers.length, 0),
@@ -79,12 +79,12 @@ test('limit=1 concurrent real hook spawns admit and record exactly one fake work
   assert.match((await h.spawn(keys[1], params)).blocked, /1 workers are already running/);
 });
 
-test('shared registrations keep custody through acceptance and recording, not only counting', async (t) => {
+test('shared registrations serialize through completion and recording, not only counting', async (t) => {
   const { h, before, after, accepted, ctx, tasks } = await fixture(t, { file: true });
   const other = h.registerHooks();
   const grant = await before();
   assert.equal(grant.params.model, 'fake/model');
-  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /pending or unconfirmed/);
+  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /invocation is pending/);
   const result = accepted();
   h.native.session(result.details.childSessionKey).hasActiveRun = false;
   // It is recorded synchronously before the gate can hand off; grace preserves
@@ -96,7 +96,7 @@ test('shared registrations keep custody through acceptance and recording, not on
   assert.ok((await before(ctx(1), params, other.hooks)).params);
 });
 
-test('equal JSON configuration with reordered nested object properties shares admission custody', async (t) => {
+test('equal JSON configuration with reordered nested object properties shares invocation serialization', async (t) => {
   const { h, path, before, after, accepted, ctx, tasks } = await fixture(t, { file: true });
   const other = h.registerHooks({
     worker: {
@@ -113,7 +113,7 @@ test('equal JSON configuration with reordered nested object properties shares ad
   });
   const decisions = await Promise.all([before(), before(ctx(1), params, other.hooks)]);
   assert.equal(decisions.filter((decision) => decision?.params).length, 1);
-  assert.match(decisions.find((decision) => decision?.block).blockReason, /pending or unconfirmed/);
+  assert.match(decisions.find((decision) => decision?.block).blockReason, /invocation is pending/);
   await after(ctx(), accepted(), other.hooks);
   assert.equal(h.runtime.store.task(tasks[0]).workers.length, 1);
   assert.match((await before(ctx(1), params, other.hooks)).blockReason, /limit 1/);
@@ -126,7 +126,7 @@ test('native-trimmed configured target shares the gate and receives the configur
   assert.equal(decisions.filter((decision) => decision?.params).length, 1);
   assert.equal(decisions[0].params.agentId, 'opencode');
   assert.equal(decisions[0].params.model, 'fake/model');
-  assert.match(decisions[1].blockReason, /pending or unconfirmed/);
+  assert.match(decisions[1].blockReason, /invocation is pending/);
   await after(ctx(), accepted());
   assert.match((await before(ctx(1), spaced)).blockReason, /limit 1/);
 });
@@ -175,9 +175,9 @@ test('unavailable board refuses both exact and native-trimmed configured targets
 test('same-parent/same-turn overlap and late/unrelated post-hooks never unlock a newer claim', async (t) => {
   const { h, before, after, accepted, ctx } = await fixture(t);
   assert.ok((await before()).params);
-  assert.match((await before(ctx(0, 'call-2'))).blockReason, /pending or unconfirmed/);
+  assert.match((await before(ctx(0, 'call-2'))).blockReason, /invocation is pending/);
   await after(ctx(0, 'unrelated'), accepted(ctx(), 'agent:opencode:acp:unrelated'));
-  assert.match((await before(ctx(1))).blockReason, /pending or unconfirmed/);
+  assert.match((await before(ctx(1))).blockReason, /invocation is pending/);
   await after(ctx(), accepted());
   h.advance(3 * MINUTE);
   for (const row of h.native.sessions) row.hasActiveRun = false;
@@ -186,7 +186,9 @@ test('same-parent/same-turn overlap and late/unrelated post-hooks never unlock a
   await after({ ...ctx(0, 'call-2'), runId: 'other-run' }, accepted());
   await after({ ...ctx(0, 'call-2'), sessionId: 'other-incarnation' }, accepted());
   await after(ctx(0, 'call-2'), accepted(), h.hooks, { toolCallId: 'conflicting-event' });
-  assert.match((await before(ctx(1, 'call-3'))).blockReason, /pending or unconfirmed/);
+  await after(ctx(0, 'unrelated'), undefined, h.hooks, { error: 'completed unrelated call' });
+  await after(ctx(), undefined); // late completion without a child also cannot unlock
+  assert.match((await before(ctx(1, 'call-3'))).blockReason, /invocation is pending/);
   await after(ctx(0, 'call-2'), accepted(ctx(), 'agent:opencode:acp:second'));
   assert.match((await before(ctx(1, 'call-3'))).blockReason, /limit 1/);
 });
@@ -260,8 +262,8 @@ for (const state of [
       state === 'stale-active' ? /limit 1/ : /admission unavailable/,
     );
     // Known prelaunch errors/refusals release: the next caller checks again rather
-    // than inheriting uncertain launch custody, and other work is unaffected.
-    assert.doesNotMatch((await before(ctx(1, 'retry'))).blockReason, /pending or unconfirmed/);
+    // than inheriting an unfinished invocation, and other work is unaffected.
+    assert.doesNotMatch((await before(ctx(1, 'retry'))).blockReason, /invocation is pending/);
     assert.equal(
       await h.hooks.before_tool_call(
         { toolName: 'sessions_spawn', params },
@@ -361,67 +363,85 @@ test('native observation pages past idle history and counts an older active dire
   assert.ok((await before(ctx(1, 'retry'))).params);
 });
 
-test('a deterministic native input error without plugin-visible no-effect proof remains a blocker', async (t) => {
+test('a completed deterministic input rejection permits the next valid fake spawn', async (t) => {
   const { h, before, after, ctx } = await fixture(t);
   assert.ok((await before(ctx(), { ...params, taskName: 'BAD NAME' })).params);
   await after(ctx(), { details: { status: 'error', error: 'Native input rejection' } });
-  h.advance(1440 * MINUTE);
   assert.equal(h.native.sessions.length, 0);
-  assert.match((await before(ctx(1))).blockReason, /pending or unconfirmed/);
+  assert.ok((await h.spawn(ctx(1).sessionKey, params)).childSessionKey);
 });
 
-for (const outcome of ['missing', 'error', 'isError', 'unknown', 'wrong-child', 'record-failure'])
-  test(`post-hook ${outcome} retains explicit custody without automatic unlock`, async (t) => {
-    const { h, before, after, accepted, ctx, tasks } = await fixture(t);
+for (const outcome of ['missing', 'empty', 'error', 'isError', 'unknown', 'malformed-text'])
+  test(`matching completion with ${outcome} result and no child releases invocation serialization`, async (t) => {
+    const { h, before, after, ctx } = await fixture(t);
     assert.ok((await before()).params);
-    let result;
-    let extra = {};
-    if (outcome !== 'missing') result = accepted();
-    if (outcome === 'error') extra = { error: 'native dispatch uncertain' };
-    if (outcome === 'isError') result.isError = true;
-    if (outcome === 'unknown') result.details.status = 'unknown';
-    if (outcome === 'wrong-child') result.details.childSessionKey = 'agent:researcher:acp:other';
-    if (outcome === 'record-failure')
-      h.runtime.recordWorker = () => {
-        throw new Error('write failed');
-      };
-    await after(ctx(), result, h.hooks, extra);
-    if (outcome === 'error' || outcome === 'isError' || outcome === 'unknown')
-      assert.equal(h.runtime.store.task(tasks[0]).workers.length, 1);
-    assert.ok(
-      h.warnings.some((message) => /remains unconfirmed.*no automatic unlock/.test(message)),
-    );
-    h.advance(24 * 60 * MINUTE);
-    await h.endTurn('gilfoyle', ctx().sessionKey);
-    assert.match(
-      (await before(ctx(1))).blockReason,
-      /pending or unconfirmed.*elapsed time and reload/,
-    );
-    assert.ok(
-      !(
-        await before({
-          ...ctx(1),
-          agentId: 'main',
-          sessionKey: taskSessionKey('product', h.runtime.store.task(tasks[1])),
-        })
-      )?.block,
-    );
-    assert.equal(await before(ctx(1), { agentId: 'researcher', task: 'look' }), undefined);
-    assert.equal(
-      await h.hooks.before_tool_call({ toolName: 'read', params: {} }, ctx(1)),
-      undefined,
-    );
-    assert.equal(
-      await h.hooks.before_tool_call(
-        { toolName: 'sessions_spawn', params },
-        { agentId: 'other', sessionKey: 'agent:other:personal' },
-      ),
-      undefined,
-    );
+    const result = {
+      missing: undefined,
+      empty: {},
+      error: { details: { status: 'error' } },
+      isError: { isError: true },
+      unknown: { details: { status: 'unknown' } },
+      'malformed-text': { content: [{ type: 'text', text: '{' }] },
+    }[outcome];
+    await after(ctx(), result, h.hooks, outcome === 'error' ? { error: 'native error' } : {});
+    assert.ok((await before(ctx(1))).params);
+    assert.equal(h.native.sessions.length, 0);
+    assert.equal(h.warnings.length, 0);
   });
 
-test('missing post-hook, cancelled owning turn and elapsed time never clear a granted claim', async (t) => {
-  const { h, before, ctx, call, tasks } = await fixture(t);
+for (const outcome of ['error', 'isError', 'unknown'])
+  test(`matching ${outcome} completion records a known child before release; visible child prevents excess`, async (t) => {
+    const { h, before, after, accepted, ctx, tasks } = await fixture(t);
+    assert.ok((await before()).params);
+    const result = accepted();
+    const extra = outcome === 'error' ? { error: 'native dispatch uncertain' } : {};
+    if (outcome === 'error') result.details.status = 'error';
+    if (outcome === 'isError') result.isError = true;
+    if (outcome === 'unknown') result.details.status = 'unknown';
+    const record = h.runtime.recordWorker.bind(h.runtime);
+    let duringRecord;
+    h.runtime.recordWorker = (...args) => {
+      duringRecord = before(ctx(1));
+      return record(...args);
+    };
+    await after(ctx(), result, h.hooks, extra);
+    assert.match((await duringRecord).blockReason, /invocation is pending/);
+    assert.equal(h.runtime.store.task(tasks[0]).workers.length, 1);
+    assert.match((await before(ctx(1))).blockReason, /limit 1/);
+    h.advance(3 * MINUTE);
+    h.native.session(result.details.childSessionKey).hasActiveRun = false;
+    assert.ok((await before(ctx(1, 'retry'))).params);
+  });
+
+for (const failure of ['throw', 'unconfirmed'])
+  test(`record ${failure} is reported and completed invocation releases despite failed history write`, async (t) => {
+    const { h, before, after, accepted, ctx, tasks } = await fixture(t);
+    assert.ok((await before()).params);
+    const result = accepted();
+    h.runtime.recordWorker = () => {
+      if (failure === 'throw') throw new Error('write failed');
+    };
+    await after(ctx(), result);
+    assert.equal(h.runtime.store.task(tasks[0]).workers.length, 0);
+    assert.match(
+      h.warnings[0],
+      /Worker recording failed: (write failed|worker recording unconfirmed)/,
+    );
+    assert.match((await before(ctx(1))).blockReason, /limit 1/);
+    h.native.sessions = [];
+    assert.ok((await before(ctx(1, 'retry'))).params);
+  });
+
+test('absent completion survives cancelled turn, elapsed time and reload; matching empty completion releases', async (t) => {
+  const { h, before, after, ctx, call, tasks } = await fixture(t, { file: true });
+  const other = h.registerHooks();
+  t.after(async () => {
+    await h.hooks.service.stop();
+    await other.service.stop();
+    testHooks.bridge = null;
+  });
+  testHooks.bridge = h.bridge;
+  await h.hooks.service.start();
   const abort = new AbortController();
   assert.ok((await before({ ...ctx(), abortSignal: abort.signal })).params);
   abort.abort();
@@ -434,7 +454,31 @@ test('missing post-hook, cancelled owning turn and elapsed time never clear a gr
   });
   h.advance(24 * 60 * MINUTE);
   await h.endTurn('gilfoyle', ctx().sessionKey);
-  assert.match((await before(ctx(1))).blockReason, /pending or unconfirmed/);
+  await other.service.start();
+  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /invocation is pending/);
+  await after(ctx(), undefined); // old registration observes actual call completion
+  assert.ok((await before(ctx(1), params, other.hooks)).params);
+});
+
+test('matching completion releases serialization but unavailable current native count still refuses', async (t) => {
+  const { h, before, after, ctx } = await fixture(t);
+  assert.ok((await before()).params);
+  await after(ctx(), undefined, h.hooks, { error: 'unknown native effect' });
+  h.native.fail.add('sessions.list');
+  for (const id of ['next', 'retry'])
+    assert.match((await before(ctx(1, id))).blockReason, /admission unavailable/);
+  h.native.fail.delete('sessions.list');
+  assert.ok((await before(ctx(1, 'available'))).params);
+});
+
+test('matching error records another known agent child without charging configured-worker capacity', async (t) => {
+  const { h, before, after, ctx, tasks } = await fixture(t);
+  assert.ok((await before()).params);
+  await after(ctx(), {
+    details: { status: 'error', childSessionKey: 'agent:researcher:subagent:known' },
+  });
+  assert.equal(h.runtime.store.task(tasks[0]).workers[0].key, 'agent:researcher:subagent:known');
+  assert.ok((await before(ctx(1))).params);
 });
 
 for (const status of ['cancelled', 'done'])
@@ -501,7 +545,7 @@ test('failed profile validation releases safely before launch permission', async
   assert.ok((await before()).params);
 });
 
-test('text-only accepted result records before release; malformed text retains custody', async (t) => {
+test('text-only child result records before matching completion releases', async (t) => {
   const { h, before, after, accepted, ctx } = await fixture(t);
   assert.ok((await before()).params);
   const result = accepted();
@@ -510,7 +554,7 @@ test('text-only accepted result records before release; malformed text retains c
   h.native.session(result.details.childSessionKey).hasActiveRun = false;
   assert.ok((await before(ctx(1))).params);
   await after(ctx(1), { content: [{ type: 'text', text: '{' }] });
-  assert.match((await before()).blockReason, /pending or unconfirmed/);
+  assert.ok((await before()).params);
 });
 
 test('a late worker record during native count forces a fresh admission check', async (t) => {
@@ -558,7 +602,7 @@ for (const change of ['paused', 'cancelled'])
     const slow = slowCount();
     const pending = before(ctx(1));
     await slow.entered;
-    assert.match((await before(ctx(0, 'concurrent'))).blockReason, /pending or unconfirmed/);
+    assert.match((await before(ctx(0, 'concurrent'))).blockReason, /invocation is pending/);
     const writer = new Store(path);
     try {
       writer.tx(() => {
@@ -594,13 +638,13 @@ test('a hook wait timing out does not unlock its continuing callback', async (t)
     Promise.race([callback, Promise.reject(new Error('hook timeout'))]),
     /hook timeout/,
   );
-  assert.match((await before(ctx(1))).blockReason, /pending or unconfirmed/);
+  assert.match((await before(ctx(1))).blockReason, /invocation is pending/);
   slow.resume();
   assert.ok((await callback).params);
-  assert.match((await before(ctx(1))).blockReason, /pending or unconfirmed/);
+  assert.match((await before(ctx(1))).blockReason, /invocation is pending/);
 });
 
-test('reload startOver preserves granted custody and matching old hook records in the new runtime', async (t) => {
+test('reload startOver preserves unfinished invocation and matching old hook records in the new runtime', async (t) => {
   const { h, before, after, accepted, ctx, tasks } = await fixture(t, { file: true });
   const old = h.runtime;
   const first = h.hooks.service;
@@ -616,7 +660,7 @@ test('reload startOver preserves granted custody and matching old hook records i
   await other.service.start();
   assert.ok(old.stopped);
   assert.notEqual(h.runtime, old);
-  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /pending or unconfirmed/);
+  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /invocation is pending/);
   await after(ctx(), accepted());
   assert.equal(h.runtime.store.task(tasks[0]).workers.length, 1);
   assert.match((await before(ctx(1), params, other.hooks)).blockReason, /limit 1/);
@@ -639,7 +683,7 @@ test('reload during native count cannot grant from the retired runtime', async (
   const pending = before();
   await slow.entered;
   await other.service.start();
-  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /pending or unconfirmed/);
+  assert.match((await before(ctx(1), params, other.hooks)).blockReason, /invocation is pending/);
   slow.resume();
   assert.ok((await pending).block);
   assert.ok((await before(ctx(1), params, other.hooks)).params);
@@ -662,7 +706,7 @@ test('accepted post-hook after cancellation records the worker and schedules exi
   assert.deepEqual(h.native.aborted, ['agent:opencode:acp:child']);
 });
 
-test('a new process loses unrecorded admission custody: restart is explicitly not a hard guarantee', async (t) => {
+test('a new process loses unfinished invocation serialization: restart is explicitly not a hard guarantee', async (t) => {
   const { path, before } = await fixture(t, { file: true });
   assert.ok((await before()).params); // model accepted native effect with lost result
   const child = spawnSync(
