@@ -466,6 +466,81 @@ test('absent completion survives cancelled turn and reload until original expiry
   );
 });
 
+test('actual baseline claim adopts one deadline on upgrade; reload and late old completion preserve replacement', async (t) => {
+  const { h, path, before, after, accepted, ctx, tasks } = await fixture(t, { file: true });
+  const source = spawnSync('git', ['show', 'c132af9:src/index.ts'], {
+    cwd: new URL('..', import.meta.url),
+    encoding: 'utf8',
+  });
+  assert.equal(source.status, 0, source.stderr);
+  // Load the actual baseline registration, resolving only its relative imports to
+  // the unchanged source dependencies. The board file and native API are disposable fakes.
+  const baseline = await import(
+    `data:text/javascript;base64,${Buffer.from(
+      source.stdout.replace(
+        /from '\.\/(.*?)\.js'/g,
+        (_match, name) => `from '${new URL(`../src/${name}.ts`, import.meta.url).href}'`,
+      ),
+    ).toString('base64')}`
+  );
+  Object.assign(baseline.testHooks, testHooks, { bridge: h.bridge });
+  const config = {
+    statePath: path,
+    productAgentId: 'main',
+    engineeringAgentId: 'gilfoyle',
+    ownerChat: { channel: 'telegram', accountId: 'default', to: 'telegram:100' },
+    worker,
+    scanMs: 3_600_000,
+  };
+  const oldHooks = {};
+  baseline.default.register({
+    pluginConfig: config,
+    logger: { warn: (message) => h.warnings.push(message) },
+    registerTool() {},
+    registerGatewayMethod() {},
+    registerService: (service) => (oldHooks.service = service),
+    on: (name, fn) => (oldHooks[name] = fn),
+  });
+  const services = [h.hooks.service, oldHooks.service];
+  t.after(async () => {
+    for (const service of services) await service.stop();
+    testHooks.bridge = null;
+  });
+  testHooks.bridge = h.bridge;
+  await h.hooks.service.start();
+  await oldHooks.service.start();
+  assert.ok((await before(ctx(), params, oldHooks)).params);
+  // Baseline acquisition predates adoption, but its time was never retained.
+  h.advance(5 * MINUTE);
+  const upgraded = h.registerHooks();
+  services.push(upgraded.service);
+  await upgraded.service.start();
+  h.advance(8 * MINUTE);
+  const reloaded = h.registerHooks();
+  services.push(reloaded.service);
+  await reloaded.service.start();
+  h.advance(8 * MINUTE - 1);
+  assert.match(
+    (await before(ctx(1, 'early'), params, reloaded.hooks)).blockReason,
+    /invocation is pending/,
+  );
+  h.advance(1);
+  assert.ok((await before(ctx(1, 'replacement'), params, reloaded.hooks)).params);
+  await after(ctx(), undefined, oldHooks);
+  assert.match(
+    (await before(ctx(0, 'next'), params, reloaded.hooks)).blockReason,
+    /invocation is pending/,
+  );
+  await after(ctx(), accepted(), oldHooks);
+  assert.equal(h.runtime.store.task(tasks[0]).workers[0].key, 'agent:opencode:acp:child');
+  assert.match(
+    (await before(ctx(0, 'next'), params, reloaded.hooks)).blockReason,
+    /invocation is pending/,
+  );
+  await after(ctx(1, 'replacement'), undefined, reloaded.hooks);
+  assert.match((await before(ctx(0, 'next'), params, reloaded.hooks)).blockReason, /limit 1/);
+});
+
 test('missing completion recovers exactly at expiry; late old child records without releasing newer claim', async (t) => {
   const { h, before, after, accepted, ctx, tasks } = await fixture(t);
   assert.ok((await before()).params);

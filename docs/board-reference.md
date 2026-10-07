@@ -58,6 +58,8 @@ Both managers' private task sessions follow the model and thinking level selecte
 - From task sessions, `sessions_send` may reach only that task's own workers by session key; the `message` tool is refused. Private task-session replies never intentionally go into user chats; board messages are the user-facing path.
 - `use_this_chat` binds only the chat of the user message that started the current turn, never an arbitrary supplied destination.
 
+When registration encounters a retained claim from before admission expiry was introduced, with no `expiresAt`, it adopts a monotonic deadline once, 16 minutes from that registration. The legacy acquisition time is unavailable, so this interval starts at adoption rather than acquisition. Every later registration, reload and companion recovery preserves that adopted deadline; existing deadlines are also preserved.
+
 ### Delivery and chat history
 
 - Messages go only to the project chat, or the configured owner DM when there is no bound chat, the project chat rejects them or it keeps failing. Owner-DM messages are prefixed with the project name. Delivery never rebinds the project's chat.

@@ -181,6 +181,10 @@ export default {
     }));
     // Process-local monotonic time survives runtime replacement and wall-clock rollback.
     const admissionNow = testHooks.admissionNow ?? (() => performance.now());
+    // Retained pre-expiry claims have no acquisition time: adopt a deadline once,
+    // starting at this registration, and preserve it through later registrations.
+    if (board.admission && board.admission.expiresAt === undefined)
+      board.admission.expiresAt = admissionNow() + LAUNCH_ADMISSION_MS;
     // Writes to a chat's session run in the board service's own async context. Called from a
     // manager's tool call, OpenClaw's write context for that turn refuses a write to another
     // session ("session writer claim changed before transcript persistence").
