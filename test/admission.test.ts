@@ -10,6 +10,7 @@ import { Store } from '../src/store.ts';
 import plugin, { testHooks } from '../src/index.ts';
 
 const params = { agentId: 'opencode', model: 'probe', task: 'Fake only' };
+const ADMISSION_MS = 16 * MINUTE;
 const worker = {
   agentId: 'opencode',
   runtime: 'acp',
@@ -432,7 +433,7 @@ for (const failure of ['throw', 'unconfirmed'])
     assert.ok((await before(ctx(1, 'retry'))).params);
   });
 
-test('absent completion survives cancelled turn, elapsed time and reload; matching empty completion releases', async (t) => {
+test('absent completion survives cancelled turn and reload until original expiry', async (t) => {
   const { h, before, after, ctx, call, tasks } = await fixture(t, { file: true });
   const other = h.registerHooks();
   t.after(async () => {
@@ -452,13 +453,158 @@ test('absent completion survives cancelled turn, elapsed time and reload; matchi
     note: 'Stop',
     message: 'Stopped',
   });
-  h.advance(24 * 60 * MINUTE);
+  h.advance(ADMISSION_MS - 1);
   await h.endTurn('gilfoyle', ctx().sessionKey);
   await other.service.start();
   assert.match((await before(ctx(1), params, other.hooks)).blockReason, /invocation is pending/);
-  await after(ctx(), undefined); // old registration observes actual call completion
+  h.advance(1);
   assert.ok((await before(ctx(1), params, other.hooks)).params);
+  await after(ctx(), undefined); // old completion cannot release the replacement
+  assert.match(
+    (await before(ctx(1, 'next'), params, other.hooks)).blockReason,
+    /invocation is pending/,
+  );
 });
+
+test('modeled legacy claim adopts one deadline on upgrade; reload and late old completion preserve replacement', async (t) => {
+  const { h, before, after, accepted, ctx, tasks } = await fixture(t, { file: true });
+  const board = [...globalThis[Symbol.for('jarvis-gilfoyle.boards')].values()].find(
+    (board) => board.runtime === h.runtime,
+  );
+  assert.ok(board);
+  // Frozen, focused model of c132af9:src/index.ts: a granted invocation awaiting
+  // completion has only identity/granted (no acquisition time or expiry). Its old
+  // after hook reads the current shared claim, records known children first, then
+  // clears only matching ownership. Model only the valid IDs/details used here;
+  // independent actual-baseline reproduction is review evidence, not this fixture.
+  const identity = (context) =>
+    JSON.stringify([
+      context.sessionKey,
+      context.sessionId ?? null,
+      context.runId,
+      context.toolCallId,
+    ]);
+  board.admission = { identity: identity(ctx()), granted: true };
+  const legacyClaim = board.admission;
+  assert.equal(Object.hasOwn(legacyClaim, 'expiresAt'), false);
+  const oldHooks = {
+    after_tool_call(event, context) {
+      const claim = board.admission;
+      const matching = claim?.granted && claim.identity === identity(context);
+      try {
+        const child = event.result?.details?.childSessionKey;
+        if (typeof child === 'string' && child.startsWith('agent:'))
+          assert(
+            board.runtime.recordWorker(context.sessionKey, child),
+            'worker recording unconfirmed',
+          );
+      } finally {
+        if (matching && board.admission === claim) board.admission = null;
+      }
+    },
+  };
+  const services = [h.hooks.service];
+  t.after(async () => {
+    for (const service of services) await service.stop();
+    testHooks.bridge = null;
+  });
+  testHooks.bridge = h.bridge;
+  await h.hooks.service.start();
+  // Baseline acquisition predates adoption, but its time was never retained.
+  h.advance(5 * MINUTE);
+  const deadline = testHooks.admissionNow() + ADMISSION_MS;
+  const upgraded = h.registerHooks();
+  assert.equal(board.admission, legacyClaim);
+  assert.equal(legacyClaim.expiresAt, deadline);
+  services.push(upgraded.service);
+  await upgraded.service.start();
+  h.advance(8 * MINUTE);
+  const reloaded = h.registerHooks();
+  assert.equal(legacyClaim.expiresAt, deadline);
+  services.push(reloaded.service);
+  await reloaded.service.start();
+  assert.equal(board.admission, legacyClaim);
+  assert.equal(legacyClaim.expiresAt, deadline);
+  h.advance(8 * MINUTE - 1);
+  assert.match(
+    (await before(ctx(1, 'early'), params, reloaded.hooks)).blockReason,
+    /invocation is pending/,
+  );
+  h.advance(1);
+  assert.ok((await before(ctx(1, 'replacement'), params, reloaded.hooks)).params);
+  await after(ctx(), undefined, oldHooks);
+  assert.match(
+    (await before(ctx(0, 'next'), params, reloaded.hooks)).blockReason,
+    /invocation is pending/,
+  );
+  await after(ctx(), accepted(), oldHooks);
+  assert.equal(h.runtime.store.task(tasks[0]).workers[0].key, 'agent:opencode:acp:child');
+  assert.match(
+    (await before(ctx(0, 'next'), params, reloaded.hooks)).blockReason,
+    /invocation is pending/,
+  );
+  await after(ctx(1, 'replacement'), undefined, reloaded.hooks);
+  assert.match((await before(ctx(0, 'next'), params, reloaded.hooks)).blockReason, /limit 1/);
+});
+
+test('missing completion recovers exactly at expiry; late old child records without releasing newer claim', async (t) => {
+  const { h, before, after, accepted, ctx, tasks } = await fixture(t);
+  assert.ok((await before()).params);
+  h.advance(ADMISSION_MS - 1);
+  assert.match((await before(ctx(1, 'early'))).blockReason, /invocation is pending/);
+  h.advance(1);
+  assert.ok((await before(ctx(1, 'new'))).params);
+  await after(ctx(), accepted());
+  assert.equal(h.runtime.store.task(tasks[0]).workers.length, 1);
+  assert.match((await before(ctx(0, 'third'))).blockReason, /invocation is pending/);
+  await after(ctx(1, 'new'), undefined);
+  assert.match((await before(ctx(0, 'third'))).blockReason, /limit 1/);
+});
+
+test('wall-clock rollback does not extend process-local admission expiry', async (t) => {
+  const { h, before, ctx } = await fixture(t);
+  assert.ok((await before()).params);
+  h.advance(-24 * 60 * MINUTE);
+  h.advance(ADMISSION_MS - 1);
+  assert.match((await before(ctx(1))).blockReason, /invocation is pending/);
+  h.advance(1);
+  assert.ok((await before(ctx(1))).params);
+});
+
+for (const replacement of ['none', 'pending'])
+  test(`suspended prelaunch callback cannot grant at expiry with ${replacement} replacement`, async (t) => {
+    const { h, before, ctx, slowCount } = await fixture(t);
+    const slow = slowCount();
+    const old = before();
+    await slow.entered;
+    h.advance(ADMISSION_MS);
+    let newer;
+    if (replacement !== 'none') newer = before(ctx(1, 'new'));
+    slow.resume();
+    assert.match((await old).blockReason, /expired or replaced/);
+    if (newer) assert.ok((await newer).params);
+    const next = await before(ctx(0, 'next'));
+    if (replacement === 'pending') assert.match(next.blockReason, /invocation is pending/);
+    else assert.ok(next.params);
+  });
+
+for (const completed of [false, true])
+  test(`expired old callback resuming after newer grant (completed=${completed}) cannot reacquire permission`, async (t) => {
+    const { h, before, after, ctx, slowCount } = await fixture(t);
+    const request = h.bridge.request.bind(h.bridge);
+    const slow = slowCount();
+    const old = before();
+    await slow.entered;
+    h.advance(ADMISSION_MS);
+    h.bridge.request = request; // Only the old callback remains suspended.
+    assert.ok((await before(ctx(1, 'new'))).params);
+    if (completed) await after(ctx(1, 'new'), undefined);
+    slow.resume();
+    assert.match((await old).blockReason, /expired or replaced/);
+    const next = await before(ctx(0, 'next'));
+    if (completed) assert.ok(next.params);
+    else assert.match(next.blockReason, /invocation is pending/);
+  });
 
 test('matching completion releases serialization but unavailable current native count still refuses', async (t) => {
   const { h, before, after, ctx } = await fixture(t);
