@@ -38,4 +38,4 @@ For a linked install, build source changes and restart the Gateway as described 
 
 The repository's [testing guide](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/TESTING.md) distinguishes local behavioral tests from native integration and live channel/model checks. Read its side effects before running operator or native checks. This documentation site's build validates documentation, not plugin reliability or live delivery.
 
-Backup and recovery procedures are maintained separately. This page does not prescribe a restore or database-migration command.
+Use the authoritative [backup and staged recovery guide](recovery.md) for consistent private snapshots and separate restore verification. Staging does not authorize replacement of a live board or establish full-host recovery.

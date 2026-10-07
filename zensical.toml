@@ -13,6 +13,7 @@ nav = [
   { "Board reference" = "board-reference.md" },
   { "Design and boundaries" = "design.md" },
   { "Operations" = "operations.md" },
+  { "Backup and recovery" = "recovery.md" },
   { "Documentation" = "documentation.md" },
 ]
 
