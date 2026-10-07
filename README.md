@@ -93,6 +93,11 @@ See the [board reference](docs/board-reference.md) for all seven `project_board`
 
 The [full enforcement and delivery rules](docs/board-reference.md#enforcement) include required messages, chat-binding restrictions, transcript recording and the scope of worker guards. [Testing limitations](TESTING.md#native-integration) cover live models, real channels and real-Gateway cleanup.
 
+For private, consistent board snapshots and a separately verified staged copy, see
+[backup and recovery](docs/recovery.md). The operator utility never replaces the
+live board. See the [read-only capacity assessment](docs/capacity-assessment.md)
+for the check-then-spawn race, native limit scopes and procedure-first recommendation.
+
 ## Development
 
 ```bash
