@@ -41,7 +41,7 @@ scope, observed unrecorded workers across all task/project statuses, native clea
 of completed history (including a fresh process), recent-record visibility grace,
 native pagination past idle history and unknown/nonadvancing pagination,
 closed/cancelled occupancy, lifecycle/record changes during native reads,
-and reload serialization with the original expiry deadline. An upgrade regression loads the actual baseline registration from local Git into a fake disposable board, leaves its launch without completion, and checks expiry exactly 16 minutes after deadline adoption, preservation through another registration/reload, and late old-hook recording without replacement release. A second SQLite connection writes during a suspended RPC to
+and reload serialization with the original expiry deadline. A self-contained upgrade regression arranges a retained legacy claim without expiry in the shared disposable board and models the relevant old completion-hook behavior from `c132af9:src/index.ts`. It checks expiry exactly 16 minutes after deadline adoption, preservation through another registration/reload, and late old-hook recording without replacement release. This focused baseline model needs no Git history; independent reproduction using the actual baseline registration remains review evidence rather than automated-suite evidence. A second SQLite connection writes during a suspended RPC to
 check that no transaction spans the wait. A hook-timeout ordering model confirms
 that its continuing callback stays locked before expiry without a completion hook. Matching
 completions with empty/missing results release. Missing hooks recover lazily at the
