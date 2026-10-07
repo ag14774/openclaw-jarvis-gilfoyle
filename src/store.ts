@@ -62,17 +62,24 @@ export class Store {
     this.now = now;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
-    if (path !== ':memory:') chmodSync(path, 0o600);
-    this.db.exec(
-      'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;',
-    );
-    const version = this.get('PRAGMA user_version').user_version;
-    assert(
-      version === 0 || version === SCHEMA_VERSION,
-      `statePath is not a project board (schema ${version}, expected ${SCHEMA_VERSION}); point it at a new or existing board file`,
-    );
-    this.db.exec(SCHEMA);
-    this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
+    try {
+      const version = this.get('PRAGMA user_version').user_version;
+      assert(
+        version === SCHEMA_VERSION ||
+          (version === 0 && !this.get('SELECT 1 FROM sqlite_schema LIMIT 1')),
+        `statePath is not a project board (schema ${version}, expected ${SCHEMA_VERSION}); point it at a new or existing board file`,
+      );
+      // Admission is read-only: a foreign file keeps its schema, permissions and journal.
+      if (path !== ':memory:') chmodSync(path, 0o600);
+      this.db.exec(
+        'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;',
+      );
+      this.db.exec(SCHEMA);
+      this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
   get(sql, ...args) {
     return this.db.prepare(sql).get(...args);
