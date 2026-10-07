@@ -2,7 +2,7 @@
 site_name = "Jarvis-Gilfoyle"
 site_description = "A small project board for cooperative OpenClaw agents."
 # Conventional Pages candidate only; deployment eligibility and live URL are unverified.
-site_url = "https://ag14774.github.io/openclaw-jarvis-gilfoyle/"
+site_url = "https://ageorgiou.com/openclaw-jarvis-gilfoyle/"
 docs_dir = "docs"
 site_dir = "site"
 dev_addr = "127.0.0.1:8000"
