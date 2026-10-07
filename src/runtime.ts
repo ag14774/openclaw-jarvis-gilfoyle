@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
+import { readStringParam } from 'openclaw/plugin-sdk/param-readers';
+import { normalizeAgentIdStrict } from 'openclaw/plugin-sdk/routing';
 import {
   agentForRole,
   isManagerAgent,
@@ -36,9 +38,13 @@ const ZERO_USAGE = {
 };
 const HOLDERS = ['product', 'engineering', 'user'];
 
-// Native sessions_spawn reads agentId as a trimmed string.
-export const spawnAgentId = (params) =>
-  typeof params?.agentId === 'string' ? params.agentId.trim() : undefined;
+// Reuse the native reader's alias precedence and target canonicalization.
+export const spawnAgentId = (params) => {
+  const target = readStringParam(params ?? {}, 'agentId');
+  if (!target) return undefined;
+  const normalized = normalizeAgentIdStrict(target);
+  return normalized.ok ? normalized.value : undefined;
+};
 
 const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 export function text(value, max, name) {

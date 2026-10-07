@@ -157,7 +157,7 @@ test('unavailable board refuses both exact and native-trimmed configured targets
     registerGatewayMethod() {},
     on: (name, fn) => (hooks[name] = fn),
   });
-  for (const agentId of ['opencode', ' opencode ']) {
+  for (const agentId of ['opencode', ' opencode ', 'OpenCode', '!!OpenCode!!']) {
     const decision = await hooks.before_tool_call(
       { toolName: 'sessions_spawn', params: { ...params, agentId } },
       {
@@ -734,3 +734,25 @@ test('a new process loses unfinished invocation serialization: restart is explic
   );
   assert.equal(child.status, 0, child.stderr);
 });
+
+for (const target of [
+  { agentId: 'OpenCode' },
+  { agentId: '!!OpenCode!!' },
+  { agent_id: 'OpenCode' },
+  { agentId: 'OpenCode', agent_id: 'researcher' },
+]) {
+  test('native reader and canonicalizer cover target ' + JSON.stringify(target), async (t) => {
+    const { h, before, after, accepted, ctx } = await fixture(t);
+    const { agentId: _ignored, ...rest } = params;
+    const input = { ...rest, ...target };
+    const decisions = await Promise.all([before(ctx(), input), before(ctx(1), input)]);
+    assert.equal(decisions.filter((x) => x?.params).length, 1);
+    assert.equal(decisions[0].params.agentId, 'opencode');
+    assert.equal(decisions[0].params.model, 'fake/model');
+    assert.match(decisions[1].blockReason, /invocation is pending/);
+    await after(ctx(), accepted());
+    assert.match((await before(ctx(1), input)).blockReason, /limit 1/);
+    h.native.fail.add('sessions.list');
+    assert.match((await before(ctx(1), input)).blockReason, /Worker admission unavailable/);
+  });
+}
