@@ -5,3 +5,7 @@ package-lock.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+site/
+.venv/
+.cache/
+uv.lock

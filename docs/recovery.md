@@ -1,6 +1,6 @@
 # Board backup and staged recovery
 
-[Back to README](../README.md)
+[Back to overview](index.md)
 
 The board is the plugin's project record. Native sessions own execution liveness;
 Git owns code and worktrees; native receipts own delivery. Backing up the board
@@ -103,4 +103,4 @@ immutable while staging. Protect any off-host copies separately and never commit
 boards, staged copies or reports to this repository.
 
 Disposable-fixture regressions and command side effects are in
-[TESTING.md](../TESTING.md#recovery-utility).
+[testing guide](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/TESTING.md#recovery-utility).
