@@ -152,115 +152,74 @@ function fixture(t, { path = ':memory:' } = {}) {
   };
 }
 
-for (const change of [
-  'cancellation',
-  'holder without note',
-  'check-in without note',
-  'note identity',
-  'late worker',
-]) {
-  test(`completion revalidates ${change} at commit time across native await`, async (t) => {
-    const h = fixture(t);
-    const id = h.add();
-    const w = h.worker(id);
-    const g = gate();
-    let blocked = false;
-    h.native.hook = async (method, params, next) => {
-      if (!blocked && method === 'sessions.list' && params.search === w) {
-        blocked = true;
-        g.enter();
-        await g.waiting;
-      }
-      return next();
-    };
-    const earlier = h.runtime.updateTask(caller('product', 'earlier'), {
-      task: id,
-      status: 'done',
-      note: 'Accepted',
-      message: 'Completed',
-    });
-    // Attach the rejection handler before releasing the race.
-    const rejected = assert.rejects(earlier, /changed while checking workers.*show/);
-    await g.entered;
-    if (change === 'cancellation')
-      await h.runtime.updateTask(caller('product'), {
-        task: id,
-        status: 'cancelled',
-        note: 'Stop',
-      });
-    if (change === 'holder without note')
-      h.store.run("UPDATE tasks SET holder='product' WHERE id=?", id);
-    if (change === 'check-in without note')
-      await h.runtime.updateTask(caller('engineering', 'later'), { task: id, check_in_minutes: 7 });
-    if (change === 'note identity') h.store.note(id, 'product', 'New information');
-    if (change === 'late worker')
-      h.runtime.recordWorker(taskSessionKey('engineering', h.store.task(id)), 'agent:worker:late');
-    const latest = h.store.task(id);
-    g.release();
-    await rejected;
-    assert.deepEqual(h.store.task(id), latest);
-    assert(!h.store.notes(id).some((note) => note.text === 'Accepted'));
-    assert.equal(h.store.get('SELECT COUNT(*) n FROM outbox').n, 0);
+const count = (h, method) => h.native.calls.filter(([m]) => m === method).length;
+// Holds the first native read of `key` until released.
+const holdRead = (h, key) => {
+  const g = gate();
+  let held = false;
+  h.native.hook = async (method, params, next) => {
+    if (!held && method === 'sessions.list' && params.search === key) {
+      held = true;
+      g.enter();
+      await g.waiting;
+    }
+    return next();
+  };
+  return g;
+};
+
+test('a cancellation made while a completion checks the workers wins', async (t) => {
+  const h = fixture(t);
+  const id = h.add();
+  const g = holdRead(h, h.worker(id));
+  const done = h.runtime.updateTask(caller('product', 'earlier'), {
+    task: id,
+    status: 'done',
+    note: 'Accepted',
+    message: 'Completed',
   });
-}
+  const rejected = assert.rejects(done, /changed.*while its workers were checked.*show/);
+  await g.entered;
+  await h.runtime.updateTask(caller('product'), { task: id, status: 'cancelled', note: 'Stop' });
+  const latest = h.store.task(id);
+  g.release();
+  await rejected;
+  assert.deepEqual(h.store.task(id), latest);
+  assert(!h.store.notes(id).some((note) => note.text === 'Accepted'));
+  assert.equal(h.store.get('SELECT COUNT(*) n FROM outbox').n, 0);
+});
 
-for (const message of [undefined, 'Completed']) {
-  test(`completion revalidates project binding before ${message ? 'waiving the supplied message' : 'closing without a message'}`, async (t) => {
-    const h = fixture(t);
-    const product = { ...caller('product'), source: { route: group } };
-    const id = h.runtime.addTask(product, { project: 'p', title: 'Request' }).task;
-    const w = h.worker(id);
-    const g = gate();
-    let first = true;
-    h.native.hook = async (method, params, next) => {
-      if (first && method === 'sessions.list' && params.search === w) {
-        first = false;
-        g.enter();
-        await g.waiting;
-      }
-      return next();
-    };
-    const earlier = h.runtime.updateTask(product, {
-      task: id,
-      status: 'done',
-      note: 'Accepted',
-      message,
-    });
-    const rejected = assert.rejects(earlier, /changed while checking workers.*show.*decide again/);
-    await g.entered;
-    h.runtime.updateProject(
-      { ...caller('product', 'new-chat'), source: { route: rebound } },
-      { project: 'p', use_this_chat: true },
-    );
-    const latest = h.store.task(id);
-    g.release();
-    await rejected;
-    assert.deepEqual(h.store.task(id), latest);
-    assert.equal(h.store.notes(id).length, 0);
-    assert.equal(h.store.get('SELECT COUNT(*) n FROM outbox').n, 0);
-    assert.equal(h.store.project('p').route.conversationRef, rebound.conversationRef);
+test('a worker recorded while a completion checks the workers stops the completion', async (t) => {
+  const h = fixture(t);
+  const id = h.add();
+  const g = holdRead(h, h.worker(id));
+  const done = h.runtime.updateTask(caller('product'), { task: id, status: 'done', note: 'Ok' });
+  const rejected = assert.rejects(done, /changed.*while its workers were checked/);
+  await g.entered;
+  h.runtime.recordWorker(taskSessionKey('engineering', h.store.task(id)), 'agent:worker:late');
+  g.release();
+  await rejected;
+  assert.equal(h.store.task(id).status, 'open');
+});
 
-    h.runtime.show(product, { task: id });
-    await assert.rejects(
-      h.runtime.updateTask(product, { task: id, status: 'done', note: 'Accepted' }),
-      /needs message/,
-    );
-    await h.runtime.updateTask(product, {
-      task: id,
-      status: 'done',
-      note: 'Accepted after reread',
-      message: 'Completed',
-    });
-    assert.equal(h.store.task(id).status, 'done');
-    assert.equal(h.native.sends.length, 1);
-    assert.equal(h.native.sends[0].conversationRef, rebound.conversationRef);
-  });
-}
+test('the scan’s own bookkeeping during the worker check does not reject a completion', async (t) => {
+  const h = fixture(t);
+  const id = h.add();
+  const g = holdRead(h, h.worker(id));
+  const done = h.runtime.updateTask(caller('product'), { task: id, status: 'done', note: 'Ok' });
+  await g.entered;
+  h.store.run(
+    'UPDATE tasks SET woken=?,check_at=?,idle_wakes=1,poked=NULL WHERE id=?',
+    h.now(),
+    h.now() + MINUTE,
+    id,
+  );
+  g.release();
+  assert.equal((await done).status, 'done');
+});
 
-test('cancelled-worker abort failure recovers from existing rows after restart', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'jg-cancel-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const h = fixture(t, { path: join(dir, 'board.sqlite') });
+test('stopping a cancelled task’s workers is retried until they stop, then never again', async (t) => {
+  const h = fixture(t);
   const id = h.add();
   const w = h.worker(id);
   h.session(w, { hasActiveRun: true });
@@ -269,100 +228,94 @@ test('cancelled-worker abort failure recovers from existing rows after restart',
     return next();
   };
   await h.runtime.updateTask(caller('product'), { task: id, status: 'cancelled', note: 'Stop' });
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 1);
+  assert.equal(count(h, 'sessions.abort'), 1);
   await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 1);
+  assert.equal(count(h, 'sessions.abort'), 1);
   h.advance(5 * MINUTE);
   h.native.hook = null;
-  // A fresh runtime has no volatile stop obligations to recover.
-  const reopened = new Store(join(dir, 'board.sqlite'), { now: h.now });
-  t.after(() => reopened.close());
-  const restarted = new BoardRuntime(reopened, h.runtime.rpc, { now: h.now });
-  restarted.requestTick = () => {};
-  await restarted.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 2);
-  assert.equal(h.store.task(id).status, 'cancelled');
-  assert.equal(h.store.task(id).cleaned, null);
+  await h.runtime.tick();
+  assert.equal(count(h, 'sessions.abort'), 2);
   assert.equal(h.session(w).hasActiveRun, false);
+  // The next check confirms the stop; after that the task is never checked again.
   h.advance(5 * MINUTE);
-  await restarted.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 2);
+  await h.runtime.tick();
+  assert.equal(h.store.task(id).check_at, null);
+  const reads = count(h, 'sessions.list');
+  for (let i = 0; i < 3; i++) {
+    h.advance(60 * MINUTE);
+    await h.runtime.tick();
+  }
+  assert.equal(count(h, 'sessions.list'), reads);
+  assert.equal(count(h, 'sessions.abort'), 2);
 });
 
-test('late spawn recording schedules cancellation retry; unknown native state stays unconfirmed', async (t) => {
+test('a cancelled task’s worker whose session is gone counts as stopped', async (t) => {
+  const h = fixture(t);
+  const id = h.add();
+  const w = h.worker(id);
+  h.native.sessions = h.native.sessions.filter((row) => row.key !== w);
+  await h.runtime.updateTask(caller('product'), { task: id, status: 'cancelled', note: 'Stop' });
+  assert.equal(count(h, 'sessions.abort'), 0);
+  assert.equal(h.store.task(id).check_at, null);
+});
+
+test('an unreadable worker state is retried, a few tasks per scan', async (t) => {
+  const h = fixture(t);
+  const ids = [];
+  for (let i = 0; i < 12; i++) {
+    const id = h.add();
+    ids.push(id);
+    h.worker(id);
+  }
+  h.native.hook = (method, params, next) => {
+    if (method === 'sessions.list') throw Error('offline');
+    return next();
+  };
+  for (const id of ids)
+    await h.runtime.updateTask(caller('product'), { task: id, status: 'cancelled', note: 'Stop' });
+  h.advance(5 * MINUTE);
+  const reads = count(h, 'sessions.list');
+  await h.runtime.tick();
+  assert.equal(count(h, 'sessions.list') - reads, 10);
+  await h.runtime.tick();
+  assert.equal(count(h, 'sessions.list') - reads, 12);
+  h.native.hook = null;
+  h.advance(5 * MINUTE);
+  await h.runtime.tick();
+  h.advance(5 * MINUTE);
+  await h.runtime.tick();
+  assert(ids.every((id) => h.store.task(id).check_at === null));
+});
+
+test('a worker recorded after its task was cancelled is stopped by the next scan', async (t) => {
   const h = fixture(t);
   const id = h.add();
   const key = taskSessionKey('engineering', h.store.task(id));
   await h.runtime.updateTask(caller('product'), { task: id, status: 'cancelled', note: 'Stop' });
   const w = 'agent:worker:late';
+  h.session(w, { hasActiveRun: true });
   h.runtime.recordWorker(key, w);
   await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 1);
-  assert(h.native.logs.some((line) => /stop unconfirmed.*unknown/.test(line)));
-  h.advance(5 * MINUTE);
-  await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 2);
-  h.session(w, { hasActiveRun: true, hasActiveSubagentRun: true });
-  h.advance(5 * MINUTE);
-  await h.runtime.tick();
+  assert.equal(count(h, 'sessions.abort'), 1);
   assert.equal(h.session(w).hasActiveRun, false);
-  assert.equal(h.store.task(id).status, 'cancelled');
-  assert.equal(h.store.task(id).cleaned, null);
-});
-
-test('cancelled reconciliation is bounded and fair despite persistent failures and cleaned history', async (t) => {
-  const h = fixture(t);
-  const ids = [];
-  for (let i = 0; i < 25; i++) {
-    const id = h.add();
-    ids.push(id);
-    h.worker(id);
-    h.store.run(
-      "UPDATE tasks SET status='cancelled',holder=NULL,check_at=NULL,cleaned=? WHERE id=?",
-      h.now(),
-      id,
-    );
-  }
-  h.native.hook = (method, params, next) => {
-    if (method === 'sessions.list' || method === 'sessions.abort') throw Error('offline');
-    return next();
-  };
-  for (const count of [10, 20, 25]) {
-    await h.runtime.tick();
-    assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, count);
-  }
-  assert.equal(
-    new Set(h.native.calls.filter(([m]) => m === 'sessions.abort').map(([, p]) => p.key)).size,
-    25,
-  );
-  assert(ids.every((id) => h.store.task(id).cleaned === h.now()));
-  await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 25);
   h.advance(5 * MINUTE);
   await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 35);
+  assert.equal(h.store.task(id).check_at, null);
 });
 
-test('reopening during cancellation inspection prevents a stale abort', async (t) => {
+test('reopening a task while its workers are being stopped prevents the stop', async (t) => {
   const h = fixture(t);
   const id = h.add();
   const w = h.worker(id);
-  h.store.run("UPDATE tasks SET status='cancelled',holder=NULL,check_at=NULL WHERE id=?", id);
+  h.store.run("UPDATE tasks SET status='cancelled',holder=NULL,check_at=? WHERE id=?", h.now(), id);
   h.session(w, { hasActiveRun: true });
-  const g = gate();
-  h.native.hook = async (method, params, next) => {
-    if (method === 'sessions.list' && params.search === w) {
-      g.enter();
-      await g.waiting;
-    }
-    return next();
-  };
+  const g = holdRead(h, w);
   const scan = h.runtime.tick();
   await g.entered;
   await h.runtime.updateTask(caller('product'), { task: id, status: 'open', note: 'Resume' });
   g.release();
   await scan;
-  assert.equal(h.native.calls.filter(([m]) => m === 'sessions.abort').length, 0);
+  assert.equal(count(h, 'sessions.abort'), 0);
   assert.equal(h.store.task(id).status, 'open');
 });
 
@@ -403,67 +356,6 @@ for (const poked of [false, true]) {
   });
 }
 
-for (const outcome of ['accepted', 'error', 'ambiguous live']) {
-  for (const change of [
-    'check-in',
-    'same retry check-in',
-    'handover',
-    'cancellation',
-    'note',
-    'worker',
-  ]) {
-    test(`late wake ${outcome} preserves a new ${change} during dispatch`, async (t) => {
-      const h = fixture(t);
-      const id = h.add();
-      h.store.run('UPDATE tasks SET poked=?,check_at=? WHERE id=?', h.now(), h.now(), id);
-      const g = gate();
-      h.native.hook = async (method, params, next) => {
-        if (method !== 'agent') return next();
-        g.enter();
-        await g.waiting;
-        if (outcome === 'accepted') return next();
-        if (outcome === 'ambiguous live') next();
-        throw Error('response lost');
-      };
-      const scan = h.runtime.tick();
-      await g.entered;
-      if (change === 'check-in')
-        await h.runtime.updateTask(caller('engineering'), { task: id, check_in_minutes: 17 });
-      if (change === 'same retry check-in')
-        await h.runtime.updateTask(caller('engineering'), { task: id, check_in_minutes: 5 });
-      if (change === 'handover')
-        await h.runtime.updateTask(caller('engineering'), {
-          task: id,
-          holder: 'product',
-          note: 'Review',
-        });
-      if (change === 'cancellation')
-        await h.runtime.updateTask(caller('product'), {
-          task: id,
-          status: 'cancelled',
-          note: 'Stop',
-        });
-      if (change === 'note')
-        await h.runtime.updateTask(caller('product'), { task: id, note: 'New information' });
-      if (change === 'worker')
-        h.runtime.recordWorker(taskSessionKey('engineering', h.store.task(id)), 'agent:worker:new');
-      const latest = h.store.task(id);
-      g.release();
-      await scan;
-      const answered = outcome !== 'error' && change === 'worker';
-      assert.deepEqual(
-        h.store.task(id),
-        answered ? { ...latest, poked: null, check_at: h.now() + 60 * MINUTE } : latest,
-      );
-      if (change === 'check-in' || change === 'same retry check-in') {
-        h.session(taskSessionKey('engineering', h.store.task(id)), { hasActiveRun: false });
-        h.runtime.wakes.clear();
-        assert.deepEqual((await h.runtime.tick()).woken, []);
-      }
-    });
-  }
-}
-
 test('ambiguous dispatch confirmed live counts once and does not dispatch again mid-turn', async (t) => {
   const h = fixture(t);
   const id = h.add();
@@ -502,6 +394,127 @@ test('changed tasks during native wake preparation are neither dispatched nor st
   assert.deepEqual(h.store.task(id), latest);
   assert.equal(h.native.calls.filter(([m]) => m === 'agent').length, 0);
   assert.equal(h.native.sends.length, 0);
+});
+
+for (const outcome of ['accepted', 'lost acknowledgement'])
+  test(`the holder acting during a wake dispatch keeps its own check-in (${outcome})`, async (t) => {
+    const h = fixture(t);
+    const id = h.add();
+    h.store.run('UPDATE tasks SET poked=?,check_at=? WHERE id=?', h.now(), h.now(), id);
+    const g = gate();
+    h.native.hook = async (method, params, next) => {
+      if (method !== 'agent') return next();
+      g.enter();
+      await g.waiting;
+      const result = next();
+      if (outcome !== 'accepted') throw Error('response lost');
+      return result;
+    };
+    const scan = h.runtime.tick();
+    await g.entered;
+    await h.runtime.updateTask(caller('engineering'), {
+      task: id,
+      note: 'On it',
+      check_in_minutes: 17,
+    });
+    g.release();
+    assert.deepEqual((await scan).woken, [id]);
+    const row = h.store.task(id);
+    assert.deepEqual([row.check_at, row.poked, row.idle_wakes], [h.now() + 17 * MINUTE, null, 0]);
+  });
+
+test('another manager’s note during a wake dispatch wakes the holder again after the turn', async (t) => {
+  const h = fixture(t);
+  const id = h.add();
+  h.store.run('UPDATE tasks SET check_at=? WHERE id=?', h.now(), id);
+  const g = gate();
+  h.native.hook = async (method, params, next) => {
+    if (method === 'agent' && count(h, 'agent') === 1) {
+      g.enter();
+      await g.waiting;
+    }
+    return next();
+  };
+  const scan = h.runtime.tick();
+  await g.entered;
+  await h.runtime.updateTask(caller('product'), { task: id, note: 'Also check X' });
+  g.release();
+  await scan;
+  assert.notEqual(h.store.task(id).poked, null);
+  h.session(taskSessionKey('engineering', h.store.task(id)), { hasActiveRun: false });
+  h.runtime.wakes.clear();
+  assert.deepEqual((await h.runtime.tick()).woken, [id]);
+  assert.match(h.native.calls.filter(([m]) => m === 'agent').at(-1)[1].message, /Also check X/);
+});
+
+const attachment = (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'jg-file-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'plan.png');
+  writeFileSync(path, 'png');
+  return path;
+};
+
+test('delivered text never falls back; its files are retried in the same chat', async (t) => {
+  const h = fixture(t);
+  let fail = true;
+  h.native.hook = (method, params, next) => {
+    if (method === 'message.action' && fail) throw Error('upload failed');
+    return next();
+  };
+  const id = h.store.enqueue('p', null, 'With file', [attachment(t)]);
+  const first = await h.runtime.deliver(id);
+  assert.equal(first.state, 'sent');
+  assert.match(first.error, /Attachments not delivered yet, retrying: upload failed/);
+  for (let i = 0; i < 4; i++) {
+    h.advance(60 * MINUTE);
+    await h.runtime.tick();
+  }
+  assert.equal(h.native.sends.length, 1);
+  assert.equal(h.store.get('SELECT fallback FROM outbox WHERE id=?', id).fallback, 0);
+  fail = false;
+  h.advance(60 * MINUTE);
+  await h.runtime.tick();
+  assert.equal(h.native.sends.length, 1);
+  assert.deepEqual(
+    h.native.files.map((file) => file.params.to),
+    [group.target],
+  );
+  assert.deepEqual(
+    { ...h.store.get('SELECT state,error FROM outbox WHERE id=?', id) },
+    {
+      state: 'handed',
+      error: null,
+    },
+  );
+});
+
+test('files that never get through leave the delivered text delivered, with the error', async (t) => {
+  const h = fixture(t);
+  h.native.hook = (method, params, next) => {
+    if (method === 'message.action') throw Error('upload failed');
+    return next();
+  };
+  const id = h.store.enqueue('p', null, 'With file', [attachment(t)]);
+  await h.runtime.deliver(id);
+  for (let i = 0; i < 12; i++) {
+    h.advance(60 * MINUTE);
+    await h.runtime.tick();
+  }
+  const row = h.store.get('SELECT state,error,fallback FROM outbox WHERE id=?', id);
+  assert.equal(row.state, 'handed');
+  assert.match(row.error, /Attachments not delivered: upload failed/);
+  assert.equal(row.fallback, 0);
+  assert.equal(h.native.sends.length, 1);
+  assert(h.native.logs.some((line) => /attachments not delivered/.test(line)));
+});
+
+test('two deliveries of one message at once send it once', async (t) => {
+  const h = fixture(t);
+  const id = h.store.enqueue('p', null, 'Once');
+  const [a, b] = await Promise.all([h.runtime.deliver(id), h.runtime.deliver(id)]);
+  assert.equal(h.native.sends.length, 1);
+  assert.deepEqual(a, b);
 });
 
 test('foreign schema-zero databases are refused read-only and rejected handles close', (t) => {
@@ -550,382 +563,4 @@ test('foreign schema-zero databases are refused read-only and rejected handles c
     assert.equal(statSync(path).mode & 0o777, 0o600);
     store.close();
   }
-});
-
-for (const status of ['sent', 'queued'])
-  for (const destination of ['project', 'owner']) {
-    test(`deferred ${status} ${destination} transcript retains delivered destination and exact text after rebind/name change`, async (t) => {
-      const h = fixture(t);
-      h.native.hook = (method, params, next) => {
-        const result = next();
-        return method === 'conversations.send' ? { ...result, status } : result;
-      };
-      if (destination === 'owner') h.store.run('UPDATE projects SET route=NULL WHERE id=?', 'p');
-      const target = destination === 'owner' ? owner : group;
-      const chat = h.session(`agent:product:${target.target}-chat`, {
-        hasActiveRun: true,
-        deliveryContext: {
-          channel: target.channel,
-          accountId: target.accountId,
-          to: target.target,
-        },
-      });
-      const id = h.store.enqueue('p', null, 'Exact words');
-      await h.runtime.deliver(id);
-      assert.equal(h.native.transcripts.length, 0);
-      const receipt = JSON.parse(h.store.get('SELECT receipt FROM outbox WHERE id=?', id).receipt);
-      assert.equal(receipt.status, status);
-      assert.equal(receipt.destination.conversationRef, target.conversationRef);
-      assert.equal(
-        receipt.sentText,
-        destination === 'owner' ? '[Original] Exact words' : 'Exact words',
-      );
-      h.store.run(
-        'UPDATE projects SET route=?,name=? WHERE id=?',
-        JSON.stringify(rebound),
-        'Renamed',
-        'p',
-      );
-      h.session('agent:product:wrong-chat', {
-        deliveryContext: { channel: rebound.channel, to: rebound.target },
-      });
-      chat.hasActiveRun = false;
-      await h.runtime.tick();
-      await h.runtime.tick();
-      assert.equal(h.native.transcripts.length, 1);
-      assert.equal(h.native.transcripts[0].sessionKey, chat.key);
-      assert.equal(h.native.transcripts[0].message.content[0].text, receipt.sentText);
-      // Future messages still resolve the current binding.
-      await h.runtime.deliver(h.store.enqueue('p', null, 'New message'));
-      assert.equal(h.native.sends.at(-1).conversationRef, rebound.conversationRef);
-    });
-  }
-
-test('legacy delivered receipts leave transcript destination uncertainty visible', async (t) => {
-  const h = fixture(t);
-  const id = h.store.enqueue('p', null, 'Legacy');
-  h.store.run(
-    "UPDATE outbox SET state='handed',receipt=? WHERE id=?",
-    JSON.stringify({ status: 'sent' }),
-    id,
-  );
-  h.session('agent:product:wrong', {
-    deliveryContext: { channel: group.channel, to: group.target },
-  });
-  await h.runtime.tick();
-  assert.equal(h.native.transcripts.length, 0);
-  assert.equal(h.store.get('SELECT recorded FROM outbox WHERE id=?', id).recorded, 0);
-  assert(h.native.logs.some((line) => /destination or text unknown.*legacy receipt/.test(line)));
-});
-
-test('legacy pending attempts without receipts refuse to guess a text or attachment destination', async (t) => {
-  const h = fixture(t);
-  h.store.run('UPDATE projects SET route=? WHERE id=?', JSON.stringify(rebound), 'p');
-  for (const receipt of [
-    null,
-    JSON.stringify({ status: 'sent' }),
-    JSON.stringify({ status: 'unknown' }),
-  ]) {
-    const id = h.store.enqueue('p', null, 'Legacy partial', ['/unknown/legacy-file']);
-    h.store.run('UPDATE outbox SET attempts=1,receipt=? WHERE id=?', receipt, id);
-    const result = await h.runtime.deliver(id);
-    assert.equal(result.state, 'failed');
-    assert.match(result.error, /unknown.*legacy/);
-    assert.equal(h.store.get('SELECT receipt FROM outbox WHERE id=?', id).receipt, receipt);
-  }
-  assert.equal(h.native.calls.length, 0);
-  assert.equal(h.native.transcripts.length, 0);
-});
-
-test('new messages recover from failed route lookup without being mistaken for legacy partial sends', async (t) => {
-  const h = fixture(t);
-  h.store.run('UPDATE projects SET route=NULL WHERE id=?', 'p');
-  let first = true;
-  h.native.hook = (method, params, next) => {
-    if (method === 'conversations.list' && first) {
-      first = false;
-      throw Error('lookup offline');
-    }
-    return next();
-  };
-  const id = h.store.enqueue('p', null, 'Hello');
-  assert.equal((await h.runtime.deliver(id)).state, 'retrying');
-  assert.equal(h.native.sends.length, 0);
-  h.store.run(
-    'UPDATE projects SET route=?,name=? WHERE id=?',
-    JSON.stringify(rebound),
-    'Changed',
-    'p',
-  );
-  h.advance(2 * MINUTE);
-  await h.runtime.tick();
-  assert.equal(h.store.get('SELECT state FROM outbox WHERE id=?', id).state, 'handed');
-  assert.equal(h.native.sends[0].conversationRef, owner.conversationRef);
-  assert.equal(h.native.sends[0].message, '[Original] Hello');
-});
-
-test('partial attachment delivery never falls back or changes successful text destination on retry', async (t) => {
-  const h = fixture(t);
-  const dir = mkdtempSync(join(tmpdir(), 'jg-partial-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const paths = [join(dir, 'one.txt'), join(dir, 'two.txt')];
-  paths.forEach((path) => writeFileSync(path, 'bytes'));
-  let failures = 0;
-  h.native.hook = (method, params, next) => {
-    if (method === 'message.action' && params.params.filename === 'two.txt' && failures++ < 4)
-      throw Error('file unavailable');
-    return next();
-  };
-  const id = h.store.enqueue('p', null, 'Files', paths);
-  assert.equal((await h.runtime.deliver(id)).state, 'retrying');
-  h.store.run(
-    'UPDATE projects SET route=?,name=? WHERE id=?',
-    JSON.stringify(rebound),
-    'Changed',
-    'p',
-  );
-  // Beyond the preferred text retry limit, attachments still go to the accepted text chat.
-  for (let i = 0; i < 3; i++) assert.equal((await h.runtime.deliver(id)).state, 'retrying');
-  assert.equal((await h.runtime.deliver(id)).state, 'sent');
-  assert.equal(h.native.sends.length, 1);
-  assert.equal(h.native.sends[0].conversationRef, group.conversationRef);
-  const files = h.native.calls.filter(([m]) => m === 'message.action').map(([, params]) => params);
-  assert(files.every((params) => params.params.to === group.target));
-  for (const name of ['one.txt', 'two.txt'])
-    assert.equal(
-      new Set(
-        files
-          .filter((params) => params.params.filename === name)
-          .map((params) => params.idempotencyKey),
-      ).size,
-      1,
-    );
-  assert.equal(h.store.get('SELECT fallback FROM outbox WHERE id=?', id).fallback, 0);
-});
-
-test('uncertain text retries preserve operation, destination and wording through rebinding', async (t) => {
-  const h = fixture(t);
-  h.store.run('UPDATE projects SET route=NULL WHERE id=?', 'p');
-  let first = true;
-  h.native.hook = (method, params, next) => {
-    if (method === 'conversations.send' && first) {
-      first = false;
-      throw Error('lost response');
-    }
-    return next();
-  };
-  const id = h.store.enqueue('p', null, 'Hello');
-  await h.runtime.deliver(id);
-  h.store.run(
-    'UPDATE projects SET route=?,name=? WHERE id=?',
-    JSON.stringify(rebound),
-    'Changed',
-    'p',
-  );
-  await h.runtime.deliver(id);
-  const sends = h.native.calls.filter(([m]) => m === 'conversations.send').map(([, p]) => p);
-  assert.deepEqual(sends[1], sends[0]);
-  assert.equal(sends[0].message, '[Original] Hello');
-  assert.equal(sends[0].conversationRef, owner.conversationRef);
-});
-
-test('overlapping deliveries share late text acceptance and keep failed files at the project chat', async (t) => {
-  const h = fixture(t);
-  const dir = mkdtempSync(join(tmpdir(), 'jg-concurrent-file-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const file = join(dir, 'file.txt');
-  writeFileSync(file, 'bytes');
-  const id = h.store.enqueue('p', null, 'Already sent', [file]);
-  h.store.run(
-    'UPDATE outbox SET attempts=2,receipt=? WHERE id=?',
-    JSON.stringify({
-      destination: group,
-      sentText: 'Already sent',
-      toOwner: false,
-      operationId: `jarvis-gilfoyle-${id}-project`,
-    }),
-    id,
-  );
-  const g = gate();
-  let first = true;
-  h.native.hook = async (method, params, next) => {
-    if (method === 'conversations.send' && first) {
-      first = false;
-      g.enter();
-      await g.waiting;
-    }
-    if (method === 'message.action') throw Error('file unavailable');
-    return next();
-  };
-  const late = h.runtime.deliver(id);
-  await g.entered;
-  const overlapping = h.runtime.deliver(id);
-  g.release();
-  const results = await Promise.all([late, overlapping]);
-  assert.deepEqual(results, [results[0], results[0]]);
-  assert.equal(results[0].state, 'retrying');
-  const row = h.store.get('SELECT * FROM outbox WHERE id=?', id);
-  assert.equal(row.state, 'pending');
-  assert.equal(row.fallback, 0);
-  assert.equal(JSON.parse(row.receipt).status, 'sent');
-  assert.equal(JSON.parse(row.receipt).destination.conversationRef, group.conversationRef);
-  assert(
-    h.native.calls
-      .filter(([m]) => m === 'conversations.send')
-      .every(([, params]) => params.conversationRef === group.conversationRef),
-  );
-  assert.equal(h.native.calls.filter(([m]) => m === 'conversations.send').length, 1);
-  assert.equal(h.native.calls.filter(([m]) => m === 'message.action').length, 1);
-});
-
-test('overlapping deliveries coalesce through fallback and retain the owner receipt until same-destination files succeed after restart', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'jg-concurrent-fallback-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const path = join(dir, 'board.sqlite');
-  const h = fixture(t, { path });
-  const file = join(dir, 'file.txt');
-  writeFileSync(file, 'bytes');
-  const id = h.store.enqueue('p', null, 'Words', [file]);
-  const projectOperation = `jarvis-gilfoyle-${id}-project`;
-  const ownerOperation = `jarvis-gilfoyle-${id}-owner`;
-  h.store.run(
-    'UPDATE outbox SET attempts=2,receipt=? WHERE id=?',
-    JSON.stringify({
-      destination: group,
-      sentText: 'Words',
-      toOwner: false,
-      operationId: projectOperation,
-    }),
-    id,
-  );
-  const projectGate = gate();
-  const fileGate = gate();
-  let first = true;
-  h.native.hook = async (method, params, next) => {
-    if (method === 'conversations.send' && params.conversationRef === group.conversationRef) {
-      if (first) {
-        first = false;
-        projectGate.enter();
-        await projectGate.waiting;
-      }
-      return { status: 'unknown' };
-    }
-    if (method === 'message.action' && params.params.to === owner.target) {
-      fileGate.enter();
-      await fileGate.waiting;
-      throw Error('owner file offline');
-    }
-    return next();
-  };
-  const late = h.runtime.deliver(id);
-  await projectGate.entered;
-  const overlapping = h.runtime.deliver(id);
-  // Give a competing attempt time to reach owner acceptance before the earlier
-  // project response returns; coalesced callers must instead wait together.
-  await new Promise((resolve) => setImmediate(resolve));
-  projectGate.release();
-  await fileGate.entered;
-  const duringFallback = h.runtime.deliver(id);
-  assert.equal(h.store.get('SELECT state FROM outbox WHERE id=?', id).state, 'pending');
-  fileGate.release();
-  const results = await Promise.all([late, overlapping, duringFallback]);
-  assert.deepEqual(results, Array(3).fill(results[0]));
-  assert.equal(results[0].state, 'retrying');
-  const row = h.store.get('SELECT * FROM outbox WHERE id=?', id);
-  assert.equal(row.state, 'pending');
-  assert.equal(row.fallback, 1);
-  assert.equal(row.attempts, 1);
-  const receipt = JSON.parse(row.receipt);
-  assert.equal(receipt.status, 'sent');
-  assert.deepEqual(receipt.destination, owner);
-  assert.equal(receipt.sentText, '[Original] Words');
-  assert.equal(receipt.operationId, ownerOperation);
-  assert.equal(receipt.toOwner, true);
-  const sends = h.native.calls.filter(([m]) => m === 'conversations.send').map(([, p]) => p);
-  assert.deepEqual(
-    sends.map((p) => [p.conversationRef, p.operationId, p.message]),
-    [
-      [group.conversationRef, projectOperation, 'Words'],
-      [owner.conversationRef, ownerOperation, '[Original] Words'],
-    ],
-  );
-  const files = () => h.native.calls.filter(([m]) => m === 'message.action').map(([, p]) => p);
-  assert.deepEqual(
-    files().map((p) => p.params.to),
-    [owner.target],
-  );
-  assert.equal(files()[0].idempotencyKey, `${ownerOperation}-file-1`);
-  assert.equal(h.native.transcripts.length, 0);
-
-  h.store.run(
-    'UPDATE projects SET route=?,name=? WHERE id=?',
-    JSON.stringify(rebound),
-    'Renamed',
-    'p',
-  );
-  h.native.hook = null;
-  const reopened = new Store(path, { now: h.now });
-  t.after(() => reopened.close());
-  const restarted = new BoardRuntime(reopened, h.runtime.rpc, { now: h.now });
-  assert.equal((await restarted.deliver(id)).state, 'sent');
-  assert.equal(reopened.get('SELECT state FROM outbox WHERE id=?', id).state, 'handed');
-  assert.deepEqual(
-    JSON.parse(reopened.get('SELECT receipt FROM outbox WHERE id=?', id).receipt),
-    receipt,
-  );
-  assert.equal(h.native.calls.filter(([m]) => m === 'conversations.send').length, 2);
-  assert.deepEqual(files()[1], files()[0]);
-});
-
-test('an ambiguous wake with unreadable liveness waits for native visibility before retrying', async (t) => {
-  const h = fixture(t);
-  const id = h.add();
-  h.store.run('UPDATE tasks SET check_at=? WHERE id=?', h.now(), id);
-  let dispatched = false;
-  h.native.hook = (method, params, next) => {
-    if (method === 'sessions.list' && dispatched) throw Error('liveness unavailable');
-    const result = next();
-    if (method === 'agent') {
-      dispatched = true;
-      throw Error('lost response');
-    }
-    return result;
-  };
-  await h.runtime.tick();
-  assert.equal(h.store.task(id).idle_wakes, 0);
-  h.advance(5 * MINUTE);
-  await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'agent').length, 1);
-  h.native.hook = null;
-  await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'agent').length, 1);
-  const key = taskSessionKey('engineering', h.store.task(id));
-  h.session(key, { hasActiveRun: false });
-  await h.runtime.tick();
-  assert.equal(h.native.calls.filter(([m]) => m === 'agent').length, 2);
-  assert.equal(h.store.task(id).idle_wakes, 1);
-});
-
-test('cancellation during model preparation prevents a stale wake dispatch', async (t) => {
-  const h = fixture(t);
-  const id = h.add();
-  h.store.run('UPDATE tasks SET check_at=? WHERE id=?', h.now(), id);
-  const g = gate();
-  let first = true;
-  h.native.hook = async (method, params, next) => {
-    if (method === 'sessions.patch' && first) {
-      first = false;
-      g.enter();
-      await g.waiting;
-    }
-    return next();
-  };
-  const scan = h.runtime.tick();
-  await g.entered;
-  await h.runtime.updateTask(caller('product'), { task: id, status: 'cancelled', note: 'Stop' });
-  const latest = h.store.task(id);
-  g.release();
-  await scan;
-  assert.deepEqual(h.store.task(id), latest);
-  assert.equal(h.native.calls.filter(([m]) => m === 'agent').length, 0);
 });

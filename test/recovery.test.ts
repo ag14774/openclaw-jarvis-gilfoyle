@@ -168,6 +168,16 @@ test('schema-18 labels do not admit incorrect columns or extra objects', async (
   assert(!existsSync(join(root, 'refused')));
 });
 
+test('a board whose columns were added in a different order is accepted', async (t) => {
+  // Older boards gained outbox.files and outbox.recorded at the end of the table.
+  const { root, source, store } = fixture(t);
+  store.db.exec(
+    `ALTER TABLE outbox DROP COLUMN files; ALTER TABLE outbox ADD COLUMN files TEXT NOT NULL DEFAULT '[]'`,
+  );
+  assert.equal(verifyBoard(source).integrity, 'ok');
+  assert.equal((await createCopy('backup', source, join(root, 'copy'))).counts.outbox, 1);
+});
+
 test('foreign-key damage is refused despite intact SQLite pages', async (t) => {
   const { root, source, store } = fixture(t);
   store.db.exec('PRAGMA foreign_keys=OFF');
