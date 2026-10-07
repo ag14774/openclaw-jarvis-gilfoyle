@@ -77,16 +77,19 @@ export async function harness({ config = {} } = {}) {
           assert.equal(params.action, 'send');
           native.files.push(params);
           return { ok: true, messageId: 'm' };
-        case 'sessions.list':
+        case 'sessions.list': {
+          const matches = native.sessions.filter(
+            (s) =>
+              s.key.startsWith(`agent:${params.agentId}:`) && s.key.includes(params.search ?? ''),
+          );
+          const offset = params.offset ?? 0;
+          const end = offset + (params.limit ?? 200);
           return {
-            sessions: native.sessions
-              .filter(
-                (s) =>
-                  s.key.startsWith(`agent:${params.agentId}:`) &&
-                  s.key.includes(params.search ?? ''),
-              )
-              .map((s) => ({ ...s })),
+            sessions: matches.slice(offset, end).map((s) => ({ ...s })),
+            hasMore: end < matches.length,
+            nextOffset: end < matches.length ? end : null,
           };
+        }
         case 'sessions.create':
           native.session(params.key);
           return {};
@@ -124,6 +127,8 @@ export async function harness({ config = {} } = {}) {
   testHooks.manualTicks = true;
   testHooks.runtime = null;
   const hooks = {};
+  const warnings = [];
+  let invocations = 0;
   let factory;
   const pluginConfig = {
     statePath: ':memory:',
@@ -151,21 +156,23 @@ export async function harness({ config = {} } = {}) {
     ...config,
   };
   // Registers the plugin as OpenClaw does; returns the tool factory and hooks it received.
-  const register = (into = hooks) => {
+  const register = (into = hooks, cfg = pluginConfig) => {
     let made;
     plugin.register({
-      pluginConfig,
+      pluginConfig: cfg,
       config: {
         agents: {
           entries: { main: { identity: { name: 'Jarvis' } }, gilfoyle: { name: 'Gilfoyle' } },
         },
       },
-      logger: { warn() {} },
+      logger: { warn: (message) => warnings.push(message) },
       registerTool(make) {
         made = make;
       },
       registerGatewayMethod() {},
-      registerService() {},
+      registerService(service) {
+        into.service = service;
+      },
       on(name, fn) {
         into[name] = fn;
       },
@@ -176,6 +183,8 @@ export async function harness({ config = {} } = {}) {
   testHooks.bridge = null;
   const h = {
     native,
+    bridge,
+    warnings,
     hooks,
     advance(ms) {
       clock += ms;
@@ -186,6 +195,11 @@ export async function harness({ config = {} } = {}) {
     },
     // A further registration in the same process, as OpenClaw makes for agent runs.
     registerAgain: () => register({}),
+    registerHooks(cfg = pluginConfig) {
+      const hooks = {};
+      const tool = register(hooks, cfg);
+      return { hooks, tool, service: hooks.service };
+    },
     tool(agentId, sessionKey) {
       return factory({ agentId, sessionKey });
     },
@@ -215,21 +229,25 @@ export async function harness({ config = {} } = {}) {
     // A worker spawn as the native tool call would run it through the hooks.
     async spawn(sessionKey, params) {
       const agentId = /^agent:([^:]+):/.exec(sessionKey)[1];
-      const before = await hooks.before_tool_call(
-        { toolName: 'sessions_spawn', params },
-        { agentId, sessionKey },
-      );
+      const ctx = {
+        agentId,
+        sessionKey,
+        runId: 'parent-run',
+        toolCallId: `spawn-${++invocations}`,
+      };
+      const before = await hooks.before_tool_call({ toolName: 'sessions_spawn', params }, ctx);
       if (before?.block) return { blocked: before.blockReason };
-      const childSessionKey = `agent:opencode:acp:${native.sessions.length}`;
+      const childSessionKey = `agent:${params.agentId}:acp:${native.sessions.length}`;
       const row = native.session(childSessionKey);
       row.hasActiveRun = true;
-      hooks.after_tool_call(
+      row.spawnedBy = sessionKey;
+      await hooks.after_tool_call(
         {
           toolName: 'sessions_spawn',
           params: before?.params ?? params,
           result: { content: [], details: { status: 'accepted', childSessionKey, runId: 'r' } },
         },
-        { agentId, sessionKey },
+        ctx,
       );
       return { childSessionKey, params: before?.params ?? params };
     },

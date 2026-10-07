@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { AsyncResource } from 'node:async_hooks';
 import { Store } from './store.js';
-import { BoardRuntime } from './runtime.js';
+import { BoardRuntime, spawnAgentId } from './runtime.js';
 import { Bridge } from './bridge.js';
 import { agentLabel, currentConfig, PRIVATE_GUIDANCE, projectRoleContext } from './role-context.js';
 import {
@@ -123,11 +123,34 @@ const transcripts = () => import('openclaw/plugin-sdk/session-transcript-runtime
 // between them. An in-memory board belongs to its own registration.
 const COMPANION_RESET_MS = 5 * 60 * 1000;
 const boards = (globalThis[Symbol.for('jarvis-gilfoyle.boards')] ??= new Map());
+// Configuration is JSON: object insertion order is irrelevant, array order is not.
+const configIdentity = (cfg) =>
+  JSON.stringify(cfg, (_key, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.keys(value)
+            .sort()
+            .map((key) => [key, value[key]]),
+        )
+      : value,
+  );
 const sharedBoard = (cfg, create) => {
   if (cfg.statePath === ':memory:') return create();
-  const key = JSON.stringify(cfg);
+  const key = configIdentity(cfg);
   if (!boards.has(key)) boards.set(key, create());
   return boards.get(key);
+};
+// Native hooks expose these IDs optionally. Never match a launch by parent alone:
+// several overlapping calls can share one task session and even one turn.
+const spawnIdentity = (event, ctx) => {
+  const ids = ['runId', 'toolCallId'].map((field) => {
+    if (event?.[field] && ctx?.[field] && event[field] !== ctx[field]) return null;
+    const value = ctx?.[field] ?? event?.[field];
+    return typeof value === 'string' && value.length ? value : null;
+  });
+  return ids.every(Boolean)
+    ? JSON.stringify([ctx.sessionKey, ctx.sessionId ?? null, ...ids])
+    : null;
 };
 
 export default {
@@ -365,18 +388,71 @@ export default {
     });
     on('before_tool_call', (event, ctx) => {
       if (!isManagerAgent(agentOf(ctx)) || !isPrivateSession(ctx?.sessionKey)) return;
+      const covered =
+        event?.toolName === 'sessions_spawn' &&
+        agentOf(ctx) === cfg.engineeringAgentId &&
+        spawnAgentId(event.params) === cfg.worker?.agentId;
+      if (covered) {
+        const blocked = (reason) => ({ block: true, blockReason: reason });
+        if (board.admission)
+          return blocked(
+            'Worker launch invocation is pending; retry after its matching completion hook. Elapsed time and reload do not clear an unfinished call.',
+          );
+        const identity = spawnIdentity(event, ctx);
+        if (!identity)
+          return blocked('Worker admission needs native runId and toolCallId; spawn refused.');
+        // Board-owned, acquired synchronously before get/count can await. startOver
+        // replaces runtime/bridge but must never reset an unfinished invocation.
+        const claim = { identity, granted: false };
+        board.admission = claim;
+        return (async () => {
+          try {
+            const r = get();
+            const result = await r.beforeToolCall(event, ctx);
+            if (result?.block || board.runtime !== r) {
+              if (board.admission === claim) board.admission = null;
+              return result?.block
+                ? result
+                : blocked('Board reloaded while checking workers; retry.');
+            }
+            claim.granted = true;
+            return result;
+          } catch (error) {
+            // No launch permission was returned: this is a known prelaunch failure.
+            if (board.admission === claim) board.admission = null;
+            return blocked(
+              `Worker admission unavailable; retry: ${String(error?.message ?? error).slice(0, 300)}`,
+            );
+          }
+        })();
+      }
       return get().beforeToolCall(event, ctx);
     });
     on('after_tool_call', (event, ctx) => {
       if (event?.toolName !== 'sessions_spawn' || !isPrivateSession(ctx?.sessionKey)) return;
-      let details = event.result?.details;
-      if (!details?.childSessionKey)
-        try {
-          details = JSON.parse(event.result?.content?.[0]?.text ?? 'null');
-        } catch {
-          details = null;
-        }
-      if (details?.childSessionKey) get().recordWorker(ctx.sessionKey, details.childSessionKey);
+      const claim = board.admission;
+      const matching = claim?.granted && claim.identity === spawnIdentity(event, ctx);
+      try {
+        let details = event.result?.details;
+        if (!details?.childSessionKey)
+          try {
+            details = JSON.parse(event.result?.content?.[0]?.text ?? 'null');
+          } catch {
+            details = null;
+          }
+        const child = details?.childSessionKey;
+        if (typeof child === 'string' && child.startsWith('agent:'))
+          assert(get().recordWorker(ctx.sessionKey, child), 'worker recording unconfirmed');
+      } catch (error) {
+        api.logger?.warn?.(
+          `Worker recording failed: ${String(error?.message ?? error).slice(0, 300)}`,
+        );
+      } finally {
+        // This hook completes the matching invocation, not proof of no native effect.
+        // Record known children first, even on errors; failed recording is visible but
+        // cannot retain completed-call serialization. Late/unrelated hooks only record.
+        if (matching && board.admission === claim) board.admission = null;
+      }
     });
     on('agent_end', (_event, ctx) => {
       if (!isManagerAgent(agentOf(ctx))) return;

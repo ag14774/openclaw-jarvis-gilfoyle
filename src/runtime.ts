@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
+import { readStringParam } from 'openclaw/plugin-sdk/param-readers';
+import { normalizeAgentIdStrict } from 'openclaw/plugin-sdk/routing';
 import {
   agentForRole,
   isManagerAgent,
@@ -35,6 +37,14 @@ const ZERO_USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 const HOLDERS = ['product', 'engineering', 'user'];
+
+// Reuse the native reader's alias precedence and target canonicalization.
+export const spawnAgentId = (params) => {
+  const target = readStringParam(params ?? {}, 'agentId');
+  if (!target) return undefined;
+  const normalized = normalizeAgentIdStrict(target);
+  return normalized.ok ? normalized.value : undefined;
+};
 
 const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 export function text(value, max, name) {
@@ -808,6 +818,78 @@ export class BoardRuntime {
     }
     return live;
   }
+  // Admission observes current direct engineering workers, not perpetual history or
+  // descendant activity. A missing historical row is not proof of a physical stop.
+  // Recent records bridge native visibility; history remains append-only.
+  async runningBoardWorkers() {
+    const { workerAgentId } = topology();
+    const counted = new Set();
+    const records = () => this.store.all('SELECT id,created,workers FROM tasks ORDER BY id');
+    const tasks = records();
+    const parents = new Set(tasks.map((row) => taskSessionKey('engineering', row)));
+    const sessions = new Map();
+    let offset = 0;
+    for (;;) {
+      const result = await this.rpc('sessions.list', {
+        agentId: workerAgentId,
+        archived: 'all',
+        limit: 200,
+        offset,
+      });
+      assert(
+        Array.isArray(result?.sessions) && typeof result.hasMore === 'boolean',
+        'Worker session list unavailable or incomplete',
+      );
+      for (const session of result.sessions) sessions.set(session.key, session);
+      if (!result.hasMore) break;
+      assert(
+        result.sessions.length &&
+          Number.isSafeInteger(result.nextOffset) &&
+          result.nextOffset > offset,
+        'Worker session list pagination unconfirmed',
+      );
+      offset = result.nextOffset;
+    }
+    for (const session of sessions.values()) {
+      if (!session.key?.startsWith(`agent:${workerAgentId}:`)) continue;
+      // Known other parents are outside this count; idle rows need no parent proof.
+      if (
+        session.hasActiveRun === false ||
+        (typeof session.spawnedBy === 'string' &&
+          session.spawnedBy &&
+          !parents.has(session.spawnedBy))
+      )
+        continue;
+      assert(
+        typeof session.hasActiveRun === 'boolean' &&
+          typeof session.spawnedBy === 'string' &&
+          session.spawnedBy.length,
+        `Worker ${session.key} native activity or parent unknown`,
+      );
+      counted.add(session.key);
+    }
+    for (const row of tasks) {
+      for (const worker of JSON.parse(row.workers)) {
+        if (
+          !worker.key.startsWith(`agent:${workerAgentId}:`) ||
+          counted.has(worker.key) ||
+          this.now() - worker.at >= WORKER_GRACE_MS
+        )
+          continue;
+        const session = sessions.get(worker.key);
+        assert(
+          typeof session?.spawnedBy === 'string' && session.spawnedBy.length,
+          `Worker ${worker.key} native parent unknown during visibility grace`,
+        );
+        if (session.spawnedBy === taskSessionKey('engineering', row)) counted.add(worker.key);
+      }
+    }
+    assert(
+      JSON.stringify(records()) === JSON.stringify(tasks),
+      'Worker records changed while counting; retry',
+    );
+    return counted.size;
+  }
   async abortWorkers(task) {
     for (const worker of task.workers) {
       const key = worker.key;
@@ -843,14 +925,16 @@ export class BoardRuntime {
     if (!scope || typeof childSessionKey !== 'string' || !childSessionKey.startsWith('agent:'))
       return;
     const task = this.store.task(scope.taskId);
-    if (task.workers.some((worker) => worker.key === childSessionKey)) return;
+    assert(task.created === scope.created, 'Worker parent belongs to a removed task');
+    if (task.workers.some((worker) => worker.key === childSessionKey)) return true;
     this.store.run(
       "UPDATE tasks SET workers=?,idle_wakes=0,check_at=CASE WHEN status='cancelled' THEN ? ELSE check_at END WHERE id=?",
-      JSON.stringify([...task.workers, { key: childSessionKey, at: this.now() }].slice(-50)),
+      JSON.stringify([...task.workers, { key: childSessionKey, at: this.now() }]),
       this.now(),
       task.id,
     );
     if (task.status === 'cancelled') this.requestTick();
+    return true;
   }
 
   // ---- Hook support (private sessions and project chats only) -----------------------
@@ -1050,6 +1134,7 @@ export class BoardRuntime {
     let task, project;
     try {
       task = this.store.task(scope.taskId);
+      assert(task.created === scope.created);
       project = this.store.project(task.project);
     } catch {
       return { block: true, blockReason: 'This private session has no task.' };
@@ -1071,7 +1156,11 @@ export class BoardRuntime {
         blockReason: `Project ${project.name} is ${project.state}; no new workers.`,
       };
     const { workerAgentId, workerProfiles, workerRuntime, workerLimit } = topology();
-    if (params.agentId !== workerAgentId || !workerProfiles.length) return undefined;
+    if (spawnAgentId(params) !== workerAgentId) return undefined;
+    if (!workerProfiles.length) {
+      assert(scope.role !== 'engineering', 'Worker profiles unavailable');
+      return undefined;
+    }
     const profile =
       workerProfiles.find((p) => p.id === params.model) ??
       workerProfiles.find(
@@ -1083,19 +1172,30 @@ export class BoardRuntime {
         block: true,
         blockReason: `Set model to a worker profile id: ${workerProfiles.map((p) => p.id).join(', ')}.`,
       };
-    let running = 0;
-    for (const row of this.store.all("SELECT * FROM tasks WHERE status='open' AND workers<>'[]'"))
-      running += (await this.liveWorkers({ ...row, workers: JSON.parse(row.workers) })).filter(
-        (key) => key.startsWith(`agent:${workerAgentId}:`),
-      ).length;
-    if (running >= workerLimit)
-      return {
-        block: true,
-        blockReason: `${running} workers are already running (limit ${workerLimit}); wait for one to finish.`,
-      };
+    if (scope.role === 'engineering') {
+      const running = await this.runningBoardWorkers();
+      // Count may await slow native reads. Pausing/cancelling during it must win.
+      const current = this.store.task(task.id);
+      const currentProject = this.store.project(task.project);
+      if (
+        current.created !== scope.created ||
+        current.status !== 'open' ||
+        currentProject.state !== 'active'
+      )
+        return {
+          block: true,
+          blockReason: 'Task or project changed while checking workers; read it again.',
+        };
+      if (running >= workerLimit)
+        return {
+          block: true,
+          blockReason: `${running} workers are already running (limit ${workerLimit}); wait for one to finish.`,
+        };
+    }
     return {
       params: {
         ...params,
+        agentId: workerAgentId,
         model: profile.model,
         ...(profile.thinking ? { thinking: profile.thinking } : {}),
         runtime: workerRuntime,
