@@ -27,7 +27,7 @@ To upgrade dependencies deliberately, change the pin, regenerate with `uv lock`,
 
 `docs-pages.yml` builds on pushes to **main**. Its build job has only repository read permission and uploads the normal Pages artifact; a separate `github-pages` deployment job has `pages: write` and `id-token: write`. Zensical build caching is not used in CI, following official publishing guidance.
 
-The configured canonical URL, **`https://ag14774.github.io/openclaw-jarvis-gilfoyle/`**, is a conventional candidate, **not verified live**. Pages publishing requires repository eligibility and a GitHub Actions publishing source configured by the owner. This private repository's existing token Pages GET returned **403**; deployment eligibility and hosting remain unverified. A successful local or PR build is independent of those prerequisites.
+The configured canonical URL is **`https://ag14774.github.io/openclaw-jarvis-gilfoyle/`**. Before enabling deployment, verify that the repository is eligible for Pages and select GitHub Actions as its publishing source. A private source repository can still produce a public site: review the generated artifact before publishing. A successful local or PR build does not establish that hosting is configured or live.
 
 ## Official guidance
 
