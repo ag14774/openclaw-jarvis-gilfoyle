@@ -140,6 +140,7 @@ export class BoardRuntime {
     this.captures = new Map(); // session -> route resolution still in progress
     this.routeCache = new Map();
     this.wakes = new Map(); // session -> dispatch time (until the run shows up as live)
+    this.deliveries = new Map(); // outbox id -> the whole in-flight attempt, including fallback
     this.seen = new Map(); // "session|task" -> newest note id read or written in this turn
     this.ownerRouteCache = null;
     this.stopped = false;
@@ -501,9 +502,13 @@ export class BoardRuntime {
     // an outstanding poke, including when its turn acts before dispatch acknowledges.
     const poke = ROLES.includes(newHolder) && newHolder !== caller.role;
     const outbox = this.store.tx(() => {
+      // The notification waiver and lifecycle checks also depend on the project.
+      const currentProject = this.store.project(project.id);
       assert(
-        this.taskUnchanged(task, lastNote),
-        `Task #${task.id} changed while checking workers; read it with show, then decide again`,
+        this.taskUnchanged(task, lastNote) &&
+          currentProject.state === project.state &&
+          JSON.stringify(currentProject.route) === JSON.stringify(project.route),
+        `Task #${task.id} or its project changed while checking workers; read it with show, then decide again`,
       );
       if (note) this.store.note(task.id, caller.role, note);
       this.store.run(
@@ -584,12 +589,20 @@ export class BoardRuntime {
     this.ownerRouteCache = { route: conversation(matches[0]), at: this.now() };
     return this.ownerRouteCache.route;
   }
+  // Coalesce callers for the entire attempt and fallback sequence. Recursive fallback
+  // uses deliverAttempt directly so it never waits on its own in-flight promise.
+  deliver(id) {
+    if (this.deliveries.has(id)) return this.deliveries.get(id);
+    const pending = this.deliverAttempt(id).finally(() => this.deliveries.delete(id));
+    this.deliveries.set(id, pending);
+    return pending;
+  }
   // One attempt for one outbox row. "sent" and "queued" hand the message to OpenClaw's own
   // durable delivery; the same operation id never sends twice. Attached files follow the
   // text as native message sends, each with its own idempotency key. The project chat is
   // tried first, then the owner DM (prefixed with the project name); the route is never
   // rebound. A delivered message is then added to the session of the chat it reached.
-  async deliver(id) {
+  async deliverAttempt(id) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
     if (!row || row.state !== 'pending') return row ? { state: row.state } : undefined;
     const project = this.store.project(row.project);
@@ -623,10 +636,7 @@ export class BoardRuntime {
         const route = delivery.toOwner ? await this.ownerRoute() : project.route;
         // Freeze an attempted send as well as its eventual receipt: native retries with
         // the same identity may return an earlier result after a rebind or name change.
-        const saved = JSON.parse(
-          this.store.get('SELECT receipt FROM outbox WHERE id=?', id).receipt ?? 'null',
-        );
-        delivery = saved?.destination ? saved : { ...delivery, destination: route };
+        delivery = { ...delivery, destination: route };
         this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(delivery), id);
       }
       assert(
@@ -644,17 +654,9 @@ export class BoardRuntime {
           message: delivery.sentText,
         });
         // Commit text acceptance before attachments. A file failure must never move
-        // already-delivered text (or the remaining files) to another destination. A
-        // concurrent attempt's late uncertainty must not replace an accepted receipt.
-        delivery = this.store.tx(() => {
-          const saved = JSON.parse(
-            this.store.get('SELECT receipt FROM outbox WHERE id=?', id).receipt ?? 'null',
-          );
-          if (saved?.status === 'sent' || saved?.status === 'queued') return saved;
-          const result = { ...delivery, ...receipt, status: receipt?.status };
-          this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(result), id);
-          return result;
-        });
+        // already-delivered text (or the remaining files) to another destination.
+        delivery = { ...receipt, ...delivery, status: receipt?.status };
+        this.store.run('UPDATE outbox SET receipt=? WHERE id=?', JSON.stringify(delivery), id);
       }
       if (delivery.status === 'sent' || delivery.status === 'queued')
         for (const [index, path] of JSON.parse(row.files).entries())
@@ -676,10 +678,6 @@ export class BoardRuntime {
         .split('\n')[0]
         .slice(0, 300);
     }
-    const current = this.store.get('SELECT state,receipt FROM outbox WHERE id=?', id);
-    if (current.state !== 'pending') return { state: current.state };
-    const saved = current.receipt ? JSON.parse(current.receipt) : null;
-    if (saved?.status === 'sent' || saved?.status === 'queued') delivery = saved;
     const status = delivery?.status;
     const textAccepted = status === 'sent' || status === 'queued';
     if (textAccepted && !error) {
@@ -703,7 +701,7 @@ export class BoardRuntime {
         error,
         row.id,
       );
-      return this.deliver(row.id);
+      return this.deliverAttempt(row.id);
     }
     const failed = status === 'suppressed' || attempts >= FALLBACK_ATTEMPTS;
     this.store.run(

@@ -204,6 +204,59 @@ for (const change of [
   });
 }
 
+for (const message of [undefined, 'Completed']) {
+  test(`completion revalidates project binding before ${message ? 'waiving the supplied message' : 'closing without a message'}`, async (t) => {
+    const h = fixture(t);
+    const product = { ...caller('product'), source: { route: group } };
+    const id = h.runtime.addTask(product, { project: 'p', title: 'Request' }).task;
+    const w = h.worker(id);
+    const g = gate();
+    let first = true;
+    h.native.hook = async (method, params, next) => {
+      if (first && method === 'sessions.list' && params.search === w) {
+        first = false;
+        g.enter();
+        await g.waiting;
+      }
+      return next();
+    };
+    const earlier = h.runtime.updateTask(product, {
+      task: id,
+      status: 'done',
+      note: 'Accepted',
+      message,
+    });
+    const rejected = assert.rejects(earlier, /changed while checking workers.*show.*decide again/);
+    await g.entered;
+    h.runtime.updateProject(
+      { ...caller('product', 'new-chat'), source: { route: rebound } },
+      { project: 'p', use_this_chat: true },
+    );
+    const latest = h.store.task(id);
+    g.release();
+    await rejected;
+    assert.deepEqual(h.store.task(id), latest);
+    assert.equal(h.store.notes(id).length, 0);
+    assert.equal(h.store.get('SELECT COUNT(*) n FROM outbox').n, 0);
+    assert.equal(h.store.project('p').route.conversationRef, rebound.conversationRef);
+
+    h.runtime.show(product, { task: id });
+    await assert.rejects(
+      h.runtime.updateTask(product, { task: id, status: 'done', note: 'Accepted' }),
+      /needs message/,
+    );
+    await h.runtime.updateTask(product, {
+      task: id,
+      status: 'done',
+      note: 'Accepted after reread',
+      message: 'Completed',
+    });
+    assert.equal(h.store.task(id).status, 'done');
+    assert.equal(h.native.sends.length, 1);
+    assert.equal(h.native.sends[0].conversationRef, rebound.conversationRef);
+  });
+}
+
 test('cancelled-worker abort failure recovers from existing rows after restart', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'jg-cancel-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -676,7 +729,7 @@ test('uncertain text retries preserve operation, destination and wording through
   assert.equal(sends[0].conversationRef, owner.conversationRef);
 });
 
-test('late concurrent delivery failure cannot discard accepted text and trigger fallback', async (t) => {
+test('overlapping deliveries share late text acceptance and keep failed files at the project chat', async (t) => {
   const h = fixture(t);
   const dir = mkdtempSync(join(tmpdir(), 'jg-concurrent-file-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -700,17 +753,19 @@ test('late concurrent delivery failure cannot discard accepted text and trigger 
       first = false;
       g.enter();
       await g.waiting;
-      throw Error('late failure');
     }
     if (method === 'message.action') throw Error('file unavailable');
     return next();
   };
   const late = h.runtime.deliver(id);
   await g.entered;
-  await h.runtime.deliver(id);
+  const overlapping = h.runtime.deliver(id);
   g.release();
-  await late;
+  const results = await Promise.all([late, overlapping]);
+  assert.deepEqual(results, [results[0], results[0]]);
+  assert.equal(results[0].state, 'retrying');
   const row = h.store.get('SELECT * FROM outbox WHERE id=?', id);
+  assert.equal(row.state, 'pending');
   assert.equal(row.fallback, 0);
   assert.equal(JSON.parse(row.receipt).status, 'sent');
   assert.equal(JSON.parse(row.receipt).destination.conversationRef, group.conversationRef);
@@ -719,6 +774,107 @@ test('late concurrent delivery failure cannot discard accepted text and trigger 
       .filter(([m]) => m === 'conversations.send')
       .every(([, params]) => params.conversationRef === group.conversationRef),
   );
+  assert.equal(h.native.calls.filter(([m]) => m === 'conversations.send').length, 1);
+  assert.equal(h.native.calls.filter(([m]) => m === 'message.action').length, 1);
+});
+
+test('overlapping deliveries coalesce through fallback and retain the owner receipt until same-destination files succeed after restart', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'jg-concurrent-fallback-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'board.sqlite');
+  const h = fixture(t, { path });
+  const file = join(dir, 'file.txt');
+  writeFileSync(file, 'bytes');
+  const id = h.store.enqueue('p', null, 'Words', [file]);
+  const projectOperation = `jarvis-gilfoyle-${id}-project`;
+  const ownerOperation = `jarvis-gilfoyle-${id}-owner`;
+  h.store.run(
+    'UPDATE outbox SET attempts=2,receipt=? WHERE id=?',
+    JSON.stringify({
+      destination: group,
+      sentText: 'Words',
+      toOwner: false,
+      operationId: projectOperation,
+    }),
+    id,
+  );
+  const projectGate = gate();
+  const fileGate = gate();
+  let first = true;
+  h.native.hook = async (method, params, next) => {
+    if (method === 'conversations.send' && params.conversationRef === group.conversationRef) {
+      if (first) {
+        first = false;
+        projectGate.enter();
+        await projectGate.waiting;
+      }
+      return { status: 'unknown' };
+    }
+    if (method === 'message.action' && params.params.to === owner.target) {
+      fileGate.enter();
+      await fileGate.waiting;
+      throw Error('owner file offline');
+    }
+    return next();
+  };
+  const late = h.runtime.deliver(id);
+  await projectGate.entered;
+  const overlapping = h.runtime.deliver(id);
+  // Give a competing attempt time to reach owner acceptance before the earlier
+  // project response returns; coalesced callers must instead wait together.
+  await new Promise((resolve) => setImmediate(resolve));
+  projectGate.release();
+  await fileGate.entered;
+  const duringFallback = h.runtime.deliver(id);
+  assert.equal(h.store.get('SELECT state FROM outbox WHERE id=?', id).state, 'pending');
+  fileGate.release();
+  const results = await Promise.all([late, overlapping, duringFallback]);
+  assert.deepEqual(results, Array(3).fill(results[0]));
+  assert.equal(results[0].state, 'retrying');
+  const row = h.store.get('SELECT * FROM outbox WHERE id=?', id);
+  assert.equal(row.state, 'pending');
+  assert.equal(row.fallback, 1);
+  assert.equal(row.attempts, 1);
+  const receipt = JSON.parse(row.receipt);
+  assert.equal(receipt.status, 'sent');
+  assert.deepEqual(receipt.destination, owner);
+  assert.equal(receipt.sentText, '[Original] Words');
+  assert.equal(receipt.operationId, ownerOperation);
+  assert.equal(receipt.toOwner, true);
+  const sends = h.native.calls.filter(([m]) => m === 'conversations.send').map(([, p]) => p);
+  assert.deepEqual(
+    sends.map((p) => [p.conversationRef, p.operationId, p.message]),
+    [
+      [group.conversationRef, projectOperation, 'Words'],
+      [owner.conversationRef, ownerOperation, '[Original] Words'],
+    ],
+  );
+  const files = () => h.native.calls.filter(([m]) => m === 'message.action').map(([, p]) => p);
+  assert.deepEqual(
+    files().map((p) => p.params.to),
+    [owner.target],
+  );
+  assert.equal(files()[0].idempotencyKey, `${ownerOperation}-file-1`);
+  assert.equal(h.native.transcripts.length, 0);
+
+  h.store.run(
+    'UPDATE projects SET route=?,name=? WHERE id=?',
+    JSON.stringify(rebound),
+    'Renamed',
+    'p',
+  );
+  h.native.hook = null;
+  const reopened = new Store(path, { now: h.now });
+  t.after(() => reopened.close());
+  const restarted = new BoardRuntime(reopened, h.runtime.rpc, { now: h.now });
+  assert.equal((await restarted.deliver(id)).state, 'sent');
+  assert.equal(reopened.get('SELECT state FROM outbox WHERE id=?', id).state, 'handed');
+  assert.deepEqual(
+    JSON.parse(reopened.get('SELECT receipt FROM outbox WHERE id=?', id).receipt),
+    receipt,
+  );
+  assert.equal(h.native.calls.filter(([m]) => m === 'conversations.send').length, 2);
+  assert.deepEqual(files()[1], files()[0]);
 });
 
 test('an ambiguous wake with unreadable liveness waits for native visibility before retrying', async (t) => {
