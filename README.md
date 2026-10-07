@@ -104,6 +104,8 @@ The [board reference](docs/board-reference.md) covers all seven `project_board` 
 
 See [enforcement and delivery rules](docs/board-reference.md#enforcement) for exact boundaries and [testing limitations](TESTING.md#native-integration) for live models, real channels and real-Gateway cleanup.
 
+For consistent private board snapshots and safe staged verification, see [backup and recovery](docs/recovery.md). The operator utility never replaces the live board.
+
 ## Development
 
 ```bash

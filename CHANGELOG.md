@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Revalidate task row facts and latest note identity at commit time after native awaits, preserving newer cancellation and other updates. Retry recorded cancelled workers from existing rows, including late spawn records, without treating unknown liveness as confirmed termination.
+- Count only accepted, unchanged-task wakes toward inactivity; failed dispatches retain changes and retry, and late acknowledgements preserve new check-ins. Existing three-idle-wake stalls remain.
+- Refuse nonempty schema-zero databases before board DDL, permissions or journal changes. Preserve original delivery destination, operation identity and exact sent text in existing receipt JSON for attachment retries and deferred chat history; uncertain legacy destinations remain visible. No schema, status, tool operation or setting was added.
+- Ship a path-explicit SQLite backup and staged verification utility with private snapshots, overwrite refusal and recovery guidance. Verification does not authorize live replacement or qualify full-host/off-host recovery. Worker capacity behavior is unchanged.
+
 ## 6.6.4 - 2026-10-05
 
 - The board recovers by itself from a gateway companion that keeps failing. The companion process was already restarted on the next request after a crash, but when restarting did not help (as in the 6.6.1 reload outage) every scan kept failing until someone noticed. When the companion has given no answer for five minutes, the scan now replaces it and the runtime with fresh ones from the current code, logs that it did, and tries again; it repeats after another five minutes if needed.

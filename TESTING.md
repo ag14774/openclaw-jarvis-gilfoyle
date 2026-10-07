@@ -42,6 +42,26 @@ Not covered by automated tests: live model behavior, code-mode tool dispatch thr
 
 `npm run check` builds `dist/`, syntax-checks it and runs `scripts/verify-dist.mjs` against the compiled registration and store. `npm run pack:check` inspects the package boundary.
 
+## Recovery Utility
+
+`npm run test:recovery` runs `test/recovery.test.ts` on disposable private temporary
+fixtures only, without rebuilding. It is also included in `npm test`. The suite
+uses the existing Store solely to make fixtures; the operator utility has no
+runtime imports or dependency on OpenClaw. It covers committed, uncheckpointed WAL
+data, exclusion of an uncommitted write, separate staged verification and hashes,
+private permissions, no source checkpoint/journal change, existing destinations
+and aliases, concurrent destination refusal, malformed/foreign/incompatible schema,
+foreign-key violations, invalid CLI arguments, missing sources and refusal to
+stage a WAL database. Tests remove their fixtures and never contact a gateway,
+launch a worker or read real board/session data.
+
+`scripts/board-backup.mjs` is the only operator script included in the package.
+`backup` and `stage` create a new private directory with a database and report;
+`verify` opens the explicitly supplied file read-only. See
+[recovery](docs/recovery.md) for prerequisites, read-only WAL coordination caveats
+and the separately authorized boundary before any live replacement. This is local
+SQLite restore-readability evidence, not a live/off-host/full-host recovery test.
+
 ## Formatting
 
 `npm run format` applies Prettier. `npm run format:check` is enforced in CI.
