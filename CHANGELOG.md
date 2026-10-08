@@ -4,6 +4,7 @@
 
 - Coordination skill (protocol 11.15): merge a PR only after CI passed on top of the current main, because parallel PRs can each pass alone and still break each other. Before a decision that is hard to reverse or has real trade-offs, engineering gets a second opinion from a worker, using the profile meant for design decisions when one is configured. Notes are written for a reader who knows the project but not the work in progress, linking the PR instead of listing hashes and run ids.
 - Code-review skill: only fixes for blocking findings need another review; smaller follow-ups need the engineering manager's own check.
+- The README logo now loads from GitHub, so it also shows on ClawHub, whose image proxy accepts only certain hosts. The logo is a 256-colour PNG at 1200 pixels wide, 103 KB instead of 973 KB.
 
 ## 6.7.0 - 2026-10-08
 
