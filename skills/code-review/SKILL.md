@@ -41,4 +41,4 @@ Report in about 400 words or fewer:
 2. Fix blocking findings with the smallest change, deletion included. Decide should-fix findings and notes by their cost, and record the ones you skip and why.
 3. Push back, with reasons, on findings that are wrong for this repository or conflict with its rules.
 4. A finding that conflicts with a decision the owner made goes back to the owner, not into code.
-5. Review again after fixing. Any number of rounds is fine while the fixes stay proportionate. When a second round still finds new blocking defects in the same mechanism, stop patching: redesign that mechanism more simply.
+5. Review again after fixing blocking findings. Fixes for should-fix findings and notes, and other small follow-ups, need only your own check of the diff and the tests. Any number of rounds is fine while the fixes stay proportionate. When a second round still finds new blocking defects in the same mechanism, stop patching: redesign that mechanism more simply.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 6.7.1 - 2026-10-08
+
+- Coordination skill (protocol 11.15): merge a PR only after CI passed on top of the current main, because parallel PRs can each pass alone and still break each other. Before a decision that is hard to reverse or has real trade-offs, engineering gets a second opinion from the worker profile meant for design decisions. Notes are written for a reader who knows the project but not the work in progress, linking the PR instead of listing hashes and run ids.
+- Code-review skill: only fixes for blocking findings need another review; smaller follow-ups need the engineering manager's own check.
+
 ## 6.7.0 - 2026-10-08
 
 Board schema 19: tasks have a `plan` column. There is no migration; with the gateway stopped, the operator applies `ALTER TABLE tasks ADD COLUMN plan TEXT NOT NULL DEFAULT ''` and `PRAGMA user_version=19` to the board file.

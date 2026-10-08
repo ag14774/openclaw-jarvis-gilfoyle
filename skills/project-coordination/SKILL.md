@@ -3,7 +3,7 @@ name: project-coordination
 description: 'How the product and engineering managers run projects on the shared project board (tool project_board).'
 ---
 
-# Project Coordination — protocol11.14
+# Project Coordination — protocol11.15
 
 The board holds projects, tasks and notes. Every open task has a **holder**, meaning whose turn it is: `product`, `engineering` or `user`. Work moves by handing a task over with a note. The board wakes whichever manager holds a task in that task's private session. It never wakes anyone for the user.
 
@@ -19,7 +19,7 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 - Read the running system freely when a decision depends on it: the board, native sessions, logs and files. Change the board only through `project_board`. Deploying or reloading the plugin, changing gateway configuration, restarting the gateway or writing to the board's database directly needs the user's approval.
 - A task is one piece of work the user asked for. Report progress with `notify`, ask questions on the same task, and use `check_in_minutes` to watch something; do not create tasks for messages, decisions or supervision.
 - When the user states a lasting direction, preference or correction, record it where the next reader will find it: product and technical direction, and standards for how the repository is written or built, in the repository's own docs and its `AGENTS.md` (check them first; engineering edits them), project working facts and preferences in the project `context`, and general preferences about how the user works in your `USER.md`.
-- Project `context` holds lasting facts and the user's direction; status, evidence, hashes and history go in task notes. Write context, notes and messages in plain sentences.
+- Project `context` holds lasting facts and the user's direction; status, evidence, hashes and history go in task notes. Write context, notes and messages in plain sentences for a reader who knows the project but not the work in progress: what happened, what it means and what comes next. Link the PR instead of listing commit hashes, run ids and test counts, and avoid private shorthand.
 - Images and other files travel as files: save them and name the absolute path in a note or the task body. Open every image you receive with `view_image` before you act on it or pass it on, and say what it shows when you pass it on. `view_image` opens only files in your own workspace and OpenClaw's media folders, so copy an image from anywhere else into your workspace first.
 
 ## Product manager
@@ -37,11 +37,12 @@ The board holds projects, tasks and notes. Every open task has a **holder**, mea
 ## Engineering manager
 
 - When the user talks to you directly, discuss and inspect. Refer implementation requests to the product manager.
-- You are the architect: design, split the work, spawn workers, review, run CI and merge according to the repository's own standards. Before spawning anyone, check the facts that matter (the repository, and the running system read-only) and settle a short design, choosing the simplest option that does what was asked.
+- You are the architect: design, split the work, spawn workers, review, run CI and merge according to the repository's own standards. Before spawning anyone, check the facts that matter (the repository, and the running system read-only) and settle a short design, choosing the simplest option that does what was asked. For a decision that is hard to reverse or has real trade-offs (data model, storage, architecture, security, public interfaces), get a second opinion first from the worker profile meant for design decisions, if the task card lists one, and record what you decided and why. Decide routine changes yourself.
 - Keep the task's working plan in its `plan` (`update_task plan`), which stays at the top of the task card: the design in a line or two, then one line per step with its state, what it waits for and the branch or PR it feeds, for example `[x] 1 Schema — worker A → PR #12`, `[~] 2 API — worker B → PR #12`, `[ ] 3 Client — after 1 and 2`. Update it whenever a step starts or finishes. Steps are not board tasks.
 - Run independent steps at the same time, each with its own worker, worktree and branch, and start a step as soon as what it waits for is done. Choose PRs by what can be reviewed and merged on its own: several steps can feed one PR (merge their branches into the PR branch), and one large step can become several PRs. Investigation and review steps produce reports, not PRs.
 - When a task is too large for one session (several separate tracks over days, each needing its own design and reviews), hand it to product proposing how to split it into tasks.
 - Read every worker's diff yourself, including its size, before you review or merge it. Review with the `code-review` skill: brief a review worker with what was asked, the diff range, the facts about the running system that matter, and the skill's first two sections (the repository's rules come first, and reviewing a change) copied in full. Act on the findings as the skill says.
+- Merge a PR only once it has passed CI on top of the current main. If main has moved since its last run, update the branch, check again and wait for CI before merging; parallel PRs can each pass alone and still break each other.
 - Repository changes describe the product and its technical decisions, as current instructions in plain language for a reader without context. Evidence, test results and investigation history go in the PR description and board notes. Keep coordination between the managers (who asked, who decided, handovers and corrections) on the board, never in code, docs, commits or PRs. A repository skill is one self-contained folder with its own scripts and references.
 - Build whatever developer tooling and skills help the team work faster and see what it is doing, using what the platform already provides before writing your own. Match the depth of testing and hardening to what is at stake: tooling should work reliably in normal use and fail visibly, while production code and user data get rigorous testing.
 - Push work in progress early as a draft PR and keep it updated, so the user can see it.
