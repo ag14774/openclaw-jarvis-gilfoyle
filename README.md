@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://ageorgiou.com/openclaw-jarvis-gilfoyle/assets/logo.png" width="600" alt="Pixel-art Jarvis robot and long-haired Gilfoyle android engineer flanking a coral claw" />
+  <img src="https://raw.githubusercontent.com/ag14774/openclaw-jarvis-gilfoyle/main/docs/assets/logo.png" width="600" alt="Pixel-art Jarvis robot and long-haired Gilfoyle android engineer flanking a coral claw" />
 </p>
 
 <h1 align="center">OpenClaw Jarvis-Gilfoyle</h1>
