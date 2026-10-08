@@ -10,7 +10,10 @@ does not back up those systems. Never automatically restore an old board.
 
 Use Node with `node:sqlite` and its `backup` API (the repository's supported Node
 range; tested on **26.8.1**). The utility is self-contained and shipped in the
-package; it needs neither a build nor OpenClaw dependencies. Supply your own
+package; it needs neither a build nor OpenClaw dependencies. It accepts only the
+board schema of its own version, so run the copy in the installed plugin's
+directory (for example `~/.openclaw/extensions/jarvis-gilfoyle`), which matches
+the live board. The commands below run from that directory. Supply your own
 paths, taken from the intended plugin configuration's `statePath`. There is no
 default source, automatic discovery, gateway call, service or configuration change.
 
