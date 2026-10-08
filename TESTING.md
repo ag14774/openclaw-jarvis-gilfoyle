@@ -15,6 +15,7 @@
 - roles, project isolation and closed tasks;
 - stall reporting and check-ins;
 - workers: profiles, the limit, cancellation and the done guard;
+- the task plan: shown on the card, kept by other updates, replaced and cleared;
 - pause and resume;
 - per-role concurrency;
 - delivery fallback and retry identity;

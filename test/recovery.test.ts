@@ -155,7 +155,7 @@ test('foreign schema-zero, mismatched version, and malformed sources are refused
   check.close();
 });
 
-test('schema-18 labels do not admit incorrect columns or extra objects', async (t) => {
+test('schema-19 labels do not admit incorrect columns or extra objects', async (t) => {
   const { root, source, store } = fixture(t);
   store.db.exec('ALTER TABLE outbox RENAME COLUMN recorded TO other');
   await assert.rejects(createCopy('backup', source, join(root, 'refused')), /columns/);
@@ -243,5 +243,5 @@ test('CLI validates arguments and verifies without gateway or runtime imports', 
     { encoding: 'utf8', cwd: root },
   );
   assert.equal(verify.status, 0, verify.stderr);
-  assert.equal(JSON.parse(verify.stdout).schema, 18);
+  assert.equal(JSON.parse(verify.stdout).schema, 19);
 });

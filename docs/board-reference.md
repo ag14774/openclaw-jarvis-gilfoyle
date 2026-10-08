@@ -22,10 +22,10 @@ Both managers use one tool, `project_board`, with an `operation` and its fields.
 | `create_project` | Product only. Takes `name` and optional `context`; uses the chat of the current user message when available.                                                |
 | `update_project` | `name`, `state` and `use_this_chat` (product only), or `context` (either manager).                                                                          |
 | `add_task`       | `title`, optional `body` and `holder`. New tasks are held by engineering by default, or product; to ask the user first, add for product and then hand over. |
-| `update_task`    | `note`, handover (`holder`), close or reopen (`status`), `message` with optional `attachments`, `check_in_minutes`.                                         |
+| `update_task`    | `note`, handover (`holder`), close or reopen (`status`), `message` with optional `attachments`, `check_in_minutes`, `plan`.                                 |
 | `notify`         | Product only. `message` to the user in the project chat, with optional `attachments`.                                                                       |
 
-`check_in_minutes` accepts 1–10080; an update without it schedules the next check-in for 60 minutes. `attachments` travel with a message, not on their own.
+`check_in_minutes` accepts 1–10080; an update without it schedules the next check-in for 60 minutes. `attachments` travel with a message, not on their own. `plan` is the task's working plan, free text up to 4,000 characters that the board never interprets. Each `plan` replaces the previous one, an empty one clears it, and it is shown at the top of the task card and by `show`.
 
 ## Scheduling and model choice
 
@@ -77,7 +77,7 @@ Required configuration is shown in [getting started](getting-started.md#configur
 
 | Setting                                                  | Default / constraint                                                                                                       |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `statePath`                                              | Required absolute path to a new file or schema 18 board. No automatic migration. `:memory:` is accepted for ephemeral use. |
+| `statePath`                                              | Required absolute path to a new file or schema 19 board. No automatic migration. `:memory:` is accepted for ephemeral use. |
 | `productAgentId`, `engineeringAgentId`, `worker.agentId` | Required, distinct OpenClaw agent IDs.                                                                                     |
 | `ownerChat`                                              | Required `channel`, `accountId`, `to`; optional `threadId`. The owner's direct chat with product, used for fallback.       |
 | `worker.profiles`                                        | Required, 1–8 profiles with `id` and `model`; optional `thinking` and `description`.                                       |

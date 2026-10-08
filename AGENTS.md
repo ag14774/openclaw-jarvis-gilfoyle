@@ -1,13 +1,42 @@
 # Repository engineering standards
 
-This plugin is a small board, wake scan and delivery substrate for cooperative agents on a trusted host. Agents own interpretation and wording; plugin code enforces cheap mechanical invariants from callers, existing rows and native APIs. Preserve personal assistance outside project work.
+This file takes precedence over general defaults and over any skill's default rules, including the code-review skill's. Where they differ, follow this file.
 
-Before changes, inspect the current source, bundled project-coordination skill, README, docs/board-reference.md, TESTING.md and CHANGELOG.md. Make the smallest requested change. Prefer better agent procedure, correction or simplification of existing mechanisms over additional orchestration. Never parse free-text notes, descriptions or messages for machine meaning or add incident-specific branches. New tables, statuses, tool operations or settings require explicit approval. Material architecture, security, spending and production decisions remain with the owner.
+## What this plugin is and where it runs
 
-Keep SQLite transactions synchronous; revalidate decisions after native awaits before committing. Native sessions are authoritative for liveness, native receipts for delivery. Preserve uncertainty, retry from existing durable facts, and never claim a hard limit or confirmed effect without evidence. Trusted-host guards are not hostile-code containment.
+The plugin is a small substrate: a board (projects, tasks with a holder, notes, messages), wake-ups and guaranteed delivery for two cooperative manager agents on one trusted host. Agents interpret, plan, decide and write the wording; the plugin keeps the records, wakes the right agent and delivers messages.
 
-Use fake native APIs and disposable files for regression coverage. Run npm run format:check, npm run check, npm test, npm run test:native and npm run pack:check. Native tests inspect the pinned package, not a live gateway. Build transpiles with noCheck; it is not static type verification. Report mocked, native-export, CI and live evidence separately. Live gateway/install changes, channel sends, production deployment and repository visibility changes need separate authorization.
+It has one owner and one installation, on the owner's own gateway. There are no other users to keep compatible:
 
-Public documentation uses standard Zensical and publishes from accepted main changes through GitHub Pages Actions. Keep the plugin repository private, preserve account custom-domain routing, and scan documentation and generated assets for private content before publishing. README links the verified documentation site without embedded preview screenshots.
+- Write no backward-compatibility, migration or upgrade code. A schema change bumps the schema version; the owner applies it to the live board once, by hand, when deploying (the CHANGELOG entry says how).
+- Handle only states the deployed or new code can produce. Code that never ran on the live system left nothing behind to handle.
+- The engineering manager states in your assignment which version is deployed and any facts about the live system that matter.
 
-Repository docs state current behavior and limitations. Keep test evidence and investigation details in PRs, not runtime policy. Preserve unrelated changes, branding, license/privacy choices and append-only history.
+## Design rules
+
+Before a change, read the current source, the bundled skills, the README, `docs/board-reference.md`, `TESTING.md` and the CHANGELOG. Make the smallest change that does what was asked, and preserve unrelated work. Architecture, security, spending and production decisions stay with the owner.
+
+- Never be more complicated than necessary, and never simpler than the requirements need.
+- Handle a new situation by giving agents better context or procedure, not a new code path. Enforce a rule in code only when it is cheap and mechanical: checkable from the caller, the existing rows or a native call the plugin already makes, adding at most a column. Anything needing a new table, state machine, external verification or interpretation of free text stays with the agents.
+- When something goes wrong, find the general cause before changing code. Prefer, in this order: correcting the agent procedure or context; fixing or simplifying the existing mechanism; removing the special case that caused it. Add a stage, status, flag, operation, table or branch only when the problem strictly cannot be solved otherwise.
+- Never turn one incident, test case or review finding into a special case. A fix names the class of problem it handles and works for cases nobody listed. When fixes keep landing in the same mechanism, replace the mechanism with a simpler one.
+- Free text stays free text: never parse notes, plans, descriptions or messages for machine meaning.
+- Robustness comes from a few durable facts and simple self-recovering rules (retry with the same identity, check again later, tell the user when stuck), not from anticipating every scenario. Handle what happens in normal use on this host; for rare races, prefer recovering on the next scan over preventing them with more machinery.
+- The plugin acts only on its own tool and private task sessions and fails open. It never constrains the product manager's personal-assistant work or other agents.
+- New tables, tool operations, task statuses or configuration settings need the owner's approval.
+
+## Size
+
+Prefer changes that keep or reduce the size of the code. When a change adds code, look for what it makes removable. Report the line count change of `src/` in the PR; when it grows, say what you considered removing.
+
+## Working on the code
+
+Keep SQLite transactions synchronous and never hold one across a native call; re-read what a decision depends on after a native call returns. Native sessions are the authority for liveness, native receipts for delivery.
+
+Use fake native APIs and disposable files for tests; one test per behaviour, no tests for states the code cannot produce. Run `npm run format:check`, `npm run check`, `npm test`, `npm run test:native` and `npm run pack:check`. Native tests inspect the pinned package, not a live gateway, and the build transpiles without type checking. Report mocked, native-export, CI and live evidence separately. Live gateway or install changes, channel sends, deployment and repository visibility changes need the owner's authorization.
+
+## Documentation
+
+Repository docs state current behaviour in plain, short language, without lists of caveats. Test evidence and investigation details go in PRs, not in docs or code comments. Keep the CHANGELOG's Unreleased section a description of the net change since the last release, not of intermediate designs.
+
+Public documentation uses standard Zensical and publishes from `main` through GitHub Pages Actions. Keep the plugin repository private, keep the account's custom-domain routing, and check documentation and generated assets for private content before publishing. The README links the documentation site, without embedded screenshots. Preserve branding, licence and privacy choices and the append-only CHANGELOG history.

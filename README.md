@@ -73,9 +73,9 @@ Add a `jarvis-gilfoyle` entry to your OpenClaw configuration. Replace the databa
 
 </details>
 
-- **Permissions:** grant `project_board` to both managers and make the [coordination skill](skills/project-coordination/SKILL.md) available to them. Enable both hook permissions shown above: `allowConversationAccess` and `allowPromptInjection`.
+- **Permissions:** grant `project_board` to both managers and make the bundled skills available to them: [project coordination](skills/project-coordination/SKILL.md) and [code review](skills/code-review/SKILL.md). Workers that review need the code-review skill too, for example in `~/.agents/skills`. Enable both hook permissions shown above: `allowConversationAccess` and `allowPromptInjection`.
 - **Workers:** configure the worker's ACP runtime in OpenClaw for `runtime: "acp"`; `"subagent"` is also supported.
-- **Storage:** use a dedicated new SQLite file or an existing **schema 18** board at the absolute `statePath`. There is **no automatic migration**; never use an unrelated database.
+- **Storage:** use a dedicated new SQLite file or an existing **schema 19** board at the absolute `statePath`. There is **no automatic migration**; never use an unrelated database.
 
 Restart the Gateway to load the plugin:
 

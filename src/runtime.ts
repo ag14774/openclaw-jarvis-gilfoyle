@@ -246,6 +246,7 @@ export class BoardRuntime {
         ? {
             project: task.project,
             body: task.body,
+            ...(task.plan ? { plan: task.plan } : {}),
             createdBy: task.created_by,
             workers: task.workers.map((worker) => worker.key),
             ...(task.check_at && task.status === 'open'
@@ -424,11 +425,18 @@ export class BoardRuntime {
     const message = optional(input.message, 4000, 'message');
     const files = attachments(input.attachments);
     assert(!files.length || message !== undefined, 'attachments are sent with a message');
+    // The task's working plan: free text, replaced as a whole; an empty plan clears it.
+    const plan =
+      input.plan === undefined || input.plan === null
+        ? undefined
+        : (optional(input.plan, 4000, 'plan') ?? '');
     const status = input.status;
     const holder = input.holder;
     assert(
-      [note, message, status, holder, input.check_in_minutes].some((value) => value !== undefined),
-      'Pass note, holder, status, message or check_in_minutes',
+      [note, message, status, holder, input.check_in_minutes, plan].some(
+        (value) => value !== undefined,
+      ),
+      'Pass note, holder, status, message, check_in_minutes or plan',
     );
     assert(
       status === undefined || ['open', 'done', 'cancelled'].includes(status),
@@ -520,10 +528,11 @@ export class BoardRuntime {
     const outbox = this.store.tx(() => {
       if (note) this.store.note(task.id, caller.role, note);
       this.store.run(
-        `UPDATE tasks SET status=?,holder=?,poked=CASE WHEN ? THEN ? ELSE NULL END,woken=NULL,check_at=?,
+        `UPDATE tasks SET status=?,holder=?,plan=COALESCE(?,plan),poked=CASE WHEN ? THEN ? ELSE NULL END,woken=NULL,check_at=?,
            idle_wakes=0,stalled=NULL,cleaned=CASE WHEN ? THEN NULL ELSE cleaned END,updated=? WHERE id=?`,
         closing ? status : 'open',
         newHolder,
+        plan ?? null,
         poke ? 1 : 0,
         now,
         closing
@@ -1024,6 +1033,7 @@ export class BoardRuntime {
       `Task #${task.id}: ${task.title}`,
       `Status: ${task.status}${task.status === 'open' ? `, waiting on ${task.holder === you ? `you (${you})` : task.holder}` : ''}. Created by ${task.created_by}.`,
       ...(task.body ? [`Description:\n${clip(task.body, 4000)}`] : []),
+      ...(task.plan ? [`Plan:\n${task.plan}`] : []),
     ];
     const notes = this.store.notes(task.id, 15);
     if (notes.length)

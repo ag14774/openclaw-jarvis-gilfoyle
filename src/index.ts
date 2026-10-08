@@ -32,7 +32,7 @@ const parameters = {
       type: 'string',
       enum: OPERATIONS,
       description:
-        'list: projects and open tasks. show: one task with its notes (or one project with its context). create_project / update_project (product; engineering may update context). add_task. update_task: note, handover (holder), close (status), check_in_minutes. notify: message the user (product).',
+        'list: projects and open tasks. show: one task with its notes (or one project with its context). create_project / update_project (product; engineering may update context). add_task. update_task: note, handover (holder), close (status), check_in_minutes, plan. notify: message the user (product).',
     },
     project: {
       type: 'string',
@@ -88,6 +88,11 @@ const parameters = {
     check_in_minutes: {
       type: 'integer',
       description: 'update_task: when the holder should be woken to look again (default 60).',
+    },
+    plan: {
+      type: 'string',
+      description:
+        'update_task: the task’s working plan (design, steps, dependencies, progress), shown at the top of the task card. Replaces the previous plan; an empty string clears it.',
     },
   },
 };

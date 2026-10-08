@@ -508,6 +508,34 @@ test('check_in_minutes schedules the next wake, and running workers do not count
   }
 });
 
+test('the plan is kept on the task, shown on its card, and replaced or cleared as a whole', async () => {
+  const h = await harness();
+  await project(h);
+  const { task } = await h.call('main', JARVIS_DM, {
+    operation: 'add_task',
+    project: 'quote-desk',
+    title: 'Full UI',
+  });
+  const gKey = key(h, 'engineering', task);
+  const plan = '[~] 1 Layout — worker A → PR #1\n[ ] 2 Forms — after 1';
+  const set = await h.call('gilfoyle', gKey, { operation: 'update_task', plan });
+  assert(!set.error, set.error);
+  const card = await h.hooks.before_prompt_build({}, { agentId: 'gilfoyle', sessionKey: gKey });
+  assert.match(
+    card.prependContext,
+    /Plan:\n\[~\] 1 Layout — worker A → PR #1\n\[ \] 2 Forms — after 1/,
+  );
+  assert.equal((await h.call('main', JARVIS_DM, { operation: 'show', task })).task.plan, plan);
+  // Other updates keep it; a new plan replaces it; an empty one clears it.
+  await h.call('gilfoyle', gKey, { operation: 'update_task', note: 'Layout merged' });
+  assert.equal(h.runtime.store.task(task).plan, plan);
+  await h.call('gilfoyle', gKey, { operation: 'update_task', plan: '[x] 1 Layout\n[~] 2 Forms' });
+  assert.equal(h.runtime.store.task(task).plan, '[x] 1 Layout\n[~] 2 Forms');
+  await h.call('gilfoyle', gKey, { operation: 'update_task', plan: '' });
+  assert.equal(h.runtime.store.task(task).plan, '');
+  assert.equal((await h.call('main', JARVIS_DM, { operation: 'show', task })).task.plan, undefined);
+});
+
 test('cancelling stops the task’s workers', async () => {
   const h = await harness();
   await project(h);
@@ -847,7 +875,7 @@ test('the board file persists across restarts and a foreign database is refused'
   const other = new DatabaseSync(foreign);
   other.exec('PRAGMA user_version=99');
   other.close();
-  assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 18\)/);
+  assert.throws(() => new Store(foreign), /not a project board \(schema 99, expected 19\)/);
   rmSync(dir, { recursive: true, force: true });
 });
 
