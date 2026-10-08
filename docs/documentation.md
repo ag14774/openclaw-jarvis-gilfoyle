@@ -15,7 +15,7 @@ uv run --locked zensical serve
 
 Preview at **<http://127.0.0.1:8000/>**. The configured address is loopback-only. Stop the foreground preview with Ctrl-C. `site/` is generated output; `.venv/` and `.cache/` are local build state. None belongs in a commit.
 
-Edit pages under `docs/`, then update `nav` in `zensical.toml` when adding a page. Links to site pages should be relative Markdown links; links to source files outside `docs/` should point to the repository on GitHub. Those repository links require access to this private repository.
+Edit pages under `docs/`, then update `nav` in `zensical.toml` when adding a page. Links to site pages should be relative Markdown links; links to source files outside `docs/` should point to the repository on GitHub.
 
 Before committing, run the strict clean build and the repository's formatter check. Review navigation, search results, light/dark appearance and mobile layout. Keep screenshots and validation logs outside `docs/` and `site/`. Review both source and generated output for private content before publication.
 
@@ -27,7 +27,7 @@ To upgrade dependencies deliberately, change the pin, regenerate with `uv lock`,
 
 `docs-pages.yml` builds on pushes to **main**. Its build job has only repository read permission and uploads the normal Pages artifact; a separate `github-pages` deployment job has `pages: write` and `id-token: write`. Zensical build caching is not used in CI, following official publishing guidance.
 
-The configured canonical URL is **`https://ageorgiou.com/openclaw-jarvis-gilfoyle/`**. Before enabling deployment, verify that the repository is eligible for Pages and select GitHub Actions as its publishing source. A private source repository can still produce a public site: review the generated artifact before publishing. A successful local or PR build does not establish that hosting is configured or live.
+The configured canonical URL is **`https://ageorgiou.com/openclaw-jarvis-gilfoyle/`**. Pages publishes from GitHub Actions. A successful local or PR build does not establish that hosting is configured or live.
 
 ## Official guidance
 

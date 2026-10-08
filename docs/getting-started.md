@@ -4,22 +4,20 @@
 
 - OpenClaw **2026.9.8**, the version pinned by this repository.
 - Node.js with `node:sqlite`: **`>=24.16.0 <25 || >=26.1.0`**. Repository CI uses **26.8.1**.
-- Access to a local checkout and three distinct configured OpenClaw agents: product, engineering and worker.
+- Three distinct configured OpenClaw agents: product, engineering and worker.
 - A working user-message channel and an owner direct chat with the product manager for fallback delivery.
 
 Python is needed only to [build the documentation](documentation.md), not to run the plugin.
 
-## Build and install
+## Install
 
-Run from the plugin checkout:
+Install a pinned release from ClawHub; the [releases](https://github.com/ag14774/openclaw-jarvis-gilfoyle/releases) list the versions:
 
 ```bash
-npm ci
-npm run build
-openclaw plugins install --link . --force --accept-capabilities
+openclaw plugins install clawhub:openclaw-jarvis-gilfoyle@<version> --accept-capabilities
 ```
 
-The install command links this checkout into OpenClaw and accepts its plugin capabilities. It changes the host installation; run it only on the host where you intend to use the plugin.
+The command installs the plugin into OpenClaw and accepts its plugin capabilities. It changes the host installation; run it only on the host where you intend to use the plugin. To run a local checkout instead, build it (`npm ci`, `npm run build`) and link it with `openclaw plugins install --link . --force --accept-capabilities`.
 
 ## Configure the plugin
 
@@ -78,6 +76,6 @@ Once host configuration is ready, restart the Gateway:
 openclaw gateway restart
 ```
 
-This interrupts host activity. A linked install loads `dist/` at startup; after source changes, rebuild and restart to load the new code.
+This interrupts host activity. A linked checkout loads `dist/` at startup; after source changes, rebuild and restart to load the new code.
 
 Confirm both managers can use `project_board` and inspect [board health](operations.md#inspect-health) for errors. In the intended project chat, ask product to create a project and record its context. Then follow the [normal workflow](workflow.md). A successful build or install alone does not establish that the worker runtime and real channel delivery work.

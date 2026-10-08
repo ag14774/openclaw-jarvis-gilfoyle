@@ -8,7 +8,7 @@ The plugin is a small substrate: a board (projects, tasks with a holder, notes, 
 
 It has one owner and one installation, on the owner's own gateway. There are no other users to keep compatible:
 
-- Write no backward-compatibility, migration or upgrade code. A schema change bumps the schema version; the owner applies it to the live board once, by hand, when deploying (the CHANGELOG entry says how).
+- Write no backward-compatibility, migration or upgrade code. A schema change bumps the schema version; the operator applies it to the board once, by hand, when upgrading (the CHANGELOG entry gives the exact statements).
 - Handle only states the deployed or new code can produce. Code that never ran on the live system left nothing behind to handle.
 - The engineering manager states in your assignment which version is deployed and any facts about the live system that matter.
 
@@ -39,4 +39,14 @@ Use fake native APIs and disposable files for tests; one test per behaviour, no 
 
 Repository docs state current behaviour in plain, short language, without lists of caveats. Test evidence and investigation details go in PRs, not in docs or code comments. Keep the CHANGELOG's Unreleased section a description of the net change since the last release, not of intermediate designs.
 
-Public documentation uses standard Zensical and publishes from `main` through GitHub Pages Actions. Keep the plugin repository private, keep the account's custom-domain routing, and check documentation and generated assets for private content before publishing. The README links the documentation site, without embedded screenshots. Preserve branding, licence and privacy choices and the append-only CHANGELOG history.
+Public documentation uses standard Zensical and publishes from `main` through GitHub Pages Actions. Keep the account's custom-domain routing, and check documentation and generated assets for private content before publishing. The README links the documentation site, without embedded screenshots. Preserve branding, licence and privacy choices and the append-only CHANGELOG history.
+
+## Releases
+
+`package.json` holds the one version number. To release:
+
+1. In a normal PR, run `npm version <X.Y.Z> --no-git-tag-version` and turn the CHANGELOG's Unreleased section into `## X.Y.Z - <date>`. When the release changes the board schema, start that section with the exact statements the operator runs.
+2. After it merges, tag the merge commit on `main` and push the tag: `git tag -a vX.Y.Z -m vX.Y.Z <commit>`, then `git push origin vX.Y.Z`.
+3. The Release workflow checks that the tag, `package.json` and the CHANGELOG agree, runs every check, creates the GitHub release with the package and its checksum, and publishes the version to ClawHub. ClawHub makes it installable after its security review.
+
+Never move or reuse a release tag; fix a bad release with a new version.
