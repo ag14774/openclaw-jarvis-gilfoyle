@@ -1,0 +1,81 @@
+name: Release
+
+# Pushing a tag vX.Y.Z on main releases version X.Y.Z: GitHub release, then ClawHub.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  github:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.8.1
+          cache: npm
+      - name: Check the tag, version and changelog agree
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$(node -p "require('./package.json').version")" = "$version" \
+            || { echo "::error::Tag $GITHUB_REF_NAME does not match package.json"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
+          # The release notes are this version's CHANGELOG section.
+          awk -v v="$version" '/^## / { found = index($0, "## " v " ") == 1 || $0 == "## " v; next } found' \
+            CHANGELOG.md > notes.md
+          test -s notes.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run check
+      - run: npm test
+      - run: npm run test:native
+      - name: Package
+        run: |
+          npm pack --ignore-scripts
+          sha256sum openclaw-jarvis-gilfoyle-*.tgz > SHA256SUMS
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" openclaw-jarvis-gilfoyle-*.tgz SHA256SUMS \
+            --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+
+  clawhub:
+    needs: github
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.8.1
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Publish to ClawHub
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+          VERSION: ${{ needs.github.outputs.version }}
+        run: |
+          test -n "$CLAWHUB_TOKEN" || { echo "::error::The CLAWHUB_TOKEN secret is not set"; exit 1; }
+          npx --yes clawhub@0.23.3 login --token "$CLAWHUB_TOKEN" --no-browser
+          npx --yes clawhub@0.23.3 package publish . --family code-plugin --version "$VERSION" \
+            --source-repo "$GITHUB_REPOSITORY" --source-commit "$GITHUB_SHA" --source-ref "$GITHUB_REF_NAME" \
+            --changelog "See https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" --wait

@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 6.7.0 - 2026-10-08
 
-Board schema 19: tasks have a `plan` column. There is no migration; the operator adds it (`ALTER TABLE tasks ADD COLUMN plan TEXT NOT NULL DEFAULT ''`, `PRAGMA user_version=19`).
+Board schema 19: tasks have a `plan` column. There is no migration; with the gateway stopped, the operator applies `ALTER TABLE tasks ADD COLUMN plan TEXT NOT NULL DEFAULT ''` and `PRAGMA user_version=19` to the board file.
 
+- MIT licence. Releases are published as GitHub releases and on ClawHub (`openclaw plugins install clawhub:openclaw-jarvis-gilfoyle@<version>`) by a workflow that runs when a version tag is pushed. The plugin manifest no longer carries a version; `package.json` is the only one.
 - Tasks have a working plan: `update_task plan` stores free text that the board never interprets, shown at the top of the task card and by `show`. Engineering keeps its design and steps there.
 - New `code-review` skill: the repository's own rules first, findings rated by how likely and costly they are where the code runs, the smallest fix including deletion, a comment on size, and a short report with a clear verdict; and how to act on findings.
 - Coordination skill (protocol 11.14): repository `AGENTS.md` and project context take precedence over skill defaults; managers read the running system freely but change it only with the user's approval; product makes one task per separate feature or ask and splits a task when engineering proposes it; engineering designs first, keeps the plan, runs independent steps in parallel, groups steps into PRs, reads every diff and reviews with the `code-review` skill, copying its review rules into each review brief so workers need no skill installed.

@@ -9,7 +9,7 @@
 <p align="center">
   <a href="package.json"><img src="https://img.shields.io/badge/OpenClaw-2026.9.8-ef6b57" alt="OpenClaw compatibility: 2026.9.8" /></a>
   <a href="package.json"><img src="https://img.shields.io/badge/Node.js-%3E%3D24.16.0%20%3C25%20%7C%7C%20%3E%3D26.1.0-43853d" alt="Node.js requirement: >=24.16.0 <25 or >=26.1.0" /></a>
-  <a href="package.json"><img src="https://img.shields.io/badge/Repository-private-6b7280" alt="Private repository" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-6b7280" alt="License: MIT" /></a>
 </p>
 
 <p align="center">
@@ -18,16 +18,14 @@
 
 A small, personal-use OpenClaw plugin that coordinates a product manager (Jarvis) and an engineering manager (Gilfoyle). A shared SQLite board keeps projects, tasks, notes and user messages; private task sessions let the managers follow up and delegate to workers.
 
-You talk to product in the project chat. Product records the request, engineering does the work, and product brings back results or questions. The names are thematic: roles map to your configured agent IDs. **This repository is private; the package is `UNLICENSED`.**
+You talk to product in the project chat. Product records the request, engineering does the work, and product brings back results or questions. The names are thematic: roles map to your configured agent IDs.
 
 ## Quick setup
 
-Use **OpenClaw `2026.9.8`** and Node.js with `node:sqlite`: **`>=24.16.0 <25 || >=26.1.0`** ([CI](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/.github/workflows/ci.yml) uses `26.8.1`). From a local checkout you have access to:
+Use **OpenClaw `2026.9.8`** and Node.js with `node:sqlite`: **`>=24.16.0 <25 || >=26.1.0`** ([CI](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/.github/workflows/ci.yml) uses `26.8.1`). Install a pinned release from ClawHub; the [releases](https://github.com/ag14774/openclaw-jarvis-gilfoyle/releases) list the versions:
 
 ```bash
-npm ci
-npm run build
-openclaw plugins install --link . --force --accept-capabilities
+openclaw plugins install clawhub:openclaw-jarvis-gilfoyle@<version> --accept-capabilities
 ```
 
 Add a `jarvis-gilfoyle` entry to your OpenClaw configuration. Replace the database path, agent IDs, owner DM and worker model below. All three agent IDs must be distinct and configured; the model must be available to your worker.
@@ -83,7 +81,7 @@ Restart the Gateway to load the plugin:
 openclaw gateway restart
 ```
 
-A linked install loads `dist/` at Gateway startup; **rebuild and restart after source changes**. See the [configuration reference](https://ageorgiou.com/openclaw-jarvis-gilfoyle/board-reference/#configuration) for optional settings and [plugin schema](openclaw.plugin.json) for the authoritative shape.
+To upgrade, follow [upgrading](https://ageorgiou.com/openclaw-jarvis-gilfoyle/operations/#upgrade): back up the board, apply any schema step the [changelog](CHANGELOG.md) lists, then install the new version. See the [configuration reference](https://ageorgiou.com/openclaw-jarvis-gilfoyle/board-reference/#configuration) for optional settings and [plugin schema](openclaw.plugin.json) for the authoritative shape.
 
 ## Everyday workflow
 
@@ -114,6 +112,9 @@ npm run format:check
 npm run check
 npm test
 npm run pack:check
+openclaw plugins install --link . --force --accept-capabilities   # run a local checkout
 ```
+
+A linked checkout loads `dist/` at Gateway startup; rebuild and restart after source changes. Releases are cut by pushing a `vX.Y.Z` tag on `main`, as described in [AGENTS.md](AGENTS.md#releases).
 
 [TESTING.md](TESTING.md) explains the checks and their side effects. [CI](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/.github/workflows/ci.yml) runs the checks above; native integration is optional on manual dispatch. Browse the [source](src/index.ts), [coordination skill](skills/project-coordination/SKILL.md) and [changelog](CHANGELOG.md) for implementation details and changes.

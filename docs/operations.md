@@ -32,9 +32,20 @@ Keep attachment paths available and readable until delivery finishes. A failed f
 
 Do not equate a queued message, a model's summary or a transcript entry with the user having read it.
 
+## Upgrade
+
+Each release's [changelog](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/CHANGELOG.md) entry says whether it changes the board schema. To upgrade:
+
+1. Wait until no task session or worker is running, then [back up the board](recovery.md).
+2. Stop the gateway (`openclaw gateway stop`). If the changelog lists a schema step, apply its exact statements to the board file.
+3. Install the new version: `openclaw plugins install clawhub:openclaw-jarvis-gilfoyle@<version> --force --accept-capabilities`. With the gateway stopped, OpenClaw saves the install for its next start.
+4. Start the gateway (`openclaw gateway start`) and check [board health](#inspect-health).
+
+An older version refuses a board with a newer schema, so to go back, restore the backup and install the previous version.
+
 ## Maintenance and evidence
 
-For a linked install, build source changes and restart the Gateway as described in [getting started](getting-started.md#load-and-check). Coordinate disruptive host actions with active work. Automatic closed-task cleanup keeps manager sessions for seven days and removes them only once idle; it does not erase the board's task records.
+Coordinate disruptive host actions with active work. Automatic closed-task cleanup keeps manager sessions for seven days and removes them only once idle; it does not erase the board's task records.
 
 The repository's [testing guide](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/TESTING.md) distinguishes local behavioral tests from native integration and live channel/model checks. Read its side effects before running operator or native checks. This documentation site's build validates documentation, not plugin reliability or live delivery.
 

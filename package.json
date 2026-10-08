@@ -1,8 +1,8 @@
 {
   "name": "openclaw-jarvis-gilfoyle",
-  "version": "6.6.4",
+  "version": "6.7.0",
   "description": "A small SQLite project board for a product and an engineering manager agent on OpenClaw",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {

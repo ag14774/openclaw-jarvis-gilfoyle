@@ -4,7 +4,7 @@
 
 A small, personal-use OpenClaw plugin that gives a product-manager agent and an engineering-manager agent a shared SQLite board. Requests, handovers and messages stay on the board; the managers work in private task sessions and delegate implementation to workers.
 
-The names are thematic. Roles use your configured agent IDs. The [repository](https://github.com/ag14774/openclaw-jarvis-gilfoyle) is private and the package is `UNLICENSED`.
+The names are thematic. Roles use your configured agent IDs. The [repository](https://github.com/ag14774/openclaw-jarvis-gilfoyle) is MIT licensed.
 
 ## Start here
 
