@@ -38,8 +38,8 @@ jobs:
             || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
           # The release notes are this version's CHANGELOG section.
           awk -v v="$version" '/^## / { found = index($0, "## " v " ") == 1 || $0 == "## " v; next } found' \
-            CHANGELOG.md > notes.md
-          test -s notes.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+            CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md" || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - run: npm ci
       - run: npm run format:check
@@ -61,7 +61,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" openclaw-jarvis-gilfoyle-*.tgz SHA256SUMS \
-            --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+            --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
 
   clawhub:
     needs: github
