@@ -43,7 +43,7 @@ Public documentation uses standard Zensical and publishes from `main` through Gi
 
 ## Releases
 
-`package.json` holds the one version number. To release:
+`package.json` holds the one version number. Versions are year.month.sequence: the first release in a month is `YYYY.M.0`, and each later one that month adds one to the last number. To release:
 
 1. In a normal PR, run `npm version <X.Y.Z> --no-git-tag-version` and turn the CHANGELOG's Unreleased section into `## X.Y.Z - <date>`. When the release changes the board schema, start that section with the exact statements the operator runs.
 2. After it merges, tag the merge commit on `main` and push the tag: `git tag -a vX.Y.Z -m vX.Y.Z <commit>`, then `git push origin vX.Y.Z`.

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - 2026-10-08
+## 2026.10.0 - 2026-10-08
 
 First public release. Earlier development versions were used only on the author's own host; their history is in git.
 
