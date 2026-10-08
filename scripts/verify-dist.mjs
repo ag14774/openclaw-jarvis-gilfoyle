@@ -39,7 +39,7 @@ assert.deepEqual(methods, [
 assert.deepEqual(services, ['jarvis-gilfoyle-board']);
 assert(hooks.includes('before_tool_call') && hooks.includes('before_prompt_build'));
 const store = new Store(':memory:');
-assert.equal(store.get('PRAGMA user_version').user_version, 18);
+assert.equal(store.get('PRAGMA user_version').user_version, 19);
 store.close();
 const manifest = JSON.parse(readFileSync(new URL('../openclaw.plugin.json', import.meta.url)));
 assert.deepEqual(manifest.skills, ['./skills']);

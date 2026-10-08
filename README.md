@@ -73,9 +73,9 @@ Add a `jarvis-gilfoyle` entry to your OpenClaw configuration. Replace the databa
 
 </details>
 
-- **Permissions:** grant `project_board` to both managers and make the [coordination skill](skills/project-coordination/SKILL.md) available to them. Enable both hook permissions shown above: `allowConversationAccess` and `allowPromptInjection`.
+- **Permissions:** grant `project_board` to both managers. The bundled skills, [project coordination](skills/project-coordination/SKILL.md) and [code review](skills/code-review/SKILL.md), load for OpenClaw agents with the plugin; add them to any per-agent skill allowlist. To let workers find the code-review skill themselves as well, install it in their skill folder, for example with `npx skills add ag14774/openclaw-jarvis-gilfoyle --skill code-review -g`; it is optional, because engineering copies the review rules into each review brief. Enable both hook permissions shown above: `allowConversationAccess` and `allowPromptInjection`.
 - **Workers:** configure the worker's ACP runtime in OpenClaw for `runtime: "acp"`; `"subagent"` is also supported.
-- **Storage:** use a dedicated new SQLite file or an existing **schema 18** board at the absolute `statePath`. There is **no automatic migration**; never use an unrelated database.
+- **Storage:** use a dedicated new SQLite file or an existing **schema 19** board at the absolute `statePath`. There is **no automatic migration**; never use an unrelated database.
 
 Restart the Gateway to load the plugin:
 

@@ -64,7 +64,7 @@ invocation; an interruption can leave a partial directory. Treat that as incompl
 and use a fresh destination. Existing paths are never cleaned up by the command.
 
 Checks are `PRAGMA integrity_check` (all results must be `ok`), schema version
-**18**, the four expected tables and exact column names/types, absence of extra
+**19**, the four expected tables and exact column names/types, absence of extra
 tables/views/triggers, and `PRAGMA foreign_key_check`. The utility does not import
 the runtime Store, so verification cannot silently execute board DDL. These are
 structural checks, not authentication, a full comparison of every constraint or

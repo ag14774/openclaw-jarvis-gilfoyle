@@ -3,8 +3,8 @@
 ## Request, work, review
 
 1. **Start in the project chat.** Ask product to create a project. Its context holds lasting facts, repository locations and your direction. Creation binds the current user-message chat when available.
-2. **Request a piece of work.** Product records a task with a clear title and body, held by engineering by default. Discussion alone is not a request to implement.
-3. **Let engineering work.** Engineering reads the task in its private session, plans, delegates bounded assignments, checks the result and hands the same task back with a note.
+2. **Request a piece of work.** Product records a task with a clear title and body, held by engineering by default: one task per separate feature or unrelated ask. Discussion alone is not a request to implement.
+3. **Let engineering work.** Engineering reads the task in its private session, settles a short design and keeps the steps in the task's plan, shown at the top of the task card. It runs independent steps in parallel workers, reviews the results with the `code-review` skill and hands the same task back with a note. A task too large for one session goes back to product with a proposed split.
 4. **Answer questions on that task.** Product hands it to the user with a message if input is needed. Your answer is recorded in a note and handed back to engineering; no separate task is needed for the question.
 5. **Review and finish.** Product checks each requested point against the result itself, closes the task and tells you what changed or what remains incomplete.
 
