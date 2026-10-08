@@ -20,17 +20,6 @@ import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
-// Schema 19's structural admission check; deliberately independent of the mutating Store.
-// Column order is not checked: older boards gained some columns at the end.
-const columns = {
-  projects: 'id:TEXT name:TEXT context:TEXT route:TEXT state:TEXT created:INTEGER updated:INTEGER',
-  tasks:
-    'id:INTEGER project:TEXT title:TEXT body:TEXT plan:TEXT status:TEXT holder:TEXT created_by:TEXT workers:TEXT poked:INTEGER woken:INTEGER check_at:INTEGER idle_wakes:INTEGER stalled:INTEGER cleaned:INTEGER created:INTEGER updated:INTEGER',
-  notes: 'id:INTEGER task:INTEGER author:TEXT text:TEXT created:INTEGER',
-  outbox:
-    'id:INTEGER project:TEXT task:INTEGER text:TEXT files:TEXT fallback:INTEGER state:TEXT attempts:INTEGER next_at:INTEGER error:TEXT receipt:TEXT recorded:INTEGER created:INTEGER',
-};
-
 function sourcePath(path) {
   assert(path && path !== ':memory:', 'Source must be an existing board file');
   const absolute = resolve(path);
@@ -39,33 +28,18 @@ function sourcePath(path) {
 }
 
 function inspect(db) {
-  assert.equal(
-    db.prepare('PRAGMA user_version').get().user_version,
-    19,
-    'Expected board schema 19',
+  const schema = db.prepare('PRAGMA user_version').get().user_version;
+  assert(schema > 0, 'Expected a positive board schema version');
+  const tables = db
+    .prepare(
+      "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+    )
+    .all()
+    .map((row) => row.name);
+  assert(
+    ['projects', 'tasks', 'notes', 'outbox'].every((table) => tables.includes(table)),
+    'Expected the four base board tables',
   );
-  assert.deepEqual(
-    db
-      .prepare(
-        "SELECT name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' AND type IN ('table','view','trigger') ORDER BY name",
-      )
-      .all()
-      .map((row) => row.name),
-    Object.keys(columns).sort(),
-    'Expected only the four board tables (no views or triggers)',
-  );
-  for (const [table, expected] of Object.entries(columns)) {
-    assert.equal(
-      db
-        .prepare(`PRAGMA table_info(${table})`)
-        .all()
-        .map((row) => `${row.name}:${row.type}`)
-        .sort()
-        .join(' '),
-      expected.split(' ').sort().join(' '),
-      `Unexpected ${table} columns`,
-    );
-  }
   assert.deepEqual(
     db
       .prepare('PRAGMA integrity_check')
@@ -75,10 +49,13 @@ function inspect(db) {
     'SQLite integrity check failed',
   );
   assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0, 'Foreign key check failed');
-  const counts = {};
-  for (const table of Object.keys(columns))
-    counts[table] = db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
-  return { schema: 19, integrity: 'ok', foreignKeys: 'ok', counts };
+  const counts = Object.fromEntries(
+    tables.map((table) => [
+      table,
+      db.prepare(`SELECT count(*) AS n FROM "${table.replaceAll('"', '""')}"`).get().n,
+    ]),
+  );
+  return { schema, integrity: 'ok', foreignKeys: 'ok', counts };
 }
 
 function readOnly(path, fn) {
@@ -127,6 +104,7 @@ export async function createCopy(operation, source, destination) {
       closeSync(openSync(snapshot, 'wx', 0o600));
       const db = new DatabaseSync(input, { readOnly: true });
       try {
+        db.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF');
         await backup(db, snapshot);
       } finally {
         db.close();
