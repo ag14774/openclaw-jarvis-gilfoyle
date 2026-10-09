@@ -26,6 +26,7 @@ const SOURCE_FRESH_MS = 10 * MINUTE;
 const ROUTE_CACHE_MS = 24 * 60 * MINUTE;
 const KEEP_CLOSED_MS = 7 * 24 * 60 * MINUTE;
 const ADAPT_WAIT_MS = 2 * MINUTE;
+const ADAPT_RETRY_MS = 10 * 1000;
 const ADAPT_CHAT_CHARS = 40000;
 const ADAPT_INSTRUCTIONS = `You are about to send a message in a project chat. It was written without seeing this conversation. Rewrite it as the message you send now.
 - Keep every fact, decision, number, link, question and limitation in it. Add no new facts, and do not say you have done anything it does not say.
@@ -143,6 +144,7 @@ export class BoardRuntime {
       },
       publishTranscript = async () => {},
       adapt = null,
+      sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     } = {},
   ) {
     this.store = store;
@@ -156,6 +158,7 @@ export class BoardRuntime {
     this.appendTranscript = appendTranscript;
     this.publishTranscript = publishTranscript;
     this.adapt = adapt; // ({system, message}) -> text, as the product manager; null when unavailable
+    this.sleep = sleep;
     this.sending = Promise.resolve(); // deliveries run one at a time
     this.sources = new Map(); // session -> newest inbound chat {route, at, used}
     this.turns = new Map(); // session -> the inbound chat of the running turn
@@ -560,7 +563,7 @@ export class BoardRuntime {
     });
     this.markSeen(caller.session, task.id);
     if (status === 'cancelled') await this.abortWorkers(this.store.task(task.id));
-    const delivery = outbox ? await this.deliver(outbox) : undefined;
+    const delivery = outbox ? await this.deliver(outbox, true) : undefined;
     this.requestTick();
     const updated = this.store.task(task.id);
     return {
@@ -594,7 +597,7 @@ export class BoardRuntime {
         message: { state: 'not sent', reason: 'you are in the project chat; say it in your reply' },
       };
     const id = this.store.enqueue(project.id, taskId, message, files);
-    return { notification: id, ...(await this.deliver(id)) };
+    return { notification: id, ...(await this.deliver(id, true)) };
   }
 
   // ---- Delivery ----------------------------------------------------------------------
@@ -623,11 +626,11 @@ export class BoardRuntime {
     return this.ownerRouteCache.route;
   }
   // One delivery at a time, including its fallback, so a rewrite sees the messages sent
-  // before it.
-  deliver(id) {
+  // before it. `rewrite` is set for messages sent from a manager's turn.
+  deliver(id, rewrite = false) {
     if (this.deliveries.has(id)) return this.deliveries.get(id);
     const pending = this.sending
-      .then(() => this.deliverAttempt(id))
+      .then(() => this.deliverAttempt(id, rewrite))
       .finally(() => this.deliveries.delete(id));
     this.sending = pending.catch(() => {});
     this.deliveries.set(id, pending);
@@ -635,45 +638,51 @@ export class BoardRuntime {
   }
   // Before its first send to the project chat, the product manager rewrites a message for
   // the conversation it lands in, given that chat since the task's request, the task and the
-  // message as written. While that chat is mid-reply, or changed during the rewrite, it is
-  // tried again shortly, for at most ADAPT_WAIT_MS. Any failure sends the message as written.
+  // message as written. The model call runs within the manager's turn that sent the message,
+  // because OpenClaw admits new work only from running work; the scan's own deliveries go
+  // out as written. While the chat is mid-reply, or changed during the rewrite, it waits and
+  // tries again, for at most ADAPT_WAIT_MS. Any failure sends the message as written.
   async adaptToChat(row, project, route) {
-    const later = () => {
-      if (this.now() - row.created >= ADAPT_WAIT_MS) return null;
-      this.store.run('UPDATE outbox SET next_at=? WHERE id=?', this.now() + MINUTE / 2, row.id);
-      return { state: 'pending', reason: 'the project chat is busy; it goes out shortly' };
-    };
+    const waitedOut = () => this.now() - row.created >= ADAPT_WAIT_MS;
     try {
-      const session = await this.chatSession(route);
-      if (!session) return null;
-      const busy = rowLive(session, this.now()) && later();
-      if (busy) return busy;
-      const history = await this.rpc('chat.history', {
-        sessionKey: session.key,
-        agentId: topology().productAgentId,
-        limit: 1000,
-      });
-      const task = row.task ? this.store.task(row.task) : null;
-      const message = [
-        `The project chat, oldest first (times UTC):\n${this.chatSince(history?.messages ?? [], task?.created) || '(no messages yet)'}`,
-        ...(task ? [this.taskLines(task, project, 'product').join('\n')] : []),
-        `The message to send:\n${row.text}`,
-      ].join('\n\n');
-      const adapted = text(
-        await this.adapt({ system: ADAPT_INSTRUCTIONS, message }),
-        4000,
-        'message',
-      );
-      const after = await this.chatSession(route);
-      const changed =
-        (rowLive(after, this.now()) || after?.updatedAt !== session.updatedAt) && later();
-      if (changed) return changed;
-      this.store.run('UPDATE outbox SET text=? WHERE id=?', adapted, row.id);
-      row.text = adapted;
+      for (;;) {
+        const session = await this.chatSession(route);
+        if (!session) return;
+        if (rowLive(session, this.now()) && !waitedOut()) {
+          await this.sleep(ADAPT_RETRY_MS);
+          continue;
+        }
+        const history = await this.rpc('chat.history', {
+          sessionKey: session.key,
+          agentId: topology().productAgentId,
+          limit: 1000,
+        });
+        const task = row.task ? this.store.task(row.task) : null;
+        const message = [
+          `The project chat, oldest first (times UTC):\n${this.chatSince(history?.messages ?? [], task?.created) || '(no messages yet)'}`,
+          ...(task ? [this.taskLines(task, project, 'product').join('\n')] : []),
+          `The message to send:\n${row.text}`,
+        ].join('\n\n');
+        const adapted = text(
+          await this.adapt({ system: ADAPT_INSTRUCTIONS, message }),
+          4000,
+          'message',
+        );
+        const after = await this.chatSession(route);
+        if (
+          (rowLive(after, this.now()) || after?.updatedAt !== session.updatedAt) &&
+          !waitedOut()
+        ) {
+          await this.sleep(ADAPT_RETRY_MS);
+          continue;
+        }
+        this.store.run('UPDATE outbox SET text=? WHERE id=?', adapted, row.id);
+        row.text = adapted;
+        return;
+      }
     } catch (error) {
       this.log(`Project message ${row.id} sent as written: ${error?.message ?? error}`);
     }
-    return null;
   }
   // The chat's user and assistant text from the user's last message before `since` (the
   // request) to now. When that is long, the request and the newest messages are kept.
@@ -717,7 +726,7 @@ export class BoardRuntime {
   // files follow as native message sends to the same chat, each with its own idempotency
   // key, and failed files are retried there. A delivered message is then added to the
   // session of the chat it reached.
-  async deliverAttempt(id) {
+  async deliverAttempt(id, rewrite = false) {
     const row = this.store.get('SELECT * FROM outbox WHERE id=?', id);
     if (!row || row.state !== 'pending') return row ? { state: row.state } : undefined;
     const project = this.store.project(row.project);
@@ -728,10 +737,8 @@ export class BoardRuntime {
     let error, route;
     try {
       route = toOwner ? await this.ownerRoute() : project.route;
-      if (!receipt && !toOwner && !row.attempts && this.adapt) {
-        const waiting = await this.adaptToChat(row, project, route);
-        if (waiting) return waiting;
-      }
+      if (rewrite && !receipt && !toOwner && !row.attempts && this.adapt)
+        await this.adaptToChat(row, project, route);
       if (!receipt) {
         const sent = await this.rpc('conversations.send', {
           agentId: topology().productAgentId,
@@ -1109,9 +1116,15 @@ export class BoardRuntime {
         "SELECT * FROM tasks WHERE project=? AND status='open' AND holder='user' ORDER BY id LIMIT 5",
         project.id,
       )) {
+        // What the user was sent with the latest handover, else that note marked internal.
         const last = this.store.notes(task.id, 1)[0];
+        const sent = this.store.get(
+          'SELECT text FROM outbox WHERE task=? AND created>=? ORDER BY id DESC LIMIT 1',
+          task.id,
+          last?.created ?? 0,
+        );
         lines.push(
-          `Waiting on the user: ${project.name} task #${task.id} "${task.title}"${last ? ` — ${clip(last.text, 300)}` : ''}`,
+          `Waiting on the user: ${project.name} task #${task.id} "${task.title}"${sent ? ` — they were sent: ${clip(sent.text, 600)}` : last ? ` — latest internal note, not sent to them: ${clip(last.text, 300)}` : ''}`,
         );
       }
     }

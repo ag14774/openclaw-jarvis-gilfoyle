@@ -183,7 +183,12 @@ test('a question goes to the user with its message, and the answer goes back to 
   // In the project chat Jarvis sees the waiting question and records the answer.
   const context = await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
   assert.match(context.prependContext, /also used as the project chat for "Quote Desk"/);
-  assert.match(context.prependContext, /Waiting on the user: Quote Desk task #\d+ "Pricing page"/);
+  // It shows the question as the user received it, not the internal handover note.
+  assert.match(
+    context.prependContext,
+    /Waiting on the user: Quote Desk task #\d+ "Pricing page" — they were sent: Should the pricing page show monthly or yearly prices\?/,
+  );
+  assert.doesNotMatch(context.prependContext, /billing period/);
   const answered = await h.call('main', JARVIS_GROUP, {
     operation: 'update_task',
     task,
@@ -229,6 +234,10 @@ test('in the project chat the reply is the message; elsewhere a message is requi
   const notified = await h.call('main', JARVIS_GROUP, { operation: 'notify', message: 'FYI' });
   assert.equal(notified.message.state, 'not sent');
   assert.equal(h.native.sent.length, 0);
+  // With no board message, the chat context labels the handover note as internal.
+  h.endTurn('main', JARVIS_GROUP);
+  const context = await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
+  assert.match(context.prependContext, /"Colour" — latest internal note, not sent to them: Asked/);
 
   const other = await h.call('main', JARVIS_DM, {
     operation: 'add_task',
@@ -855,42 +864,60 @@ test('a project chat message is rewritten for the conversation before it is sent
   );
 });
 
-test('a rewrite waits briefly for a busy or changing chat, and a failed one sends the message as written', async () => {
+test('a rewrite waits within the turn for a busy or changing chat; failures and scan deliveries go as written', async () => {
   const h = await harness();
   const { chat } = await chatProject(h);
-  chat.hasActiveRun = true;
   let calls = 0;
+  let slept = 0;
+  h.runtime.adapt = async () => `Rewrite ${++calls}`;
+  // Waiting happens within the sending turn: here the chat's reply ends during the wait.
+  h.runtime.sleep = async (ms) => {
+    slept += ms;
+    h.advance(ms);
+    chat.hasActiveRun = false;
+  };
+  const notify = () =>
+    h.call('main', JARVIS_DM, { operation: 'notify', project: 'quote-desk', message: 'Heads up' });
+  chat.hasActiveRun = true;
+  assert.equal((await notify()).state, 'sent');
+  assert.deepEqual([slept, calls, h.native.sent.at(-1).message], [10000, 1, 'Rewrite 1']);
+  // When the chat changes during the rewrite, the message is rewritten again.
+  h.runtime.adapt = async () => {
+    if (++calls === 2) chat.updatedAt += 1;
+    return `Rewrite ${calls}`;
+  };
+  await notify();
+  assert.equal(h.native.sent.at(-1).message, 'Rewrite 3');
+  // A chat that stays busy is waited for at most two minutes.
+  h.runtime.sleep = async (ms) => {
+    slept += ms;
+    h.advance(ms);
+  };
+  slept = 0;
+  chat.hasActiveRun = true;
+  await notify();
+  assert.deepEqual([slept, h.native.sent.at(-1).message], [2 * MINUTE, 'Rewrite 4']);
+  chat.hasActiveRun = false;
+  // A failed rewrite sends the message as written.
   h.runtime.adapt = async () => {
     calls++;
     throw new Error('model down');
   };
-  const notify = () =>
-    h.call('main', JARVIS_DM, { operation: 'notify', project: 'quote-desk', message: 'Heads up' });
-  assert.equal((await notify()).state, 'pending');
-  h.advance(MINUTE);
-  await h.tick();
-  assert.equal(h.native.sent.length, 0);
-  // After two minutes it goes out anyway.
-  h.advance(MINUTE + 1000);
-  await h.tick();
+  await notify();
   assert.equal(h.native.sent.at(-1).message, 'Heads up');
   assert.match(h.warnings.at(-1), /sent as written: model down/);
-  // When the chat changes during the rewrite, the message is rewritten again.
-  chat.hasActiveRun = false;
-  h.runtime.adapt = async () => {
-    calls++;
-    if (calls === 2) chat.updatedAt += 1;
-    return `Rewrite ${calls}`;
-  };
-  assert.equal((await notify()).state, 'pending');
-  h.advance(MINUTE / 2);
+  // Messages the scan sends, and owner-DM fallbacks, are not rewritten.
+  h.runtime.adapt = async () => `Rewrite ${++calls}`;
+  const before = calls;
+  h.runtime.store.enqueue('quote-desk', null, 'From the scan');
   await h.tick();
-  assert.equal(h.native.sent.at(-1).message, 'Rewrite 3');
-  // A message that falls back to the owner DM is not rewritten again there.
   h.native.sendStatus = (p) => (p.conversationRef === ref('b') ? 'suppressed' : 'sent');
   await notify();
-  assert.equal(calls, 4);
-  assert.equal(h.native.sent.at(-1).message, '[Quote Desk] Rewrite 4');
+  assert.equal(calls, before + 1);
+  assert.deepEqual(
+    h.native.sent.slice(-2).map((p) => p.message),
+    ['From the scan', `[Quote Desk] Rewrite ${calls}`],
+  );
 });
 
 test('the rewrite runs as the product manager, with his workspace files and the configured model', async () => {

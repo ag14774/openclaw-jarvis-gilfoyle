@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026.10.3 - 2026-10-10
+
+- Chat rewrites work: the model call runs within the manager's turn that sent the message. In 2026.10.2 it ran in the board service's own context, which OpenClaw refuses once the service's start has finished ("Gateway is draining"), so every message went out as written. While the chat is busy or changes during the rewrite, that turn now waits and rewrites again, for up to two minutes. Messages the scan sends on its own (stall notices, retries) go out as written.
+- In a project chat, a task waiting on the user is shown with the message the user was sent, not the internal handover note. The note had made the product manager take his own question for a leaked internal note and ask it again.
+
 ## 2026.10.2 - 2026-10-09
 
 - Messages to the project chat are rewritten for the conversation before they are sent. Messages are written in private task sessions that cannot see the chat, so a result arriving days later, or between other replies, could read as out of context. Before the first send, one tool-free model call as the product manager sees the chat since the request, the task and the message as written, together with his identity, character and notes about the user. It keeps the facts and adds only as much background as the user needs. Deliveries run one at a time, and while the chat is mid-reply, or changes during the rewrite, a message is rewritten again shortly, for up to two minutes. If the rewrite fails, the message goes out as written. The optional `rewriteModel` setting picks a different model for it (the entry then needs `subagent.allowModelOverride`); by default it uses the product manager's own model.
