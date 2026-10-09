@@ -2,6 +2,7 @@
 const methods = new Set([
   'conversations.list',
   'conversations.send',
+  'chat.history',
   'message.action',
   'sessions.list',
   'sessions.create',

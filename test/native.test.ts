@@ -30,3 +30,19 @@ test(
     assert.equal(typeof sdk.publishSessionTranscriptUpdateByIdentity, 'function');
   },
 );
+
+test(
+  'the tool-free model call used for chat rewrites exists in the pinned OpenClaw build',
+  { skip: process.env.JG_NATIVE_TEST !== '1' && 'set JG_NATIVE_TEST=1' },
+  () => {
+    const dist = dirname(fileURLToPath(import.meta.resolve('openclaw')));
+    const declared = readdirSync(dist).some(
+      (name) =>
+        name.endsWith('.d.ts') &&
+        readFileSync(join(dist, name), 'utf8').includes(
+          'complete: (params: SubagentCompleteParams)',
+        ),
+    );
+    assert(declared, 'api.runtime.subagent.complete missing');
+  },
+);

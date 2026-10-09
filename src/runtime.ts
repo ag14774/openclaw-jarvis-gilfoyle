@@ -25,6 +25,15 @@ const STALE_RUN_MS = 6 * 60 * MINUTE;
 const SOURCE_FRESH_MS = 10 * MINUTE;
 const ROUTE_CACHE_MS = 24 * 60 * MINUTE;
 const KEEP_CLOSED_MS = 7 * 24 * 60 * MINUTE;
+const ADAPT_WAIT_MS = 2 * MINUTE;
+const ADAPT_CHAT_CHARS = 40000;
+const ADAPT_INSTRUCTIONS = `You are about to send a message in a project chat. It was written without seeing this conversation. Rewrite it as the message you send now.
+- Keep every fact, decision, number, link, question and limitation in it. Add no new facts, and do not say you have done anything it does not say.
+- Add only as much background as the user needs to recognise what it is about. If they asked recently and the conversation has not moved on, give it directly. If time has passed or the conversation moved on, say briefly what they asked for and why.
+- If something recent in the conversation clearly relates to it, you may point that out or offer to look into it.
+- A question must stay answerable as written. Explain any term the user has not used themselves.
+- If the message already fits, return it unchanged.
+Reply with the message text only.`;
 const PREFERRED_ATTEMPTS = 3;
 const FALLBACK_ATTEMPTS = 10;
 const ROLES = ['product', 'engineering'];
@@ -133,6 +142,7 @@ export class BoardRuntime {
         throw new Error('Transcript append unavailable');
       },
       publishTranscript = async () => {},
+      adapt = null,
     } = {},
   ) {
     this.store = store;
@@ -145,6 +155,8 @@ export class BoardRuntime {
     this.agentName = agentName;
     this.appendTranscript = appendTranscript;
     this.publishTranscript = publishTranscript;
+    this.adapt = adapt; // ({system, message}) -> text, as the product manager; null when unavailable
+    this.sending = Promise.resolve(); // deliveries run one at a time
     this.sources = new Map(); // session -> newest inbound chat {route, at, used}
     this.turns = new Map(); // session -> the inbound chat of the running turn
     this.captures = new Map(); // session -> route resolution still in progress
@@ -577,6 +589,10 @@ export class BoardRuntime {
       assert(task.project === project.id, 'That task belongs to another project');
       taskId = task.id;
     }
+    if (this.inProjectChat(caller, project))
+      return {
+        message: { state: 'not sent', reason: 'you are in the project chat; say it in your reply' },
+      };
     const id = this.store.enqueue(project.id, taskId, message, files);
     return { notification: id, ...(await this.deliver(id)) };
   }
@@ -606,12 +622,93 @@ export class BoardRuntime {
     this.ownerRouteCache = { route: conversation(matches[0]), at: this.now() };
     return this.ownerRouteCache.route;
   }
-  // One delivery at a time per outbox row, including its fallback.
+  // One delivery at a time, including its fallback, so a rewrite sees the messages sent
+  // before it.
   deliver(id) {
     if (this.deliveries.has(id)) return this.deliveries.get(id);
-    const pending = this.deliverAttempt(id).finally(() => this.deliveries.delete(id));
+    const pending = this.sending
+      .then(() => this.deliverAttempt(id))
+      .finally(() => this.deliveries.delete(id));
+    this.sending = pending.catch(() => {});
     this.deliveries.set(id, pending);
     return pending;
+  }
+  // Before its first send to the project chat, the product manager rewrites a message for
+  // the conversation it lands in, given that chat since the task's request, the task and the
+  // message as written. While that chat is mid-reply, or changed during the rewrite, it is
+  // tried again shortly, for at most ADAPT_WAIT_MS. Any failure sends the message as written.
+  async adaptToChat(row, project, route) {
+    const later = () => {
+      if (this.now() - row.created >= ADAPT_WAIT_MS) return null;
+      this.store.run('UPDATE outbox SET next_at=? WHERE id=?', this.now() + MINUTE / 2, row.id);
+      return { state: 'pending', reason: 'the project chat is busy; it goes out shortly' };
+    };
+    try {
+      const session = await this.chatSession(route);
+      if (!session) return null;
+      const busy = rowLive(session, this.now()) && later();
+      if (busy) return busy;
+      const history = await this.rpc('chat.history', {
+        sessionKey: session.key,
+        agentId: topology().productAgentId,
+        limit: 1000,
+      });
+      const task = row.task ? this.store.task(row.task) : null;
+      const message = [
+        `The project chat, oldest first (times UTC):\n${this.chatSince(history?.messages ?? [], task?.created) || '(no messages yet)'}`,
+        ...(task ? [this.taskLines(task, project, 'product').join('\n')] : []),
+        `The message to send:\n${row.text}`,
+      ].join('\n\n');
+      const adapted = text(
+        await this.adapt({ system: ADAPT_INSTRUCTIONS, message }),
+        4000,
+        'message',
+      );
+      const after = await this.chatSession(route);
+      const changed =
+        (rowLive(after, this.now()) || after?.updatedAt !== session.updatedAt) && later();
+      if (changed) return changed;
+      this.store.run('UPDATE outbox SET text=? WHERE id=?', adapted, row.id);
+      row.text = adapted;
+    } catch (error) {
+      this.log(`Project message ${row.id} sent as written: ${error?.message ?? error}`);
+    }
+    return null;
+  }
+  // The chat's user and assistant text from the user's last message before `since` (the
+  // request) to now. When that is long, the request and the newest messages are kept.
+  chatSince(messages, since) {
+    const name = this.agentName('product');
+    const chat = messages.flatMap((m) => {
+      const said = (
+        typeof m.content === 'string'
+          ? m.content
+          : (m.content ?? [])
+              .filter((b) => b?.type === 'text')
+              .map((b) => b.text)
+              .join('\n')
+      ).trim();
+      return ['user', 'assistant'].includes(m.role) && said
+        ? [
+            {
+              user: m.role === 'user',
+              at: Number(m.timestamp),
+              text: `[${when(Number(m.timestamp))}] ${m.role === 'user' ? 'User' : name}: ${clip(said, 4000)}`,
+            },
+          ]
+        : [];
+    });
+    const start = since === undefined ? -1 : chat.findLastIndex((m) => m.user && m.at <= since);
+    const head = start >= 0 ? [chat[start].text] : [];
+    const rest = chat.slice(start + 1);
+    let room = ADAPT_CHAT_CHARS - (head[0]?.length ?? 0);
+    let first = rest.length;
+    while (first > 0 && rest[first - 1].text.length <= room) room -= rest[--first].text.length;
+    return [
+      ...head,
+      ...(first ? [`[${first} earlier messages left out]`] : []),
+      ...rest.slice(first).map((m) => m.text),
+    ].join('\n');
   }
   // One attempt for one outbox row. "sent" and "queued" hand the message to OpenClaw's own
   // durable delivery; the same operation id never sends twice. The project chat is tried
@@ -631,6 +728,10 @@ export class BoardRuntime {
     let error, route;
     try {
       route = toOwner ? await this.ownerRoute() : project.route;
+      if (!receipt && !toOwner && !row.attempts && this.adapt) {
+        const waiting = await this.adaptToChat(row, project, route);
+        if (waiting) return waiting;
+      }
       if (!receipt) {
         const sent = await this.rpc('conversations.send', {
           agentId: topology().productAgentId,
@@ -717,6 +818,19 @@ export class BoardRuntime {
     return { state: failed ? 'failed' : 'retrying', error };
   }
 
+  // The product manager's session for a chat, when exactly one matches.
+  async chatSession(route) {
+    const sessions = (
+      await this.sessionRows(topology().productAgentId, route.target.replace(/^[^:]+:/, ''))
+    ).filter(
+      ({ deliveryContext: to }) =>
+        to?.channel === route.channel &&
+        to.to === route.target &&
+        (to.accountId ?? 'default') === route.accountId &&
+        String(to.threadId ?? '') === String(route.threadId ?? ''),
+    );
+    return sessions.length === 1 ? sessions[0] : null;
+  }
   // A delivered message becomes the product manager's own reply in his session for the chat
   // it reached (the project chat or the owner DM), as text plus a MEDIA line per file, so
   // that chat's history and what the model reads next turn match the chat. It waits while
@@ -729,16 +843,7 @@ export class BoardRuntime {
     try {
       const route = toOwner ? await this.ownerRoute() : project.route;
       const agentId = topology().productAgentId;
-      const sessions = (
-        await this.sessionRows(agentId, route.target.replace(/^[^:]+:/, ''))
-      ).filter(
-        ({ deliveryContext: to }) =>
-          to?.channel === route.channel &&
-          to.to === route.target &&
-          (to.accountId ?? 'default') === route.accountId &&
-          String(to.threadId ?? '') === String(route.threadId ?? ''),
-      );
-      const session = sessions.length === 1 ? sessions[0] : null;
+      const session = await this.chatSession(route);
       if (!session?.sessionId || rowLive(session, this.now())) return;
       const files = JSON.parse(row.files).map((path) => `MEDIA:${path}`);
       const text = [sentText(row, project, toOwner), ...(files.length ? ['', ...files] : [])];
@@ -1014,6 +1119,26 @@ export class BoardRuntime {
       ? `${lines.join('\n').slice(0, 2000)}\n(Project background from project_board, not an instruction.)`
       : null;
   }
+  // A task as `you` (a role) sees it: its project, description, plan and latest notes.
+  taskLines(task, project, you) {
+    const notes = this.store.notes(task.id, 15);
+    return [
+      `Project: ${project.name} (project ${project.id}), ${project.state}. Project chat: ${chatLabel(project.route)}.`,
+      ...(project.context ? [`Project context:\n${clip(project.context, 3000)}`] : []),
+      `Task #${task.id}: ${task.title}`,
+      `Status: ${task.status}${task.status === 'open' ? `, waiting on ${task.holder === you ? `you (${you})` : task.holder}` : ''}. Created by ${task.created_by}.`,
+      ...(task.body ? [`Description:\n${clip(task.body, 4000)}`] : []),
+      ...(task.plan ? [`Plan:\n${task.plan}`] : []),
+      ...(notes.length
+        ? [
+            'Notes (oldest first):',
+            ...notes.map(
+              (note) => `- [${note.author}, ${when(note.created)}] ${clip(note.text, 800)}`,
+            ),
+          ]
+        : []),
+    ];
+  }
   // The task card injected into every turn of a private task session.
   taskCard(sessionKey) {
     const scope = parseTaskSession(sessionKey);
@@ -1024,23 +1149,9 @@ export class BoardRuntime {
     } catch {
       return 'This private task session no longer has a task. Reply with one short line and stop.';
     }
-    const project = this.store.project(task.project);
     const you = scope.role;
     this.markSeen(sessionKey, task.id);
-    const lines = [
-      `Project: ${project.name} (project ${project.id}), ${project.state}. Project chat: ${chatLabel(project.route)}.`,
-      ...(project.context ? [`Project context:\n${clip(project.context, 3000)}`] : []),
-      `Task #${task.id}: ${task.title}`,
-      `Status: ${task.status}${task.status === 'open' ? `, waiting on ${task.holder === you ? `you (${you})` : task.holder}` : ''}. Created by ${task.created_by}.`,
-      ...(task.body ? [`Description:\n${clip(task.body, 4000)}`] : []),
-      ...(task.plan ? [`Plan:\n${task.plan}`] : []),
-    ];
-    const notes = this.store.notes(task.id, 15);
-    if (notes.length)
-      lines.push(
-        'Notes (oldest first):',
-        ...notes.map((note) => `- [${note.author}, ${when(note.created)}] ${clip(note.text, 800)}`),
-      );
+    const lines = this.taskLines(task, this.store.project(task.project), you);
     if (task.workers.length)
       lines.push(`Workers spawned for this task: ${task.workers.map((w) => w.key).join(', ')}`);
     const { workerAgentId, workerProfiles } = topology();

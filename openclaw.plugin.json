@@ -33,6 +33,11 @@
         "default": 2,
         "description": "At most this many private task sessions per manager run at once."
       },
+      "rewriteModel": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Model (provider/model) that rewrites project chat messages for the conversation. Omitted means the product manager's own model. Needs the entry's subagent.allowModelOverride."
+      },
       "ownerChat": {
         "type": "object",
         "additionalProperties": false,

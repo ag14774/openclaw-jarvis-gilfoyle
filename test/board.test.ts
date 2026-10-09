@@ -226,6 +226,8 @@ test('in the project chat the reply is the message; elsewhere a message is requi
     message: 'Which colour?',
   });
   assert.equal(question.message.state, 'not sent');
+  const notified = await h.call('main', JARVIS_GROUP, { operation: 'notify', message: 'FYI' });
+  assert.equal(notified.message.state, 'not sent');
   assert.equal(h.native.sent.length, 0);
 
   const other = await h.call('main', JARVIS_DM, {
@@ -791,6 +793,151 @@ test('files follow their message, and the message joins the session of the chat 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// A project bound to the group chat, whose session is Jarvis's and has a chat history.
+async function chatProject(h) {
+  await project(h);
+  const chat = h.native.session(JARVIS_GROUP);
+  chat.deliveryContext = { channel: 'telegram', to: 'telegram:-200', accountId: 'default' };
+  h.native.history[JARVIS_GROUP] = [];
+  const say = (role, text) =>
+    h.native.history[JARVIS_GROUP].push({
+      role,
+      content: role === 'user' ? text : [{ type: 'text', text }],
+      timestamp: h.now(),
+    });
+  return { chat, say };
+}
+
+test('a project chat message is rewritten for the conversation before it is sent', async () => {
+  const h = await harness();
+  const { say } = await chatProject(h);
+  say('user', 'Old chatter');
+  h.advance(MINUTE);
+  say('user', 'Please add CSV export');
+  const { task } = await h.call('main', JARVIS_DM, {
+    operation: 'add_task',
+    project: 'quote-desk',
+    title: 'CSV export',
+  });
+  h.advance(MINUTE);
+  say('assistant', 'Recorded.');
+  h.native.history[JARVIS_GROUP].push({ role: 'toolResult', content: 'x', timestamp: h.now() });
+  say('user', 'Also, the logo looks off');
+  const calls = [];
+  h.runtime.adapt = async (input) => {
+    calls.push(input);
+    return 'The CSV export you asked for is done.';
+  };
+  const closed = await h.call('main', key(h, 'product', task), {
+    operation: 'update_task',
+    status: 'done',
+    note: 'Accepted',
+    message: 'CSV export is merged.',
+  });
+  assert.equal(closed.message.state, 'sent');
+  assert.equal(h.native.sent.at(-1).message, 'The CSV export you asked for is done.');
+  // The rewrite sees the chat from the request on, the task, and the message as written.
+  const { system, message } = calls[0];
+  assert.match(system, /Keep every fact/);
+  assert.doesNotMatch(message, /Old chatter/);
+  assert.match(
+    message,
+    /User: Please add CSV export\n.*Jarvis: Recorded\.\n.*User: Also, the logo looks off/,
+  );
+  assert.match(message, /Task #\d+: CSV export/);
+  assert.match(message, /The message to send:\nCSV export is merged\.$/);
+  // The chat's session records the text as sent.
+  assert.equal(
+    h.native.transcript.at(-1).message.content[0].text,
+    'The CSV export you asked for is done.',
+  );
+});
+
+test('a rewrite waits briefly for a busy or changing chat, and a failed one sends the message as written', async () => {
+  const h = await harness();
+  const { chat } = await chatProject(h);
+  chat.hasActiveRun = true;
+  let calls = 0;
+  h.runtime.adapt = async () => {
+    calls++;
+    throw new Error('model down');
+  };
+  const notify = () =>
+    h.call('main', JARVIS_DM, { operation: 'notify', project: 'quote-desk', message: 'Heads up' });
+  assert.equal((await notify()).state, 'pending');
+  h.advance(MINUTE);
+  await h.tick();
+  assert.equal(h.native.sent.length, 0);
+  // After two minutes it goes out anyway.
+  h.advance(MINUTE + 1000);
+  await h.tick();
+  assert.equal(h.native.sent.at(-1).message, 'Heads up');
+  assert.match(h.warnings.at(-1), /sent as written: model down/);
+  // When the chat changes during the rewrite, the message is rewritten again.
+  chat.hasActiveRun = false;
+  h.runtime.adapt = async () => {
+    calls++;
+    if (calls === 2) chat.updatedAt += 1;
+    return `Rewrite ${calls}`;
+  };
+  assert.equal((await notify()).state, 'pending');
+  h.advance(MINUTE / 2);
+  await h.tick();
+  assert.equal(h.native.sent.at(-1).message, 'Rewrite 3');
+  // A message that falls back to the owner DM is not rewritten again there.
+  h.native.sendStatus = (p) => (p.conversationRef === ref('b') ? 'suppressed' : 'sent');
+  await notify();
+  assert.equal(calls, 4);
+  assert.equal(h.native.sent.at(-1).message, '[Quote Desk] Rewrite 4');
+});
+
+test('the rewrite runs as the product manager, with his workspace files and the configured model', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jg-workspace-'));
+  writeFileSync(join(dir, 'SOUL.md'), 'Calm and precise.');
+  writeFileSync(join(dir, 'USER.md'), 'Explain in plain words.');
+  try {
+    const calls = [];
+    const h = await harness({
+      config: { rewriteModel: 'openai/gpt-5.6-terra' },
+      workspace: dir,
+      complete: async (params) => {
+        calls.push(params);
+        return { text: 'Rewritten' };
+      },
+    });
+    await chatProject(h);
+    await h.call('main', JARVIS_DM, { operation: 'notify', project: 'quote-desk', message: 'Hi' });
+    assert.equal(h.native.sent.at(-1).message, 'Rewritten');
+    const [{ agentId, model, extraSystemPrompt }] = calls;
+    assert.deepEqual([agentId, model], ['main', 'openai/gpt-5.6-terra']);
+    assert.match(
+      extraSystemPrompt,
+      /Keep every fact[\s\S]*Calm and precise\.\n\nExplain in plain words\.$/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a long chat keeps the request and the newest messages for the rewrite', async () => {
+  const h = await harness();
+  const at = h.now();
+  const messages = [
+    { role: 'user', content: 'Before', timestamp: at - 1 },
+    { role: 'user', content: 'The request', timestamp: at },
+    ...Array.from({ length: 30 }, (_, i) => ({
+      role: 'user',
+      content: `${i} ${'x'.repeat(2000)}`,
+      timestamp: at + i + 1,
+    })),
+  ];
+  const lines = h.runtime.chatSince(messages, at).split('\n');
+  assert.match(lines[0], /User: The request$/);
+  assert.match(lines[1], /^\[1[0-9] earlier messages left out\]$/);
+  assert.match(lines.at(-1), /User: 29 x+$/);
+  assert(lines.join('\n').length < 42000);
 });
 
 test('use_this_chat binds only the chat of the message that started the turn', async () => {

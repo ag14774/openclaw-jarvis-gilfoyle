@@ -60,6 +60,8 @@ Both managers' private task sessions follow the model and thinking level selecte
 ### Delivery and chat history
 
 - Messages go only to the project chat, or the configured owner DM when there is no bound chat, the project chat rejects them or it keeps failing. Owner-DM messages are prefixed with the project name. Delivery never rebinds the project's chat.
+- Before its first send to the project chat, a message is rewritten for the conversation it lands in. One tool-free model call as the product manager, with no session, receives the chat (from the user's message that led to the task, keeping the newest messages when it is long), the task's card, the message as written, and the product manager's `IDENTITY.md`, `SOUL.md` and `USER.md`. It keeps the facts and adds only the background the user needs. Deliveries run one at a time, and while the chat's session is mid-reply, or changes during the rewrite, the message is rewritten again shortly, for up to two minutes. The sent text replaces the stored one; a failed rewrite sends the message as written. Owner-DM fallbacks are not rewritten.
+- `notify` from the project chat itself sends nothing: the reply is the message.
 - Native idempotency keys keep retries from intentionally sending duplicates. Delivery has finite retries and can become failed; `list` and health expose undelivered messages and failures.
 - Attachments are up to four existing files (absolute paths, 8 MB each). They follow the text as native message sends to the same chat, each with a stable idempotency key, and are read again on every attempt. Once the text is accepted the message is delivered and never falls back; failed files are retried in that chat, and if they keep failing the message stays delivered with the error recorded. Files must remain available until delivery finishes.
 - A delivered message is added as the product manager's own reply to the session for the chat it reached (project chat or owner DM): the text as sent, then one `MEDIA:` line per file. OpenClaw's transcript writer uses a stable idempotency key so the Control UI history and later model context reflect the delivered message.
@@ -75,19 +77,20 @@ Hook errors are logged and ignored, except that a worker launch from a task sess
 
 Required configuration is shown in [getting started](getting-started.md#configure-the-plugin); the authoritative shape is [openclaw.plugin.json](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/openclaw.plugin.json).
 
-| Setting                                                  | Default / constraint                                                                                                       |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `statePath`                                              | Required absolute path to a new file or schema 19 board. No automatic migration. `:memory:` is accepted for ephemeral use. |
-| `productAgentId`, `engineeringAgentId`, `worker.agentId` | Required, distinct OpenClaw agent IDs.                                                                                     |
-| `ownerChat`                                              | Required `channel`, `accountId`, `to`; optional `threadId`. The owner's direct chat with product, used for fallback.       |
-| `worker.profiles`                                        | Required, 1–8 profiles with `id` and `model`; optional `thinking` and `description`.                                       |
-| `worker.runtime`                                         | `acp`; also accepts `subagent`.                                                                                            |
-| `worker.limit`                                           | 2; range 1–20; engineering's directly launched configured workers.                                                         |
-| `sessionNamespace`                                       | `jarvis-gilfoyle`.                                                                                                         |
-| `scanMs`                                                 | 60000; range 10000–600000.                                                                                                 |
-| `turnTimeoutSeconds`                                     | 1800; range 60–14400, for each private task-session turn.                                                                  |
-| `maxWakesPerRole`                                        | 2; range 1–10.                                                                                                             |
-| `enabled`                                                | Omitted means enabled; `false` stops automatic scans/wakes. This config flag does not remove the board tool.               |
+| Setting                                                  | Default / constraint                                                                                                                        |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `statePath`                                              | Required absolute path to a new file or schema 19 board. No automatic migration. `:memory:` is accepted for ephemeral use.                  |
+| `productAgentId`, `engineeringAgentId`, `worker.agentId` | Required, distinct OpenClaw agent IDs.                                                                                                      |
+| `ownerChat`                                              | Required `channel`, `accountId`, `to`; optional `threadId`. The owner's direct chat with product, used for fallback.                        |
+| `worker.profiles`                                        | Required, 1–8 profiles with `id` and `model`; optional `thinking` and `description`.                                                        |
+| `worker.runtime`                                         | `acp`; also accepts `subagent`.                                                                                                             |
+| `worker.limit`                                           | 2; range 1–20; engineering's directly launched configured workers.                                                                          |
+| `sessionNamespace`                                       | `jarvis-gilfoyle`.                                                                                                                          |
+| `scanMs`                                                 | 60000; range 10000–600000.                                                                                                                  |
+| `turnTimeoutSeconds`                                     | 1800; range 60–14400, for each private task-session turn.                                                                                   |
+| `maxWakesPerRole`                                        | 2; range 1–10.                                                                                                                              |
+| `rewriteModel`                                           | The product manager's model. A `provider/model` for rewriting project chat messages; needs the entry's `subagent.allowModelOverride: true`. |
+| `enabled`                                                | Omitted means enabled; `false` stops automatic scans/wakes. This config flag does not remove the board tool.                                |
 
 The entry's `enabled` switch and hook permissions are OpenClaw settings, separate from the plugin's `config.enabled`. Managers need `project_board` permission; their other tools and worker runtime remain host configuration.
 
