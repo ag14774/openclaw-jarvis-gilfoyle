@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Coordination skill (protocol 11.16): product describes what the user needs, why, and what they would check, adding context but not requirements the user did not ask for, and keeps the bar in proportion to the request. Engineering asks for a design second opinion only for decisions that would be expensive to change later, not for self-contained changes that are easy to replace.
+- Board backups work with a board of any schema version: the backup script checks that the file is a board and intact, and copies everything else as it is. Any version of the script can back up the board before an upgrade.
 
 ## 2026.10.0 - 2026-10-08
 

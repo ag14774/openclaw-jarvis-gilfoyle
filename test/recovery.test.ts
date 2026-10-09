@@ -134,7 +134,7 @@ test('missing and symlink sources and nonprivate parents are refused without out
   assert.deepEqual(readdirSync(shared), []);
 });
 
-test('foreign schema-zero, mismatched version, and malformed sources are refused read-only', async (t) => {
+test('schema-zero and malformed sources are refused read-only', async (t) => {
   const { root, source, store } = fixture(t);
   const foreign = join(root, 'foreign.sqlite');
   const db = new DatabaseSync(foreign);
@@ -142,7 +142,7 @@ test('foreign schema-zero, mismatched version, and malformed sources are refused
   db.close();
   const malformed = join(root, 'malformed.sqlite');
   writeFileSync(malformed, 'not SQLite');
-  store.db.exec('PRAGMA user_version=17');
+  store.db.exec('PRAGMA user_version=0');
   for (const input of [foreign, malformed, source]) {
     const before = readFileSync(input);
     await assert.rejects(createCopy('backup', input, join(root, 'refused')));
@@ -155,27 +155,27 @@ test('foreign schema-zero, mismatched version, and malformed sources are refused
   check.close();
 });
 
-test('schema-19 labels do not admit incorrect columns or extra objects', async (t) => {
-  const { root, source, store } = fixture(t);
-  store.db.exec('ALTER TABLE outbox RENAME COLUMN recorded TO other');
-  await assert.rejects(createCopy('backup', source, join(root, 'refused')), /columns/);
-  store.db.exec(
-    'ALTER TABLE outbox RENAME COLUMN other TO recorded; CREATE VIEW unrelated AS SELECT 1',
-  );
-  await assert.rejects(createCopy('backup', source, join(root, 'refused')), /four board tables/);
-  store.db.exec('DROP VIEW unrelated; CREATE TABLE sqliteXextra(value TEXT)');
-  await assert.rejects(createCopy('backup', source, join(root, 'refused')), /four board tables/);
+test('a database without the board tables is refused', async (t) => {
+  const { root } = fixture(t);
+  const foreign = join(root, 'foreign.sqlite');
+  const db = new DatabaseSync(foreign);
+  db.exec('PRAGMA user_version=99; CREATE TABLE unrelated(value TEXT)');
+  db.close();
+  await assert.rejects(createCopy('backup', foreign, join(root, 'refused')), /board tables/);
   assert(!existsSync(join(root, 'refused')));
 });
 
-test('a board whose columns were added in a different order is accepted', async (t) => {
-  // Older boards gained outbox.files and outbox.recorded at the end of the table.
+test('a board of another schema version is backed up as it is', async (t) => {
   const { root, source, store } = fixture(t);
   store.db.exec(
-    `ALTER TABLE outbox DROP COLUMN files; ALTER TABLE outbox ADD COLUMN files TEXT NOT NULL DEFAULT '[]'`,
+    "ALTER TABLE tasks ADD COLUMN future TEXT; UPDATE tasks SET future='kept'; CREATE TABLE extra(value TEXT); INSERT INTO extra VALUES('kept'); PRAGMA user_version=23",
   );
-  assert.equal(verifyBoard(source).integrity, 'ok');
-  assert.equal((await createCopy('backup', source, join(root, 'copy'))).counts.outbox, 1);
+  const report = await createCopy('backup', source, join(root, 'copy'));
+  assert.equal(report.schema, 23);
+  const copy = new DatabaseSync(join(root, 'copy', 'board.sqlite'), { readOnly: true });
+  assert.equal(copy.prepare('SELECT future FROM tasks').get().future, 'kept');
+  assert.equal(copy.prepare('SELECT value FROM extra').get().value, 'kept');
+  copy.close();
 });
 
 test('foreign-key damage is refused despite intact SQLite pages', async (t) => {
