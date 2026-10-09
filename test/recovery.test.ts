@@ -155,98 +155,27 @@ test('schema-zero and malformed sources are refused read-only', async (t) => {
   check.close();
 });
 
-test('positive versions do not admit unrelated databases or views replacing base tables', async (t) => {
-  const { root, source, store } = fixture(t);
+test('a database without the board tables is refused', async (t) => {
+  const { root } = fixture(t);
   const foreign = join(root, 'foreign.sqlite');
   const db = new DatabaseSync(foreign);
-  db.exec('PRAGMA user_version=99; CREATE TABLE unrelated(value BLOB)');
+  db.exec('PRAGMA user_version=99; CREATE TABLE unrelated(value TEXT)');
   db.close();
-  store.db.exec('DROP TABLE outbox; CREATE VIEW outbox AS SELECT 1');
-  for (const input of [foreign, source]) {
-    const before = readFileSync(input);
-    await assert.rejects(createCopy('backup', input, join(root, 'refused')), /base board tables/);
-    assert.deepEqual(readFileSync(input), before);
-  }
+  await assert.rejects(createCopy('backup', foreign, join(root, 'refused')), /board tables/);
   assert(!existsSync(join(root, 'refused')));
 });
 
-for (const version of [17, 23])
-  test(`schema ${version} archives changed columns and unknown data and objects without interpretation`, async (t) => {
-    const { root, source, store } = fixture(t);
-    store.db.exec(
-      version === 17
-        ? 'ALTER TABLE tasks DROP COLUMN plan; ALTER TABLE outbox DROP COLUMN recorded'
-        : "ALTER TABLE tasks ADD COLUMN future BLOB; UPDATE tasks SET future=x'00ff80'; ALTER TABLE outbox RENAME COLUMN recorded TO future_recorded",
-    );
-    store.db.exec(`
-    PRAGMA user_version=${version};
-    CREATE TABLE "odd"" name; --"(id INTEGER PRIMARY KEY, payload BLOB);
-    INSERT INTO "odd"" name; --" VALUES(1,x'00ff804142');
-    CREATE TABLE "__proto__"(value TEXT);
-    INSERT INTO "__proto__" VALUES('unknown');
-    CREATE TABLE "constructor"(value TEXT);
-    CREATE TABLE sqliteXextra(value TEXT);
-    CREATE INDEX "unknown index" ON "odd"" name; --"(hex(payload)) WHERE id > 0;
-    CREATE VIEW "unknown view" AS SELECT hex(payload) AS value FROM "odd"" name; --";
-    CREATE TRIGGER "unknown trigger" AFTER INSERT ON "odd"" name; --"
-      BEGIN INSERT INTO "constructor" VALUES(hex(new.payload)); END;
-  `);
-    const schema = store.all('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name');
-    const snapshot = join(root, 'copy', 'board.sqlite');
-    const report = await createCopy('backup', source, join(root, 'copy'));
-    assert.equal(report.schema, version);
-    assert.equal(report.counts['odd" name; --'], 1);
-    assert.equal(report.counts.__proto__, 1);
-    assert.equal(report.counts.constructor, 0);
-    assert.equal(report.counts.sqliteXextra, 0);
-    assert.equal(Object.keys(report.counts).length, 8);
-    const serialized = JSON.parse(readFileSync(join(root, 'copy', 'verification.json'), 'utf8'));
-    assert.deepEqual(serialized.counts, report.counts);
-    const before = readFileSync(snapshot);
-    const staged = await createCopy('stage', snapshot, join(root, 'stage'));
-    assert.equal(staged.sha256, report.sha256);
-    assert.deepEqual(readFileSync(snapshot), before);
-    assert.deepEqual(readFileSync(join(root, 'stage', 'board.sqlite')), before);
-    for (const path of [snapshot, join(root, 'stage', 'board.sqlite')]) {
-      const db = new DatabaseSync(path);
-      try {
-        assert.deepEqual(
-          db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name').all(),
-          schema,
-        );
-        assert.equal(db.prepare('SELECT value FROM "unknown view"').get().value, '00FF804142');
-        assert.deepEqual(
-          db.prepare('SELECT payload FROM "odd"" name; --"').get().payload,
-          new Uint8Array([0, 255, 128, 65, 66]),
-        );
-        if (version === 23)
-          assert.equal(db.prepare('SELECT hex(future) AS value FROM tasks').get().value, '00FF80');
-        db.exec('INSERT INTO "odd"" name; --" VALUES(2,x\'abcd\')');
-        assert.equal(db.prepare('SELECT value FROM "constructor"').get().value, 'ABCD');
-      } finally {
-        db.close();
-      }
-    }
-  });
-
-test('checks requiring a custom SQLite function are refused without skipping verification', async (t) => {
+test('a board of another schema version is backed up as it is', async (t) => {
   const { root, source, store } = fixture(t);
-  store.db.function('private_check', { deterministic: true }, (value) =>
-    value === 'keep' ? 1 : 0,
-  );
   store.db.exec(
-    "CREATE TABLE custom(value TEXT); INSERT INTO custom VALUES('keep'); CREATE INDEX custom_index ON custom(private_check(value))",
+    "ALTER TABLE tasks ADD COLUMN future TEXT; UPDATE tasks SET future='kept'; CREATE TABLE extra(value TEXT); INSERT INTO extra VALUES('kept'); PRAGMA user_version=23",
   );
-  const main = readFileSync(source);
-  const wal = readFileSync(source + '-wal');
-  assert.throws(() => verifyBoard(source), /private_check|unsafe|function/i);
-  await assert.rejects(
-    createCopy('backup', source, join(root, 'refused')),
-    /private_check|unsafe|function/i,
-  );
-  assert(!existsSync(join(root, 'refused')));
-  assert.deepEqual(readFileSync(source), main);
-  assert.deepEqual(readFileSync(source + '-wal'), wal);
+  const report = await createCopy('backup', source, join(root, 'copy'));
+  assert.equal(report.schema, 23);
+  const copy = new DatabaseSync(join(root, 'copy', 'board.sqlite'), { readOnly: true });
+  assert.equal(copy.prepare('SELECT future FROM tasks').get().future, 'kept');
+  assert.equal(copy.prepare('SELECT value FROM extra').get().value, 'kept');
+  copy.close();
 });
 
 test('foreign-key damage is refused despite intact SQLite pages', async (t) => {

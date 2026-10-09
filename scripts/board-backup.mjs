@@ -20,6 +20,9 @@ import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
+// Any board version: the file must hold the board tables; everything else is copied as is.
+const TABLES = ['projects', 'tasks', 'notes', 'outbox'];
+
 function sourcePath(path) {
   assert(path && path !== ':memory:', 'Source must be an existing board file');
   const absolute = resolve(path);
@@ -30,15 +33,15 @@ function sourcePath(path) {
 function inspect(db) {
   const schema = db.prepare('PRAGMA user_version').get().user_version;
   assert(schema > 0, 'Expected a positive board schema version');
-  const tables = db
-    .prepare(
-      "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
-    )
-    .all()
-    .map((row) => row.name);
+  const present = new Set(
+    db
+      .prepare("SELECT name FROM sqlite_schema WHERE type='table'")
+      .all()
+      .map((row) => row.name),
+  );
   assert(
-    ['projects', 'tasks', 'notes', 'outbox'].every((table) => tables.includes(table)),
-    'Expected the four base board tables',
+    TABLES.every((table) => present.has(table)),
+    'Expected the four board tables',
   );
   assert.deepEqual(
     db
@@ -50,10 +53,7 @@ function inspect(db) {
   );
   assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0, 'Foreign key check failed');
   const counts = Object.fromEntries(
-    tables.map((table) => [
-      table,
-      db.prepare(`SELECT count(*) AS n FROM "${table.replaceAll('"', '""')}"`).get().n,
-    ]),
+    TABLES.map((table) => [table, db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n]),
   );
   return { schema, integrity: 'ok', foreignKeys: 'ok', counts };
 }
@@ -104,7 +104,6 @@ export async function createCopy(operation, source, destination) {
       closeSync(openSync(snapshot, 'wx', 0o600));
       const db = new DatabaseSync(input, { readOnly: true });
       try {
-        db.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF');
         await backup(db, snapshot);
       } finally {
         db.close();

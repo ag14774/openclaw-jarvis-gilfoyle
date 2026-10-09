@@ -9,7 +9,6 @@ The plugin is a small substrate: a board (projects, tasks with a holder, notes, 
 It has one owner and one installation, on the owner's own gateway. There are no other users to keep compatible:
 
 - Write no backward-compatibility, migration or upgrade code. A schema change bumps the schema version; the operator applies it to the board once, by hand, when upgrading (the CHANGELOG entry gives the exact statements).
-  This rule concerns runtime compatibility. The archival backup utility copies SQLite pages across schema versions without migrating or interpreting the board schema.
 - Handle only states the deployed or new code can produce. Code that never ran on the live system left nothing behind to handle.
 - The engineering manager states in your assignment which version is deployed and any facts about the live system that matter.
 

@@ -10,9 +10,9 @@ does not back up those systems. Never automatically restore an old board.
 
 Use Node with `node:sqlite` and its `backup` API (the repository's supported Node
 range; tested on **26.8.1**). The utility is self-contained and shipped in the
-package; it needs neither a build nor OpenClaw dependencies. It can run from a
-newer checkout or package without matching the installed plugin's schema version.
-The commands below run from the directory containing the utility. Supply your own
+package; it needs neither a build nor OpenClaw dependencies. Any version of it
+backs up a board of any schema version. The commands below run from the directory
+containing the utility. Supply your own
 paths, taken from the intended plugin configuration's `statePath`. There is no
 default source, automatic discovery, gateway call, service or configuration change.
 
@@ -65,18 +65,10 @@ report. Failed copy/verification removes only the directory created by this
 invocation; an interruption can leave a partial directory. Treat that as incomplete
 and use a fresh destination. Existing paths are never cleaned up by the command.
 
-Checks require a positive actual `user_version`, base tables named `projects`,
-`tasks`, `notes` and `outbox`, `PRAGMA integrity_check` returning only `ok`, and
-an empty `PRAGMA foreign_key_check`. Columns and additional tables, views,
-triggers and indexes are unrestricted and preserved by SQLite's page-copy API.
-Reports include the actual version and counts for every user table. Verification
-uses read-only/query-only access with `trusted_schema=OFF`; the SQLite features
-must be readable and checkable by this Node build without custom extensions,
-functions or collations. Unsupported features cause refusal, never skipped checks.
-The required base-table names limit which schemas can be archived. These minimal
-wrong-file checks are not authentication, runtime startup compatibility or
-validation of free-text/JSON/agent judgments. The utility does not import the
-runtime Store or migrate or rewrite the source schema.
+Checks require a positive `user_version`, the four board tables (`projects`,
+`tasks`, `notes`, `outbox`), `PRAGMA integrity_check` returning only `ok`, and an
+empty `PRAGMA foreign_key_check`. Everything else in the file is copied as it is.
+The utility does not import the runtime Store, so it never changes the source board.
 
 ## Decide whether to recover production separately
 

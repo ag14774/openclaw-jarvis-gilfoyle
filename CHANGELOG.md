@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Archival board backups accept positive schema versions with the four base board tables, without requiring a matching installed script or exact columns. SQLite page copies preserve additional data and schema objects; reports count all user tables and record the actual version. Integrity and foreign-key checks remain mandatory, and features unreadable or uncheckable by the Node SQLite build are refused. Runtime schema admission is unchanged; no migration or source schema rewriting is performed.
+- Board backups work with a board of any schema version: the backup script checks that the file is a board and intact, and copies everything else as it is. Any version of the script can back up the board before an upgrade.
 
 ## 2026.10.0 - 2026-10-08
 
