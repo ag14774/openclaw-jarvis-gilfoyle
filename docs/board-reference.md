@@ -69,7 +69,7 @@ Both managers' private task sessions follow the model and thinking level selecte
 
 ### Scope and failure behavior
 
-Outside the board tool and private task-session guards, the plugin adds only brief manager context: in other chats, one line explaining that the project role adds to the usual role; in a project chat, the product manager also sees the project name and tasks waiting on the user, each with the message the user was sent with its latest handover (or that note, marked internal, when no message was sent). Other agents and the product manager's personal-assistant work are otherwise unaffected.
+Outside the board tool and private task-session guards, the plugin adds only brief manager context: in other chats, one line explaining that the project role adds to the usual role; in a project chat, the product manager also sees the project name and tasks waiting on the user, each with the last message the user received for it and any newer note, marked internal. Other agents and the product manager's personal-assistant work are otherwise unaffected.
 
 Hook errors are logged and ignored, except that a worker launch from a task session is refused while the running workers cannot be counted. The board is not a security sandbox or a substitute for host tool permissions. An unavailable board is reported by the tool and health; scans log failures. The shared runtime and companion are replaced on plugin reload, or after the companion has not answered for five minutes, and scans try again using the persistent board, keeping the launches still starting.
 

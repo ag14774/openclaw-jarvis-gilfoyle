@@ -180,13 +180,25 @@ test('a question goes to the user with its message, and the answer goes back to 
   h.advance(2 * 60 * MINUTE);
   assert.deepEqual((await h.tick()).woken, []);
 
+  // A message that has not been delivered, and a later note, do not hide the question.
+  h.native.sendStatus = () => 'throw';
+  await h.call('main', jKey, { operation: 'notify', message: 'Undelivered reminder' });
+  h.native.sendStatus = () => 'sent';
+  await h.call('main', jKey, { operation: 'update_task', note: 'Remind on Monday' });
+  h.endAllRuns();
+
   // In the project chat Jarvis sees the waiting question and records the answer.
   const context = await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
+  assert.match(
+    context.prependContext,
+    /— latest internal note \([^)]+\), not sent to them: Remind on Monday/,
+  );
+  assert.doesNotMatch(context.prependContext, /Undelivered reminder/);
   assert.match(context.prependContext, /also used as the project chat for "Quote Desk"/);
   // It shows the question as the user received it, not the internal handover note.
   assert.match(
     context.prependContext,
-    /Waiting on the user: Quote Desk task #\d+ "Pricing page" — they were sent: Should the pricing page show monthly or yearly prices\?/,
+    /Waiting on the user: Quote Desk task #\d+ "Pricing page" — last message they received \([^)]+\): Should the pricing page show monthly or yearly prices\? —/,
   );
   assert.doesNotMatch(context.prependContext, /billing period/);
   const answered = await h.call('main', JARVIS_GROUP, {
@@ -237,7 +249,10 @@ test('in the project chat the reply is the message; elsewhere a message is requi
   // With no board message, the chat context labels the handover note as internal.
   h.endTurn('main', JARVIS_GROUP);
   const context = await h.userMessage('main', JARVIS_GROUP, 'telegram:-200');
-  assert.match(context.prependContext, /"Colour" — latest internal note, not sent to them: Asked/);
+  assert.match(
+    context.prependContext,
+    /"Colour" — latest internal note \([^)]+\), not sent to them: Asked/,
+  );
 
   const other = await h.call('main', JARVIS_DM, {
     operation: 'add_task',

@@ -3,7 +3,7 @@
 ## 2026.10.3 - 2026-10-10
 
 - Chat rewrites work: the model call runs within the manager's turn that sent the message. In 2026.10.2 it ran in the board service's own context, which OpenClaw refuses once the service's start has finished ("Gateway is draining"), so every message went out as written. While the chat is busy or changes during the rewrite, that turn now waits and rewrites again, for up to two minutes. Messages the scan sends on its own (stall notices, retries) go out as written.
-- In a project chat, a task waiting on the user is shown with the message the user was sent, not the internal handover note. The note had made the product manager take his own question for a leaked internal note and ask it again.
+- In a project chat, a task waiting on the user is shown with the last message the user received for it (one with a delivery receipt) and any newer note, marked internal, instead of only the latest note. The note had made the product manager take his own question for a leaked internal note and ask it again.
 
 ## 2026.10.2 - 2026-10-09
 

@@ -1116,15 +1116,14 @@ export class BoardRuntime {
         "SELECT * FROM tasks WHERE project=? AND status='open' AND holder='user' ORDER BY id LIMIT 5",
         project.id,
       )) {
-        // What the user was sent with the latest handover, else that note marked internal.
+        // The last message the user received for it, and any newer note marked internal.
         const last = this.store.notes(task.id, 1)[0];
         const sent = this.store.get(
-          'SELECT text FROM outbox WHERE task=? AND created>=? ORDER BY id DESC LIMIT 1',
+          'SELECT text, created FROM outbox WHERE task=? AND receipt IS NOT NULL ORDER BY id DESC LIMIT 1',
           task.id,
-          last?.created ?? 0,
         );
         lines.push(
-          `Waiting on the user: ${project.name} task #${task.id} "${task.title}"${sent ? ` — they were sent: ${clip(sent.text, 600)}` : last ? ` — latest internal note, not sent to them: ${clip(last.text, 300)}` : ''}`,
+          `Waiting on the user: ${project.name} task #${task.id} "${task.title}"${sent ? ` — last message they received (${when(sent.created)}): ${clip(sent.text, 600)}` : ''}${last && !(sent && sent.created >= last.created) ? ` — latest internal note (${when(last.created)}), not sent to them: ${clip(last.text, 300)}` : ''}`,
         );
       }
     }
