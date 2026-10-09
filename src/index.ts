@@ -212,9 +212,10 @@ export default {
               outsideTurns(async (params) =>
                 (await transcripts()).publishSessionTranscriptUpdateByIdentity(params),
               ),
-            // One tool-free model call as the product manager, with no session.
+            // One tool-free model call as the product manager, with no session, in the
+            // caller's context (not outsideTurns): OpenClaw admits it only from running work.
             adapt: api.runtime?.subagent?.complete
-              ? outsideTurns(async ({ system, message }) => {
+              ? async ({ system, message }) => {
                   const agentId = topology().productAgentId;
                   const own = persona(currentConfig(api), agentId);
                   const result = await api.runtime.subagent.complete({
@@ -230,7 +231,7 @@ export default {
                     timeoutMs: 120 * 1000,
                   });
                   return result.text;
-                })
+                }
               : null,
             ...(testHooks.now ? { now: testHooks.now } : {}),
           },

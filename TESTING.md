@@ -19,7 +19,7 @@
 - pause and resume;
 - per-role concurrency;
 - delivery fallback and retry identity;
-- rewriting a project chat message for its conversation: what the model call receives, the long-chat trim, waiting for a busy chat, and sending as written when the rewrite fails;
+- rewriting a project chat message for its conversation: what the model call receives, the long-chat trim, waiting within the turn for a busy or changing chat, sending as written when the rewrite fails, and no rewrite for the scan's own deliveries;
 - `use_this_chat` turn binding;
 - non-interference with personal work and other agents;
 - the board file surviving a restart, and refusal of a database with another schema;
