@@ -635,16 +635,19 @@ export class BoardRuntime {
   }
   // Before its first send to the project chat, the product manager rewrites a message for
   // the conversation it lands in, given that chat since the task's request, the task and the
-  // message as written. It waits while that chat is mid-reply, for at most ADAPT_WAIT_MS.
-  // Any failure sends the message as written.
+  // message as written. While that chat is mid-reply, or changed during the rewrite, it is
+  // tried again shortly, for at most ADAPT_WAIT_MS. Any failure sends the message as written.
   async adaptToChat(row, project, route) {
+    const later = () => {
+      if (this.now() - row.created >= ADAPT_WAIT_MS) return null;
+      this.store.run('UPDATE outbox SET next_at=? WHERE id=?', this.now() + MINUTE / 2, row.id);
+      return { state: 'pending', reason: 'the project chat is busy; it goes out shortly' };
+    };
     try {
       const session = await this.chatSession(route);
       if (!session) return null;
-      if (rowLive(session, this.now()) && this.now() - row.created < ADAPT_WAIT_MS) {
-        this.store.run('UPDATE outbox SET next_at=? WHERE id=?', this.now() + MINUTE / 2, row.id);
-        return { state: 'pending', reason: 'the project chat is mid-reply; it goes out after' };
-      }
+      const busy = rowLive(session, this.now()) && later();
+      if (busy) return busy;
       const history = await this.rpc('chat.history', {
         sessionKey: session.key,
         agentId: topology().productAgentId,
@@ -661,6 +664,10 @@ export class BoardRuntime {
         4000,
         'message',
       );
+      const after = await this.chatSession(route);
+      const changed =
+        (rowLive(after, this.now()) || after?.updatedAt !== session.updatedAt) && later();
+      if (changed) return changed;
       this.store.run('UPDATE outbox SET text=? WHERE id=?', adapted, row.id);
       row.text = adapted;
     } catch (error) {

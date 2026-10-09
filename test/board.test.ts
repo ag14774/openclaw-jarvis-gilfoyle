@@ -855,7 +855,7 @@ test('a project chat message is rewritten for the conversation before it is sent
   );
 });
 
-test('a rewrite waits briefly for a busy chat, and a failed one sends the message as written', async () => {
+test('a rewrite waits briefly for a busy or changing chat, and a failed one sends the message as written', async () => {
   const h = await harness();
   const { chat } = await chatProject(h);
   chat.hasActiveRun = true;
@@ -875,12 +875,22 @@ test('a rewrite waits briefly for a busy chat, and a failed one sends the messag
   await h.tick();
   assert.equal(h.native.sent.at(-1).message, 'Heads up');
   assert.match(h.warnings.at(-1), /sent as written: model down/);
-  // A message that falls back to the owner DM is not rewritten again there.
+  // When the chat changes during the rewrite, the message is rewritten again.
   chat.hasActiveRun = false;
+  h.runtime.adapt = async () => {
+    calls++;
+    if (calls === 2) chat.updatedAt += 1;
+    return `Rewrite ${calls}`;
+  };
+  assert.equal((await notify()).state, 'pending');
+  h.advance(MINUTE / 2);
+  await h.tick();
+  assert.equal(h.native.sent.at(-1).message, 'Rewrite 3');
+  // A message that falls back to the owner DM is not rewritten again there.
   h.native.sendStatus = (p) => (p.conversationRef === ref('b') ? 'suppressed' : 'sent');
   await notify();
-  assert.equal(calls, 2);
-  assert.equal(h.native.sent.at(-1).message, '[Quote Desk] Heads up');
+  assert.equal(calls, 4);
+  assert.equal(h.native.sent.at(-1).message, '[Quote Desk] Rewrite 4');
 });
 
 test('a long chat keeps the request and the newest messages for the rewrite', async () => {
