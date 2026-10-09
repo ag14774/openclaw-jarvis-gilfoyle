@@ -10,10 +10,9 @@ does not back up those systems. Never automatically restore an old board.
 
 Use Node with `node:sqlite` and its `backup` API (the repository's supported Node
 range; tested on **26.8.1**). The utility is self-contained and shipped in the
-package; it needs neither a build nor OpenClaw dependencies. It accepts only the
-board schema of its own version, so run the copy in the installed plugin's
-directory (for example `~/.openclaw/extensions/jarvis-gilfoyle`), which matches
-the live board. The commands below run from that directory. Supply your own
+package; it needs neither a build nor OpenClaw dependencies. Any version of it
+backs up a board of any schema version. The commands below run from the directory
+containing the utility. Supply your own
 paths, taken from the intended plugin configuration's `statePath`. There is no
 default source, automatic discovery, gateway call, service or configuration change.
 
@@ -32,7 +31,7 @@ The command creates `board.sqlite` and `verification.json` in the new directory.
 The directory is mode `0700`; both files are `0600`. Existing destinations,
 including symlinks, are refused, with no overwrite flag. The source must be an
 existing regular file, not a symlink, and is opened read-only. Missing, foreign,
-incompatible or invalid sources are refused; this utility never initializes or
+unreadable or invalid sources are refused; this utility never initializes or
 migrates a board.
 
 Node's SQLite backup API includes committed WAL content in a SQLite-consistent
@@ -66,13 +65,10 @@ report. Failed copy/verification removes only the directory created by this
 invocation; an interruption can leave a partial directory. Treat that as incomplete
 and use a fresh destination. Existing paths are never cleaned up by the command.
 
-Checks are `PRAGMA integrity_check` (all results must be `ok`), schema version
-**19**, the four expected tables and exact column names/types, absence of extra
-tables/views/triggers, and `PRAGMA foreign_key_check`. The utility does not import
-the runtime Store, so verification cannot silently execute board DDL. These are
-structural checks, not authentication, a full comparison of every constraint or
-index definition, or validation of free-text/JSON/agent judgments. Future schemas
-require a separately reviewed utility update, not bypassing the check.
+Checks require a positive `user_version`, the four board tables (`projects`,
+`tasks`, `notes`, `outbox`), `PRAGMA integrity_check` returning only `ok`, and an
+empty `PRAGMA foreign_key_check`. Everything else in the file is copied as it is.
+The utility does not import the runtime Store, so it never changes the source board.
 
 ## Decide whether to recover production separately
 

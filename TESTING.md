@@ -57,8 +57,8 @@ uses the existing Store solely to make fixtures; the operator utility has no
 runtime imports or dependency on OpenClaw. It covers committed, uncheckpointed WAL
 data, exclusion of an uncommitted write, separate staged verification and hashes,
 private permissions, no source checkpoint/journal change, existing destinations
-and aliases, concurrent destination refusal, malformed/foreign/incompatible schema,
-foreign-key violations, invalid CLI arguments, missing sources and refusal to
+and aliases, concurrent destination refusal, malformed/schema-zero/foreign sources,
+a board of another schema version, foreign-key violations, invalid CLI arguments, missing sources and refusal to
 stage a WAL database. Tests remove their fixtures and never contact a gateway,
 launch a worker or read real board/session data.
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Board backups work with a board of any schema version: the backup script checks that the file is a board and intact, and copies everything else as it is. Any version of the script can back up the board before an upgrade.
+
 ## 2026.10.0 - 2026-10-08
 
 First public release. Earlier development versions were used only on the author's own host; their history is in git.
