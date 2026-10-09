@@ -19,6 +19,7 @@
 - pause and resume;
 - per-role concurrency;
 - delivery fallback and retry identity;
+- rewriting a project chat message for its conversation: what the model call receives, the long-chat trim, waiting for a busy chat, and sending as written when the rewrite fails;
 - `use_this_chat` turn binding;
 - non-interference with personal work and other agents;
 - the board file surviving a restart, and refusal of a database with another schema;
@@ -41,9 +42,9 @@ These are mocked behavior tests, not live worker or hard-limit evidence.
 
 ## Native Integration
 
-`npm run test:native` (`JG_NATIVE_TEST=1`) also checks that every native method the companion calls exists in the pinned OpenClaw build. It reads the installed package only.
+`npm run test:native` (`JG_NATIVE_TEST=1`) also checks that every native method the companion calls, the transcript writer and the tool-free model call used for chat rewrites exist in the pinned OpenClaw build. It reads the installed package only.
 
-Not covered by automated tests: live model behavior, code-mode tool dispatch through the hooks, real channel delivery, and session cleanup against a real gateway. These need a live, explicitly authorized run.
+Not covered by automated tests: live model behavior (including the quality of chat rewrites), code-mode tool dispatch through the hooks, real channel delivery, and session cleanup against a real gateway. These need a live, explicitly authorized run.
 
 ## Build And Package
 

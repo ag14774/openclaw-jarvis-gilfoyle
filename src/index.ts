@@ -3,7 +3,13 @@ import { AsyncResource } from 'node:async_hooks';
 import { Store } from './store.js';
 import { BoardRuntime } from './runtime.js';
 import { Bridge } from './bridge.js';
-import { agentLabel, currentConfig, PRIVATE_GUIDANCE, projectRoleContext } from './role-context.js';
+import {
+  agentLabel,
+  currentConfig,
+  persona,
+  PRIVATE_GUIDANCE,
+  projectRoleContext,
+} from './role-context.js';
 import {
   agentForRole,
   configureTopology,
@@ -206,6 +212,25 @@ export default {
               outsideTurns(async (params) =>
                 (await transcripts()).publishSessionTranscriptUpdateByIdentity(params),
               ),
+            // One tool-free model call as the product manager, with no session.
+            adapt: api.runtime?.subagent?.complete
+              ? outsideTurns(async ({ system, message }) => {
+                  const agentId = topology().productAgentId;
+                  const own = persona(currentConfig(api), agentId);
+                  const result = await api.runtime.subagent.complete({
+                    agentId,
+                    message,
+                    extraSystemPrompt: [
+                      system,
+                      ...(own.length
+                        ? ['Who you are and what you know about the user:', ...own]
+                        : []),
+                    ].join('\n\n'),
+                    timeoutMs: 120 * 1000,
+                  });
+                  return result.text;
+                })
+              : null,
             ...(testHooks.now ? { now: testHooks.now } : {}),
           },
         );

@@ -32,6 +32,7 @@ export async function harness({ config = {} } = {}) {
     sent: [],
     files: [],
     transcript: [],
+    history: {}, // session key -> chat.history messages
     runs: [],
     aborted: [],
     cleaned: [],
@@ -74,6 +75,8 @@ export async function harness({ config = {} } = {}) {
           if (status === 'sent' || status === 'queued') native.sent.push(params);
           return { status };
         }
+        case 'chat.history':
+          return { messages: native.history[params.sessionKey] ?? [] };
         case 'message.action':
           assert.equal(params.action, 'send');
           native.files.push(params);
