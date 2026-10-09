@@ -220,6 +220,7 @@ export default {
                   const result = await api.runtime.subagent.complete({
                     agentId,
                     message,
+                    ...(cfg.rewriteModel ? { model: cfg.rewriteModel } : {}),
                     extraSystemPrompt: [
                       system,
                       ...(own.length

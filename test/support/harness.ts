@@ -7,7 +7,9 @@ export const EPOCH = Date.parse('2026-09-28T09:00:00Z');
 export const MINUTE = 60 * 1000;
 export const ref = (c) => `conv_${c.repeat(32)}`;
 
-export async function harness({ config = {} } = {}) {
+// `complete` stands in for api.runtime.subagent.complete; `workspace` is the product
+// manager's workspace folder.
+export async function harness({ config = {}, complete = null, workspace = null } = {}) {
   let clock = EPOCH;
   let admissionClock = 0;
   const native = {
@@ -167,9 +169,13 @@ export async function harness({ config = {} } = {}) {
       pluginConfig: cfg,
       config: {
         agents: {
-          entries: { main: { identity: { name: 'Jarvis' } }, gilfoyle: { name: 'Gilfoyle' } },
+          entries: {
+            main: { identity: { name: 'Jarvis' }, ...(workspace ? { workspace } : {}) },
+            gilfoyle: { name: 'Gilfoyle' },
+          },
         },
       },
+      ...(complete ? { runtime: { subagent: { complete } } } : {}),
       logger: { warn: (message) => warnings.push(message) },
       registerTool(make) {
         made = make;

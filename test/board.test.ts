@@ -893,6 +893,34 @@ test('a rewrite waits briefly for a busy or changing chat, and a failed one send
   assert.equal(h.native.sent.at(-1).message, '[Quote Desk] Rewrite 4');
 });
 
+test('the rewrite runs as the product manager, with his workspace files and the configured model', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jg-workspace-'));
+  writeFileSync(join(dir, 'SOUL.md'), 'Calm and precise.');
+  writeFileSync(join(dir, 'USER.md'), 'Explain in plain words.');
+  try {
+    const calls = [];
+    const h = await harness({
+      config: { rewriteModel: 'openai/gpt-5.6-terra' },
+      workspace: dir,
+      complete: async (params) => {
+        calls.push(params);
+        return { text: 'Rewritten' };
+      },
+    });
+    await chatProject(h);
+    await h.call('main', JARVIS_DM, { operation: 'notify', project: 'quote-desk', message: 'Hi' });
+    assert.equal(h.native.sent.at(-1).message, 'Rewritten');
+    const [{ agentId, model, extraSystemPrompt }] = calls;
+    assert.deepEqual([agentId, model], ['main', 'openai/gpt-5.6-terra']);
+    assert.match(
+      extraSystemPrompt,
+      /Keep every fact[\s\S]*Calm and precise\.\n\nExplain in plain words\.$/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a long chat keeps the request and the newest messages for the rewrite', async () => {
   const h = await harness();
   const at = h.now();

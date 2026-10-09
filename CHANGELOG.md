@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2026.10.2 - 2026-10-09
 
-- Messages to the project chat are rewritten for the conversation before they are sent. Messages are written in private task sessions that cannot see the chat, so a result arriving days later, or between other replies, could read as out of context. Before the first send, one tool-free model call as the product manager sees the chat since the request, the task and the message as written, together with his identity, character and notes about the user. It keeps the facts and adds only as much background as the user needs. Deliveries run one at a time, and while the chat is mid-reply, or changes during the rewrite, a message is rewritten again shortly, for up to two minutes. If the rewrite fails, the message goes out as written.
+- Messages to the project chat are rewritten for the conversation before they are sent. Messages are written in private task sessions that cannot see the chat, so a result arriving days later, or between other replies, could read as out of context. Before the first send, one tool-free model call as the product manager sees the chat since the request, the task and the message as written, together with his identity, character and notes about the user. It keeps the facts and adds only as much background as the user needs. Deliveries run one at a time, and while the chat is mid-reply, or changes during the rewrite, a message is rewritten again shortly, for up to two minutes. If the rewrite fails, the message goes out as written. The optional `rewriteModel` setting picks a different model for it (the entry then needs `subagent.allowModelOverride`); by default it uses the product manager's own model.
 - `notify` from the project chat sends nothing, as `update_task` already did: the reply is the message.
 
 ## 2026.10.1 - 2026-10-09
