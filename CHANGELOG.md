@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The release workflow uploads to ClawHub without waiting for ClawHub's security review, which once took longer than the 30-minute wait and failed a release that ClawHub later published. The upgrade procedure installs a version once ClawHub lists it.
+
 ## 2026.10.3 - 2026-10-10
 
 - Chat rewrites work: the model call runs within the manager's turn that sent the message. In 2026.10.2 it ran in the board service's own context, which OpenClaw refuses once the service's start has finished ("Gateway is draining"), so every message went out as written. While the chat is busy or changes during the rewrite, that turn now waits and rewrites again, for up to two minutes. Messages the scan sends on its own (stall notices, retries) go out as written.

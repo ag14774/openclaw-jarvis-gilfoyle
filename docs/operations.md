@@ -38,7 +38,7 @@ Each release's [changelog](https://github.com/ag14774/openclaw-jarvis-gilfoyle/b
 
 1. Wait until no task session or worker is running, then [back up the board](recovery.md); any version of the backup script works.
 2. Stop the gateway (`openclaw gateway stop`). If the changelog lists a schema step, apply its exact statements to the board file.
-3. Install the new version: `openclaw plugins install clawhub:openclaw-jarvis-gilfoyle@<version> --force --accept-capabilities`. With the gateway stopped, OpenClaw saves the install for its next start.
+3. Once ClawHub lists the new version (its security review can take a while after the release), install it: `openclaw plugins install clawhub:openclaw-jarvis-gilfoyle@<version> --force --accept-capabilities`. With the gateway stopped, OpenClaw saves the install for its next start.
 4. Start the gateway (`openclaw gateway start`) and check [board health](#inspect-health).
 
 An older version refuses a board with a newer schema, so to go back, restore the backup and install the previous version.

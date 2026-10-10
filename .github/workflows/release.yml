@@ -66,7 +66,7 @@ jobs:
   clawhub:
     needs: github
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -84,4 +84,4 @@ jobs:
           npx --yes clawhub@0.23.3 login --token "$CLAWHUB_TOKEN" --no-browser
           npx --yes clawhub@0.23.3 package publish . --family code-plugin --version "$VERSION" \
             --source-repo "$GITHUB_REPOSITORY" --source-commit "$GITHUB_SHA" --source-ref "$GITHUB_REF_NAME" \
-            --changelog "See https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" --wait
+            --changelog "See https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME"
