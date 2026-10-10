@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The coordination skill asks managers to request a worker's result and how it was checked, not proof of which tools it called.
 - The release workflow uploads to ClawHub without waiting for ClawHub's security review, which once took longer than the 30-minute wait and failed a release that ClawHub later published. The upgrade procedure installs a version once ClawHub lists it.
 
 ## 2026.10.3 - 2026-10-10
