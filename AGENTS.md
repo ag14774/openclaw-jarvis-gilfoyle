@@ -47,6 +47,6 @@ Public documentation uses standard Zensical and publishes from `main` through Gi
 
 1. In a normal PR, run `npm version <X.Y.Z> --no-git-tag-version` and turn the CHANGELOG's Unreleased section into `## X.Y.Z - <date>`. When the release changes the board schema, start that section with the exact statements the operator runs.
 2. After it merges, tag the merge commit on `main` and push the tag: `git tag -a vX.Y.Z -m vX.Y.Z <commit>`, then `git push origin vX.Y.Z`.
-3. The Release workflow checks that the tag, `package.json` and the CHANGELOG agree, runs every check, creates the GitHub release with the package and its checksum, and publishes the version to ClawHub. ClawHub makes it installable after its security review.
+3. The Release workflow checks that the tag, `package.json` and the CHANGELOG agree, runs every check, creates the GitHub release with the package and its checksum, and publishes the version to ClawHub. ClawHub makes it installable after its security review, which the workflow does not wait for; check that ClawHub lists the version before upgrading.
 
 Never move a tag once its release is published; fix a bad release with a new version. A tag whose workflow failed before publishing anything can be deleted and pushed again after the fix.

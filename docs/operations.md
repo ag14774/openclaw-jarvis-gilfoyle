@@ -36,7 +36,7 @@ Do not equate a queued message, a model's summary or a transcript entry with the
 
 Each release's [changelog](https://github.com/ag14774/openclaw-jarvis-gilfoyle/blob/main/CHANGELOG.md) entry says whether it changes the board schema. To upgrade:
 
-1. Wait until no task session or worker is running, then [back up the board](recovery.md); any version of the backup script works.
+1. Check that ClawHub lists the new version (`openclaw plugins search jarvis-gilfoyle`); its security review can take a while after the release. Then wait until no task session or worker is running and [back up the board](recovery.md); any version of the backup script works.
 2. Stop the gateway (`openclaw gateway stop`). If the changelog lists a schema step, apply its exact statements to the board file.
 3. Install the new version: `openclaw plugins install clawhub:openclaw-jarvis-gilfoyle@<version> --force --accept-capabilities`. With the gateway stopped, OpenClaw saves the install for its next start.
 4. Start the gateway (`openclaw gateway start`) and check [board health](#inspect-health).
