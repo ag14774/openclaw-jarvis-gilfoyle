@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The coordination skill asks for repository docs that say each thing once, keep the limits of a check in the PR rather than the docs, and drop what deferred or dropped work left behind unless the user wants a plan kept.
+
 ## 2026.10.4 - 2026-10-10
 
 - The coordination skill asks managers to request a worker's result and how it was checked, not proof of which tools it called.
